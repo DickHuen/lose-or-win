@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>賭海迷途清算機 - 贏定輸？一計就知</title>
+    <!-- 引入 Tailwind CSS 確保畫面現代化同好睇 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col justify-between font-sans">
+
+    <!-- Header -->
+    <header class="border-b border-gray-800 py-6 text-center">
+        <h1 class="text-3xl font-extrabold text-red-500 tracking-wide">🎲 賭海迷途清算機</h1>
+        <p class="text-gray-400 text-sm mt-2">唔好再呃自己，入入呢條數，睇下你贏定輸</p>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-md w-full mx-auto p-6 bg-gray-800 rounded-xl shadow-2xl my-8 mx-4 sm:mx-auto">
+        <div class="space-y-5">
+            <!-- 輸入項 1 -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">估計累計贏過幾多錢 (HKD)？</label>
+                <input type="number" id="winAmount" placeholder="例如: 50000" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-red-500">
+            </div>
+
+            <!-- 輸入項 2 -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">誠實面對！累計輸過幾多錢 (HKD)？</label>
+                <input type="number" id="loseAmount" placeholder="例如: 120000" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-red-500">
+            </div>
+
+            <!-- 輸入項 3 -->
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">花咗幾多小時喺度？(睇盤/研究/賭博時間)</label>
+                <input type="number" id="hoursSpent" placeholder="例如: 200" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-red-500">
+            </div>
+
+            <!-- 按鈕 -->
+            <button onclick="calculateDestiny()" class="w-full bg-gradient-to-r from-red-600 to-red-800 hover:from-red-500 hover:to-red-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 shadow-md cursor-pointer">
+                📊 開始清算真相
+            </button>
+        </div>
+
+        <!-- 結果展示區域（預設隱藏） -->
+        <div id="resultArea" class="hidden mt-8 border-t border-gray-700 pt-6 space-y-4">
+            <h2 class="text-xl font-bold text-center text-yellow-400">🚨 清算結果 🚨</h2>
+            
+            <div class="bg-gray-900 p-4 rounded-lg space-y-2">
+                <p class="text-sm text-gray-400">總體淨損益：<span id="netProfit" class="text-lg font-bold"></span></p>
+                <p class="text-sm text-gray-400">你嘅「賭博真實時薪」：<span id="hourlyRate" class="text-lg font-bold"></span></p>
+            </div>
+
+            <!-- 勸退核心金句 -->
+            <div class="bg-red-950/40 border border-red-900/50 p-4 rounded-lg">
+                <p class="text-sm font-semibold text-red-400 mb-1">💡 清算機給你的真心話：</p>
+                <p id="punchline" class="text-gray-200 text-base leading-relaxed"></p>
+            </div>
+
+            <!-- 戒賭求助資源 -->
+            <div class="text-xs text-gray-500 text-center space-y-1 pt-2">
+                <p>賭博無必勝，睇清真相，回頭是岸。</p>
+                <p>香港戒賭熱線（平和基金）：1834 633</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer / 賺外快放廣告或打賞位 -->
+    <footer class="border-t border-gray-800 py-6 text-center text-xs text-gray-500">
+        <p>© 2026 賭海迷途清算機. All Rights Reserved.</p>
+        <p class="mt-2">如果呢個網站幫到你/你朋友認清真相，歡迎 <a href="#" class="text-yellow-500 hover:underline">請我飲杯咖啡 ☕</a> 支持維護網站！</p>
+    </footer>
+
+    <!-- JavaScript 邏輯 -->
+    <script>
+        function calculateDestiny() {
+            const win = parseFloat(document.getElementById('winAmount').value) || 0;
+            const lose = parseFloat(document.getElementById('loseAmount').value) || 0;
+            const hours = parseFloat(document.getElementById('hoursSpent').value) || 0;
+
+            const net = win - lose;
+            let hourly = 0;
+            if (hours > 0) {
+                hourly = (net / hours).toFixed(1);
+            }
+
+            // 獲取 DOM 元素
+            const resultArea = document.getElementById('resultArea');
+            const netProfitEl = document.getElementById('netProfit');
+            const hourlyRateEl = document.getElementById('hourlyRate');
+            const punchlineEl = document.getElementById('punchline');
+
+            // 顯示結果區域
+            resultArea.classList.remove('hidden');
+
+            // 1. 渲染淨損益
+            if (net < 0) {
+                netProfitEl.innerHTML = `-${Math.abs(net)} HKD`;
+                netProfitEl.className = "text-lg font-bold text-red-500";
+            } else if (net > 0) {
+                netProfitEl.innerHTML = `+${net} HKD`;
+                netProfitEl.className = "text-lg font-bold text-green-500";
+            } else {
+                netProfitEl.innerHTML = `0 HKD (打和)`;
+                netProfitEl.className = "text-lg font-bold text-gray-300";
+            }
+
+            // 2. 渲染真實時薪
+            if (hours > 0) {
+                if (net < 0) {
+                    hourlyRateEl.innerHTML = `${hourly} HKD / 小時 (你在貼錢打工！)`;
+                    hourlyRateEl.className = "text-lg font-bold text-red-400";
+                } else {
+                    hourlyRateEl.innerHTML = `${hourly} HKD / 小時`;
+                    hourlyRateEl.className = "text-lg font-bold text-green-400";
+                }
+            } else {
+                hourlyRateEl.innerHTML = "無輸入時間";
+                hourlyRateEl.className = "text-lg font-bold text-gray-500";
+            }
+
+            // 3. 根據結果派發「勸退金句」
+            let text = "";
+            if (net < 0) {
+                const absNet = Math.abs(net);
+                if (absNet <= 10000) {
+                    text = "輸咗幾千一萬，當買個教訓。依家好回頭啦！你再想贏返呢筆錢，只會愈踩愈深。用呢幾千蚊去食餐好嘅、買份禮物畀屋企人或者女朋友，好過送畀馬會同長官！";
+                } else if (absNet > 10000 && absNet <= 100000) {
+                    text = `你已經送咗 $${absNet} 畀莊家喇。知唔知呢筆錢夠你過日本旅行幾次，或者買到好多張珍貴嘅卡牌收藏？你嘅真實時薪係 ${hourly} 蚊，去盛記洗碗都高薪過你！醒啦，莊家有大數據同數學優勢，你單憑運氣點贏？收手當贏！`;
+                } else {
+                    text = `警報！你已經輸咗成 $${absNet}！呢個數字已經開始影響你嘅人生同未來。唔好再同自己講『下一條纜實中』或者『追埋呢條大路就收手』，呢個係無底深潭。即刻刪除所有賭博 App，搵家人坦白或者打戒賭熱線。坦然面對失敗，重新儲錢，人生仲有救！`;
+                }
+            } else if (net > 0) {
+                text = "雖然你目前好彩贏緊少少，但大數法則（Law of Large Numbers）話畀你聽：只要你繼續賭落去，長線期望值（-EV）一定會令你將贏返嚟嘅加倍嘔返出嚟。趁依家仲贏緊，立刻攞錢走人，永遠唔好再賭，咁你先係真正贏莊家錢嘅人！";
+            } else {
+                text = "打和？你以為自己無輸？你睇下你浪費咗幾多個鐘頭！呢 ${hours} 小時拿去返正職、甚至瞓覺、打機，個價值都高過你在這裏看著賠率心驚肉跳。時間就是金錢，你已經輸了時間！";
+            }
+
+            punchlineEl.innerText = text;
+        }
+    </script>
+</body>
+</html>
