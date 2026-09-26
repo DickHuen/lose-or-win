@@ -1,7 +1,7 @@
 # BTC-PERP bot configuration.
 # Grok Bot must NEVER edit this file. Changes come back as a new zip with a
 # higher config_version and a CHANGELOG entry.
-config_version: "1.0.0"
+config_version: "1.0.1"
 
 market:
   # The instrument is resolved from GET /v1/info/instruments on every start.
@@ -36,7 +36,10 @@ binance:
   h4_candles_to_load: 300
   funding_days_to_load: 400      # spec minimum 365
 
+# Alerts go to the owner through Grok Bot: every alert is stored and `python3 run.py alerts`
+# prints the new ones for Grok Bot to forward. Telegram is optional and OFF.
 telegram:
+  enabled: false
   api_base: "https://api.telegram.org"
   http_timeout_seconds: 20
   max_message_chars: 3900

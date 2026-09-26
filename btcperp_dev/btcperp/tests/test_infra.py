@@ -54,7 +54,7 @@ def test_config_validation(cfg_dict):
     with pytest.raises(ConfigError):
         config_from_dict(missing)
     c = config_from_dict(cfg_dict)
-    assert c.risk.leverage == 3 and c.config_version == "1.0.0"
+    assert c.risk.leverage == 3 and c.config_version == cfg_dict["config_version"]
 
 
 def test_strategy_code_has_no_hardcoded_strategy_numbers():
@@ -216,7 +216,9 @@ def test_cli_smoketest_with_mock(tmp_root):
     rc = main(["smoketest"], paths=paths, clock=clock, factories=_factories(holder, tg))
     out = list((tmp_root / "data" / "smoketest").glob("smoketest_*.json"))
     assert out and rc == 0, out[0].read_text()[:3000] if out else "no smoketest output"
-    assert any("SMOKETEST PASS" in m for m in tg.sent)
+    import json as _json
+
+    assert _json.loads(out[0].read_text())["ok"] is True
 
 
 def test_monthly_only_first_sunday(tmp_root, capsys):
@@ -228,3 +230,35 @@ def test_monthly_only_first_sunday(tmp_root, capsys):
     clock.set(hkt(2026, 10, 4, 20, 30))                # first Sunday of October 2026
     assert main(["report", "monthly", "--only-first-sunday"], paths=paths, clock=clock, factories=f) == 0
     assert (tmp_root / "data" / "reports" / "monthly" / "monthly_2026-09.md").exists()
+
+
+def test_alerts_command_delivers_once(tmp_root, capsys):
+    paths, clock, holder, tg = _setup_cli(tmp_root)
+    f = _factories(holder, tg)
+    holder["ex"].raise_on["get_instruments"] = RuntimeError("exchange exploded")
+    assert main(["manage"], paths=paths, clock=clock, factories=f) == 1
+    assert "NEW ALERTS FOR OWNER" in capsys.readouterr().out
+    assert main(["pause"], paths=paths, clock=clock, factories=f) == 0
+    capsys.readouterr()
+    assert main(["alerts"], paths=paths, clock=clock, factories=f) == 0
+    out = capsys.readouterr().out
+    assert "PING OWNER" in out and "ERROR in manage" in out and "paused" in out
+    assert "PM_PROXY" not in out and "test-secret-value-123" not in out
+    assert main(["alerts"], paths=paths, clock=clock, factories=f) == 0
+    assert "no new alerts" in capsys.readouterr().out
+
+
+def test_telegram_disabled_by_config_even_with_token(cfg):
+    from perpbot.telegram import Telegram
+
+    tg = Telegram(cfg, "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "42")
+    assert cfg.telegram.enabled is False and tg.enabled is False
+    assert tg.send("x") is False and tg.get_updates(None) == []
+
+
+def test_alerts_stored_when_telegram_disabled(world):
+    w = world(hkt(2026, 10, 5, 8, 30))
+    w.tg.enabled = False
+    w.engine().cmd_pause()
+    rows = w.store.query("SELECT kind, sent FROM alerts")
+    assert rows and rows[-1]["kind"] == "paused"

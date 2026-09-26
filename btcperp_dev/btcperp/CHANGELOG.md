@@ -3,6 +3,19 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.0.1 - 2026-09-26 (config 1.0.1)
+
+- Telegram notifications turned off (`telegram.enabled: false`). Grok Bot is the alert channel.
+- New command `alerts`: prints every new alert once (`PING OWNER ...`) for Grok Bot to forward, and
+  marks it delivered (new append-only table `alert_deliveries`). Errors are stored as alerts too.
+  Every other command ends with `NEW ALERTS FOR OWNER: n` when alerts are waiting.
+- Reports are printed and saved; Grok Bot forwards them (START_HERE.md section 4).
+- The daily decision is no longer sent as an alert (it is in the decision log and the daily report).
+- Telegram /pause /kill /status no longer used: tell Grok Bot "pause", "stop" or "status".
+- `.env` no longer needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. Strategy and risk unchanged.
+- Upgrade: pause -> unzip -> install.py -> status -> resume after confirmation; add `alerts` after
+  every routine (START_HERE.md section 4).
+
 ## 1.0.0 - 2026-09-26 (config 1.0.0, calendar 2026-09-26)
 
 Initial release.

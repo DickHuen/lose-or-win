@@ -1,7 +1,7 @@
 # btcperp - BTC-PERP bot for Polymarket Perps
 
 Daily hybrid trend/structure strategy on BTC-PERP with exchange-side bracket stop-loss/take-profit,
-fixed-risk sizing, gates, kill switches, full append-only logging and Telegram alerts.
+fixed-risk sizing, gates, kill switches, full append-only logging and alerts delivered through Grok Bot.
 It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `START_HERE.md`.
 
 ## Commands (`python3 run.py <command>`)
@@ -10,7 +10,8 @@ It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `ST
 |---|---|
 | `decide` | 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. |
 | `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. Never opens. |
-| `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Telegram reports; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
+| `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Printed reports (Grok Bot forwards them); daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
+| `alerts` | Print every new alert once (`PING OWNER ...`) and mark it delivered. Grok Bot runs it after every routine and pings the owner. |
 | `backup` | SQLite backup (+config) into `data/backups/` (last 14 + first of each month kept). |
 | `status` | State, position, SL/TP, equity, drawdown, kill switches, last decision. |
 | `pause` | Stop new entries; keep position and SL/TP. |
@@ -21,7 +22,7 @@ It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `ST
 
 Every command takes an exclusive file lock (`data/btcperp.lock`), logs to `logs/btcperp_YYYY-MM-DD.log`
 (secrets redacted), writes a start/end row to the run log, and on error exits non-zero and sends a
-Telegram alert with the last log lines.
+stored alert with the last log lines (shown by `alerts`). Telegram is optional and off (`telegram.enabled`).
 
 ## Every trading run starts with reconcile
 
@@ -33,7 +34,7 @@ Telegram alert with the last log lines.
    order; if that fails too: "CLOSE FAILURE" alert.
 3. When flat, leftover TP/SL/reduce-only orders are cancelled by id (never cancel-all, never auto-cancel).
 4. `cumulative_funding` is recorded; fills and funding payments are synced.
-5. Telegram /pause, /kill, /status from the configured chat id are processed.
+5. (Only if Telegram is enabled in config: /pause, /kill, /status from the configured chat id.)
 6. Equity log and kill switches: drawdown 15% of mark-to-market equity from peak (deposits/withdrawals
    adjust the peak) -> close and pause; losing streak with cumulative loss of 20% of equity -> pause, keep
    SL/TP; 25-trade size-weighted expectancy < 0 -> warning. Proxy key expiry alert 5 days ahead.
@@ -67,7 +68,7 @@ latency), `fills`, `funding_payments`, `trades` (open/update/close with exit rea
 hours, fees, funding, net PnL, R), `manage_log`, `equity_log`, `state_log`, `position_snapshots`,
 `market_snapshots` (mark, index, funding, spread, depth), `pm_klines_1h`/`pm_klines_1d`/`pm_funding`
 (our own Polymarket dataset, backfilled every run), `bn_klines_1d`/`bn_klines_4h`/`bn_funding`,
-`shadow_log`, `alerts`, `telegram_updates`, `flows`.
+`shadow_log`, `alerts`, `alert_deliveries`, `telegram_updates`, `flows`.
 
 Shadow tracking (simulation only): each day a gate blocked or reduced a trade gets a hypothetical trade
 (bracket outcome on Polymarket 1h candles); parallel variants `live_rules`, `v2_breakeven` (one-time SL

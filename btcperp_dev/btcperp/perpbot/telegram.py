@@ -24,14 +24,14 @@ class Telegram:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token and self.chat_id)
+        return bool(self._t.get("enabled", False) and self.token and self.chat_id)
 
     def _url(self, method: str) -> str:
         return f"{self._t.api_base.rstrip('/')}/bot{self.token}/{method}"
 
     def send(self, text: str) -> bool:
         if not self.enabled:
-            log.info("telegram disabled; message not sent: %s", text[:200])
+            log.debug("telegram disabled; message not sent")
             return False
         limit = int(self._t.max_message_chars)
         chunks = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]

@@ -129,6 +129,8 @@ class Engine:
         return utc_day(self.now()).isoformat()
 
     def alert(self, kind: str, text: str, dedupe_key: str | None = None) -> None:
+        """Store an alert for the owner. `python3 run.py alerts` prints undelivered alerts for Grok Bot
+        to forward; Telegram is used only if enabled in config."""
         if dedupe_key and self.rec.alert_sent(dedupe_key):
             return
         msg = f"[btcperp] {kind}: {text}\n({fmt_hkt(self.now())})"
@@ -1184,7 +1186,7 @@ class Engine:
                                   reason=f"insufficient data: {e}", data={})
                 raise EngineError(f"insufficient market data for decision: {e}") from e
             self.rec.write_intent(day, intent)   # written BEFORE any order is placed
-            self.alert("decision", self.decision_text(intent), dedupe_key=f"decision:{day}:{intent['action']}")
+            log.info("decision: %s", self.decision_text(intent))
         out["plan"] = intent
         out["actions"] = self.execute_intent(day, intent, allow_entry=True, window_open=True)
         self.update_shadow()

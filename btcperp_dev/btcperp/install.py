@@ -78,7 +78,7 @@ def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if rc == 0:
         print(f"\nINSTALL PASS (btcperp v{version})")
-        print("Next step: fill in .env (proxy key, proxy secret, wallet address, Telegram token + chat id),")
+        print("Next step: fill in .env (proxy key, proxy secret, wallet address),")
         print("then run:  python3 run.py smoketest   and report the result. Do NOT schedule routines before GO.")
         return 0
     print(f"\nINSTALL FAIL (btcperp v{version}): selftest failed - send logs/ and the output above to the owner.")

@@ -75,6 +75,7 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("binance.daily_candles_to_load", int, lambda v: 200 <= v <= 1000),
     ("binance.h4_candles_to_load", int, lambda v: 60 <= v <= 1000),
     ("binance.funding_days_to_load", int, lambda v: v >= 365),
+    ("telegram.enabled", bool, None),
     ("telegram.api_base", str, None),
     ("schedule.decide_times_hkt", list, None),
     ("schedule.manage_times_hkt", list, None),

@@ -51,7 +51,11 @@ def test_binance_funding_pagination(cfg):
     assert len(calls) == 2 and calls[1] == out[999][0] + 1
 
 
-def test_telegram_send_and_updates(cfg, caplog):
+def test_telegram_send_and_updates(cfg_dict, caplog):
+    from perpbot.config import config_from_dict
+
+    cfg_dict["telegram"]["enabled"] = True     # optional channel, off in the shipped config
+    cfg = config_from_dict(cfg_dict)
     sent = []
     token = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
 

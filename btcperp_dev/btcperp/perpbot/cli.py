@@ -1,10 +1,11 @@
 """Command-line entry points (the only things Grok Bot runs).
 
   decide | manage | report daily|weekly|monthly [--month YYYY-MM] | backup | status
-  pause | kill | resume | selftest | smoketest | version
+  pause | kill | resume | alerts | selftest | smoketest | version
 
-Every command: exclusive file lock, full logging, non-zero exit code and a
-Telegram alert on error.
+Every command: exclusive file lock, full logging, non-zero exit code on error.
+Alerts (including errors) are stored; `alerts` prints the undelivered ones so
+Grok Bot can ping the owner. Telegram is optional (off by default).
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ class Factories:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="btcperp", description="BTC-PERP bot for Polymarket Perps")
     sub = p.add_subparsers(dest="command", required=True)
-    for c in ("decide", "manage", "backup", "status", "pause", "kill", "resume", "selftest", "version"):
+    for c in ("decide", "manage", "backup", "status", "pause", "kill", "resume", "alerts", "selftest", "version"):
         sub.add_parser(c)
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["daily", "weekly", "monthly"])
@@ -83,7 +84,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         print(code_version())
         return EXIT_OK
 
-    # --- config / secrets (errors here still try to alert via Telegram)
+    # --- config / secrets
     try:
         secrets = load_secrets(paths.env_file)
     except SecretsError as e:
@@ -94,7 +95,6 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         calendar = load_calendar(paths.root / cfg.gates.calendar_file)
     except (ConfigError, CalendarError) as e:
         print(f"CONFIG ERROR: {e}", file=sys.stderr)
-        _raw_alert(secrets, f"[btcperp] config error in {command}: {e}")
         return EXIT_CONFIG
     log_path, _ = setup_logging(paths.logs_dir, clock, cfg.logging.level, secrets.secret_values())
     tg = (factories.telegram or (lambda c, s: Telegram(c, s.telegram_token, s.telegram_chat_id)))(cfg, secrets)
@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         lock.acquire(float(cfg.lock.wait_seconds))
     except LockTimeout as e:
         log.error("%s", e)
+        print(f"NOT RUN: {command}: {e}")
         tg.send(f"[btcperp] {command} not run: {e}")
         return EXIT_LOCK
 
@@ -159,7 +160,19 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
                 log.debug("close failed", exc_info=True)
         log.info("=== %s end: %s (%.1fs)", command, status, dur)
         if status == "error":
-            tg.send(f"[btcperp] ERROR in {command}: {err}\nlog: {log_path}\n--- last log lines ---\n{_redacted_tail(log_path)}")
+            text = f"[btcperp] ERROR in {command}: {err}\nlog: {log_path}\n--- last log lines ---\n{_redacted_tail(log_path)}"
+            try:
+                sent = tg.send(text)
+                store.insert("alerts", kind="ERROR", dedupe_key=None, sent=int(sent), text=text[:4000])
+            except Exception:  # noqa: BLE001
+                log.exception("could not store error alert")
+        if command != "alerts":
+            try:
+                n = len(pending_alerts(store))
+                if n:
+                    print(f"NEW ALERTS FOR OWNER: {n} (run: python3 run.py alerts)")
+            except Exception:  # noqa: BLE001
+                log.debug("pending alert count failed", exc_info=True)
         store.close()
         lock.release()
     return rc
@@ -172,16 +185,22 @@ def _redacted_tail(path: Any) -> str:
     return RedactFilter().redact(t)[-3000:]
 
 
-def _raw_alert(secrets: Any, text: str) -> None:
-    if not (secrets.telegram_token and secrets.telegram_chat_id):
-        return
-    try:
-        import httpx
+def pending_alerts(store: Store) -> list[dict[str, Any]]:
+    return store.query("SELECT id, ts_hkt, kind, text FROM alerts WHERE id NOT IN "
+                       "(SELECT alert_id FROM alert_deliveries) ORDER BY id")
 
-        httpx.post(f"https://api.telegram.org/bot{secrets.telegram_token}/sendMessage",
-                   data={"chat_id": secrets.telegram_chat_id, "text": text}, timeout=15)
-    except Exception:  # noqa: BLE001
-        pass
+
+def deliver_alerts(store: Store) -> list[str]:
+    """Print undelivered alerts once, for Grok Bot to forward to the owner, and mark them delivered."""
+    out = []
+    for a in pending_alerts(store):
+        line = f"PING OWNER #{a['id']} [{a['ts_hkt']}] {a['kind']}: {a['text']}"
+        print(line)
+        out.append(line)
+        store.insert_ignore("alert_deliveries", alert_id=a["id"])
+    if not out:
+        print("no new alerts")
+    return out
 
 
 def _default_exchange(cfg: Any, secrets: Any) -> Any:
@@ -235,6 +254,8 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
         out = {"result": engine.cmd_kill()}
     elif command == "resume":
         out = {"result": engine.cmd_resume()}
+    elif command == "alerts":
+        return {"alerts": deliver_alerts(engine.store)}
     elif command == "backup":
         dest = backup(engine.store, paths, engine.now())
         out = {"backup": str(dest)}
@@ -258,7 +279,6 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
         text = summary_text(ok, results)
         print(text)
         print(json.dumps(results, indent=2, default=str)[:20000])
-        engine.tg.send(text)
         return {"ok": ok}
     else:
         raise ValueError(f"unknown command {command}")

@@ -26,7 +26,7 @@ ZH = {
     "b_position_sl_with_bracket": "(b) 括號止損與倉位止損能否並存", "close": "減倉平倉",
     "c_leftovers_after_close": "(c) 平倉後剩餘訂單是否自動清除", "d_funding_after_close": "(d) 平倉後能否讀取累計資金費",
     "a_proxy_withdraw": "(a) 代理金鑰能否提款", "e_cancel_only": "(e) 只可撤單模式下的下單回應",
-    "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知", "server_time": "伺服器時間同步",
+    "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知（已停用）", "server_time": "伺服器時間同步",
 }
 
 
@@ -305,6 +305,8 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
                     "it as 'order not placed' (no entry; SL re-place failure -> close attempt -> alert)."}))
 
     def s_tg() -> Any:
+        if not engine.tg.enabled:
+            return True, "Telegram disabled by config; alerts are delivered through `python3 run.py alerts`"
         ok = engine.tg.send("btcperp smoketest: Telegram OK")
         engine.tg.get_updates(None)
         return ok, {"sent": ok}

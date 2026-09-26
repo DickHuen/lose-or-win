@@ -519,5 +519,5 @@ def test_reports_generate(world, tmp_path):
     assert "Trades: 1" in text and w.tg.docs[-1].endswith(".zip")
     out = Reporter(w.engine(), paths).monthly("2026-10")
     md = (paths.reports_dir / "monthly" / "monthly_2026-10.md").read_text()
-    assert "by_exit_reason" in md and "code test / config 1.0.0" in md and "shadow_vs_live" in md
+    assert "by_exit_reason" in md and f"code test / config {w.cfg.config_version}" in md and "shadow_vs_live" in md
     assert "monthly report" in out
