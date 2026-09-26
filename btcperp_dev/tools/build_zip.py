@@ -16,6 +16,7 @@ DIST = DEV / "dist"
 TOP_FILES = ["run.py", "install.py", "requirements.txt", "VERSION", "README.md", "START_HERE.md", "API_NOTES.md",
              "CHANGELOG.md", "REVIEW_v1.1.0.md", ".env.example", "config/config.yaml", "config/calendar.yaml"]
 CODE_DIRS = ["perpbot", "tests"]
+BAT_DIR = "windows"                      # Windows shortcuts: packaged with CRLF line endings
 FORBIDDEN_PARTS = {".env", "data", "logs", "venv", "__pycache__", ".git", ".pytest_cache"}
 FIXED_TIME = (2026, 9, 26, 0, 0, 0)
 
@@ -25,6 +26,8 @@ def collect() -> list[str]:
     for d in CODE_DIRS:
         for p in sorted((SRC / d).rglob("*.py")):
             files.append(p.relative_to(SRC).as_posix())
+    for p in sorted((SRC / BAT_DIR).glob("*.bat")):
+        files.append(p.relative_to(SRC).as_posix())
     for f in files:
         parts = set(Path(f).parts)
         if parts & FORBIDDEN_PARTS or f.endswith((".pyc", ".sqlite3", ".log")):
@@ -47,7 +50,12 @@ def main() -> int:
             info = zipfile.ZipInfo(f"btcperp/{f}", date_time=FIXED_TIME)
             info.external_attr = (0o755 if f in ("run.py", "install.py") else 0o644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            z.writestr(info, (SRC / f).read_bytes())
+            data = (SRC / f).read_bytes()
+            if f.endswith(".bat"):
+                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                if any(b > 127 for b in data):
+                    raise SystemExit(f"{f}: .bat files must be plain ASCII (cmd.exe code pages)")
+            z.writestr(info, data)
         info = zipfile.ZipInfo("btcperp/MANIFEST.txt", date_time=FIXED_TIME)
         info.external_attr = 0o644 << 16
         info.compress_type = zipfile.ZIP_DEFLATED

@@ -1,7 +1,7 @@
 # API_NOTES - Polymarket Perps (BTC-PERP)
 
 Written 2026-09-26 for btcperp v1.0.0; updated for v1.1.0 after the independent review. **Every answer below is `untested`** until `smoketest`
-confirms it live on the Grok Bot computer (the smoketest prints a live answer for (a)-(e)).
+confirms it live on the bot computer (the smoketest prints a live answer for (a)-(e)).
 
 ## Sources and how they were read
 
@@ -148,7 +148,7 @@ no entry that day after the retry; if an SL cannot be re-placed it tries to clos
 4. the raw geoblock response (`region`)
 5. whether balances include isolated margin (`equity_formula`)
 6. the raw `liquidation_price` (`open_bracket.liquidation_price_raw`)
-7. deposit/withdrawal timing: `python3 run.py flowwatch --minutes 30` while the owner makes a small deposit
+7. deposit/withdrawal timing: `python run.py flowwatch --minutes 30` while the owner makes a small deposit
 
 ## Binance (indicator data)
 

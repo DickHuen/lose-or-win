@@ -171,7 +171,12 @@ def test_cli_pause_resume_status_kill(tmp_root, capsys):
     assert {"pause", "status", "resume", "kill", "manage", "backup", "report_daily"} <= starts
     ends = s.query("SELECT status FROM runs WHERE event='end'")
     assert all(r["status"] == "ok" for r in ends)
-    assert not (tmp_root / ".env").read_text() in (tmp_root / "data" / "btcperp.sqlite3").read_bytes().decode("latin1")
+    s.close()
+    raw = b"".join(p.read_bytes() for p in (tmp_root / "data").glob("btcperp.sqlite3*"))   # db + WAL
+    for line in (tmp_root / ".env").read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key in ("PM_PROXY_PRIVATE_KEY", "PM_PROXY_SECRET", "TELEGRAM_BOT_TOKEN"):
+            assert value.encode() not in raw, key
 
 
 def test_cli_error_exit_code_and_alert(tmp_root):

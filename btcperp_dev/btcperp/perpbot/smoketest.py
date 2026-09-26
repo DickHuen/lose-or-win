@@ -1,4 +1,4 @@
-"""Live smoketest at minimum size. Run by Grok Bot BEFORE going live (never from the dev laptop).
+"""Live smoketest at minimum size. Run on the bot computer BEFORE going live (2_Smoketest.bat).
 
 Steps: read prices, region check, credentials, 3x isolated, place+cancel one order,
 open+close one minimum position with bracket SL/TP, and live answers to API_NOTES (a)-(e)
@@ -398,7 +398,7 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
 
     def s_tg() -> Any:
         if not engine.tg.enabled:
-            return True, "Telegram disabled by config; alerts are delivered through `python3 run.py alerts`"
+            return True, "Telegram disabled by config; alerts go to the dashboard and Windows notifications"
         ok = engine.tg.send("btcperp smoketest: Telegram OK")
         engine.tg.get_updates(None)
         return ok, {"sent": ok}

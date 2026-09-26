@@ -3,6 +3,36 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.2.0 - 2026-09-26 (config 1.2.0) - Windows edition
+
+The bot now runs on the owner's Windows PC instead of Grok Bot. Strategy, risk rules and all
+trading logic are unchanged.
+
+- Scheduling: new `schedule install|remove|list|show` command registers the routines in Windows Task
+  Scheduler (`\btcperp\` folder, runs `pythonw.exe` without a console, as the logged-on user, wakes the PC,
+  starts late after a missed start, never overlaps; HKT converted to the PC's time zone; first run is the
+  next future time). `schedule install` starts the dashboard task; `schedule remove` stops it.
+- Dashboard: new `dashboard` command, `http://127.0.0.1:8765` (loopback only, Host check, per-server token
+  for POSTs, exclusive port on Windows). Read-only; shows state, equity, kill switches, position with SL/TP,
+  latest decision, equity curve, statistics, trades, alerts, runs, calendar and shadow results.
+- New read-only `snapshot` command (new append-only table `dash_snapshots`) for the dashboard's
+  "refresh from exchange": no orders, no state change; 5 s lock wait; failures logged, never alerted.
+- Notifications: every alert (every trade, SL/TP change, kill switch, warning, error, lock timeout) pops up a
+  Windows toast (`notifications.windows_toast: true`); the dashboard lists all alerts with read/unread.
+  `alerts` still prints unread alerts. Telegram stays off.
+- `windows\*.bat` shortcuts (CRLF, ASCII): install, secrets, smoketest, go-live, dashboard, status, pause,
+  kill, resume, alerts, daily report, schedule check/remove. Kill, resume, go-live and remove ask for a typed
+  confirmation.
+- `install.py`: Windows next steps; stops/restarts the background dashboard during an upgrade; removes stale
+  files in `windows\` too. `run.py` forces UTF-8 output. Logging skips the console under `pythonw.exe`.
+- Alert texts and docs no longer refer to Grok Bot. START_HERE.md rewritten in Traditional Chinese for Windows.
+- Tests: +29, 164 in total (Task Scheduler XML, time conversion, toasts, snapshot read-only, dashboard summary / Host / token
+  / refresh throttle, quiet snapshot failures). Two redaction tests now also read the SQLite WAL file.
+  The test suite never pops real toasts (`BTCPERP_NO_TOAST`).
+- Moving from Grok Bot: stop the Grok Bot routines first (only one computer may run the bot), then install
+  this version on Windows (START_HERE.md). Copy `data\` from the old computer only if you want to keep the
+  history; otherwise start fresh.
+
 ## 1.1.0 - 2026-09-26 (config 1.1.0)
 
 Changes from the independent review (full item-by-item list in `REVIEW_v1.1.0.md`). Strategy rules unchanged.

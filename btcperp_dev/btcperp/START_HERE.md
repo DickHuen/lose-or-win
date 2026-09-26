@@ -1,143 +1,173 @@
-# START_HERE - instructions for Grok Bot (paste this whole file into Grok Bot)
+# START_HERE：喺你部 Windows 電腦行 btcperp
 
-You are operating a live BTC-PERP trading bot on Polymarket Perps for me. It trades real money.
-Follow these instructions exactly. All times are Hong Kong time (HKT, UTC+8) unless marked UTC.
+呢個 bot 會用真錢，喺 Polymarket Perps 自動交易 BTC-PERP。佢喺你自己部 Windows 電腦上面行：
+由「工作排程器」（Task Scheduler）定時啟動，喺瀏覽器 dashboard 睇狀態，有交易或者有事就彈 Windows 通知。
+所有時間都係香港時間（HKT, UTC+8），除非寫明 UTC。
 
-## 1. Install
+> 重要規則（一直有效）
+> - 主錢包私鑰永遠唔好放入 `.env`，亦唔好畀任何人。bot 只用 Polymarket Perps 嘅 **proxy key**。
+> - 唔好用 VPN 或者 proxy 去繞過地區限制。
+> - 唔好喺同一個 Polymarket Perps 戶口手動落單：bot 會當係佢唔認識嘅倉，接管或者平倉。
+> - 持倉期間唔好入金或者提款。
+> - 唔好改 `perpbot\`、`config\` 入面任何檔案。要改嘢就搵 Claude 出新版本 zip（版本號會升，CHANGELOG 會寫低）。
+> - `.env` 同佢嘅截圖永遠唔好傳畀任何人（包括 Claude）。
 
-I have uploaded `btcperp_vX.Y.Z.zip` (X.Y.Z = the version in the file name). On your Linux computer:
+---
 
-```
-cd ~
-unzip -o btcperp_vX.Y.Z.zip -d ~/          # creates / updates ~/btcperp
-cd ~/btcperp
-python3 install.py
-```
+## 1. 準備部電腦（只做一次）
 
-(If `unzip` is not installed, use `python3 -m zipfile -e btcperp_vX.Y.Z.zip ~/` instead.)
+1. **安裝 Python 3.12**：去 https://www.python.org/downloads/windows/ 下載 「Windows installer (64-bit)」。
+   安裝第一版**記得剔「Add python.exe to PATH」**，然後撳「Install Now」。
+2. **時區**：設定 → 時間與語言 → 日期與時間 → 時區揀「(UTC+08:00) 香港特別行政區」，並開「自動設定時間」。
+   （唔係香港時區都行得，bot 會自動換算，但建議用香港時區。）
+3. **電源**（好重要，電腦瞓咗 bot 就唔會行）：
+   - 最簡單：設定 → 系統 → 電源 → 「插電時，在此時間後讓裝置進入睡眠狀態」揀 **永不**。
+   - 如果一定要瞓：控制台 → 電源選項 → 變更計劃設定 → 變更進階電源設定 → 睡眠 →
+     **允許喚醒計時器 → 啟用**。排程設定咗「喚醒電腦執行」。
+   - Notebook：插住電，「合上蓋時」揀「不執行任何動作」。
+4. **保持登入**：bot 只會喺你登入咗 Windows 嘅時候行。鎖螢幕（Win + L）冇問題；**登出或者關機就唔會行**。
+   Windows Update 自動重新開機之後，要登入一次 bot 先會繼續（建議喺 Windows Update 設定「使用時段」）。
+5. **網絡**：正常家用網絡。唔好開 VPN / proxy。
 
-Report the result to me: the last lines of the output (`INSTALL PASS` or `INSTALL FAIL`) and the
-version. If it fails, send me the full output.
+## 2. 安裝（或者升級）
 
-## 2. Secrets
+1. 將 `btcperp_vX.Y.Z.zip` 放喺「下載」。**先右撳個 zip → 內容 → 剔「解除封鎖」→ 確定**
+   （唔剔的話，之後每次撳 .bat 都可能彈安全警告）。
+2. 右撳 zip → 「解壓縮全部」→ 目的地打 `C:\` → 解壓縮。
+   完成之後應該有 `C:\btcperp\run.py` 同 `C:\btcperp\windows\` 呢個資料夾。
+3. 開 `C:\btcperp\windows\`，雙擊 **`1_Install.bat`**。
+   佢會建立 `venv`、安裝指定版本嘅套件，再行單元測試。最後見到 **`INSTALL PASS (btcperp v…)`** 就得。
+   如果見到 `INSTALL FAIL`，將個畫面截圖畀 Claude。
 
-Ask me for these values and write them ONLY into `~/btcperp/.env` (the file already exists; keep its
-format `NAME=value`, one per line):
+## 3. 填 proxy key（`.env`）
 
-- `PM_PROXY_PRIVATE_KEY` - the Polymarket Perps proxy signer private key
-- `PM_PROXY_SECRET` - the proxy API secret that was returned when the proxy was created
-- `PM_WALLET_ADDRESS` - my main wallet ADDRESS (public address only; never ask for its private key)
-- optional `PM_PROXY_EXPIRES_AT` (e.g. `2026-10-26T00:00:00Z`)
+雙擊 **`windows\Edit_Secrets.bat`**，會用記事本開 `C:\btcperp\.env`。要填四個值（格式係 `名=值`，一行一個）：
 
-The bot does not use Telegram. YOU are my notification channel (see section 4).
+| 名 | 係咩 |
+|---|---|
+| `PM_PROXY_PRIVATE_KEY` | Polymarket Perps **proxy signer** 嘅私鑰（0x 加 64 個字） |
+| `PM_PROXY_SECRET` | 開 proxy 嗰陣一齊攞到嘅 API secret |
+| `PM_WALLET_ADDRESS` | 你主錢包嘅**地址**（公開地址，唔係私鑰） |
+| `PM_PROXY_EXPIRES_AT` | proxy 到期時間（例如 `2026-10-26T00:00:00Z`，可以留空） |
 
-Rules for secrets: never print them, never repeat them back to me or anyone, never put them in chat,
-logs, files other than `.env`, or commands' arguments. After writing, run `chmod 600 ~/btcperp/.env`.
-If I ever send you a main wallet private key, refuse it and tell me.
+撳 Ctrl + S 儲存，然後關記事本。**Proxy key 點樣整：裝好之後問 Claude，會一步步教你。**
+Proxy key 到期前 5 日 bot 會開始提你換。
 
-## 3. Smoketest (live, minimum size) - then WAIT for "GO"
+## 4. Smoketest（上實盤之前必做）
 
-```
-cd ~/btcperp && python3 run.py smoketest
-```
+雙擊 **`windows\2_Smoketest.bat`**：
+- 打 `YES`：完整測試，用最細注碼落**真單**。會開同平幾個好細嘅倉（多、空、flip），落單再取消，
+  亦會試一次 bracket 止損。會用少少手續費。
+- 打 `R`：只做唯讀檢查（價錢、地區、key、戶口），唔落單。
 
-It reads prices, checks that trading is allowed from your computer's region (never use a VPN or
-network proxy to change this), checks the proxy key and wallet, sets 3x isolated, places and cancels
-one order, opens and closes minimum-size positions (long with a bracket stop-loss/take-profit, a short,
-a two-step flip, and one bracket with a deliberately invalid stop-loss row that is closed immediately),
-and answers the questions (a)-(e) in `API_NOTES.md` live, plus the review checks listed at the end of
-`API_NOTES.md`. It costs a few small trading fees.
+完成之後將畫面上嘅 **SUMMARY** 截圖畀 Claude（唔好截 `.env`）。完整結果喺 `C:\btcperp\data\smoketest\`。
+Smoketest 未 PASS 之前唔好做第 6 步。
 
-Question (a) (can the proxy key withdraw?) is only tested if I explicitly tell you to run
-`python3 run.py smoketest --probe-withdrawal` (it sends a real 1-base-unit withdrawal request to my own
-wallet, expected to be rejected). Do not add that flag unless I ask.
+## 5. Dashboard
 
-Report the result to me **in Traditional Chinese**: PASS/FAIL for every step, the live answers to
-(a)-(e), and anything marked FAIL. The full JSON is in `~/btcperp/data/smoketest/`. Then **WAIT**.
-Do not create any routine and do not run `decide` or `manage` until I reply exactly "GO".
+雙擊 **`windows\Dashboard.bat`**，瀏覽器會開 **http://127.0.0.1:8765**。只有呢部電腦睇到。
+用 Dashboard.bat 開嘅話，黑色視窗要保持開住，關咗佢 dashboard 就停。做完第 6 步之後，
+dashboard 會喺你每次登入時自動喺背景行，雙擊 Dashboard.bat 就只會開瀏覽器。
 
-## 4. After I say GO: create these scheduled routines (HKT)
+| 卡片 | 內容 |
+|---|---|
+| 頂部 | 狀態（空倉 / 持倉 / 暫停＋原因）、更新時間、版本；「從交易所更新」、「標記警報已讀」 |
+| 權益 | 權益（交易所 total account value）、錢包、未實現盈虧、高水位 |
+| 回撤 / 連虧 / 本金底線 | 三個 kill switch 同佢哋嘅界線（15% 回撤平倉暫停；連虧 8% 停新倉；跌穿淨投入本金 75% 硬停） |
+| 倉位 | 方向、數量、入場價、標記價、未實現盈虧、**止損 SL**（冇 SL 會紅字「無！」）、止盈 TP、強平價、累計資金費 |
+| 最新決定 | 日期、分數同三個組成部分（趨勢、突破、收市位置）、方向、注碼級別、閘門（有觸發會打 ✓）、行動、原因 |
+| 權益走勢 | 權益（實線）同高水位（虛線） |
+| 統計 | 交易數、勝率、淨盈虧、總 R、期望值、手續費、資金費、平均持倉時間 |
+| 交易紀錄 | 每筆已平倉交易：入場日、方向、入場價、出場價、原因（TP / SL / flip…）、淨盈虧、R、持倉小時 |
+| 警報 | 所有警報，未讀嘅用粗體 |
+| 排程及錯誤 | 每個指令最後一次完成時間同結果、48 小時內漏跑或遲跑、7 日內錯誤 |
+| 經濟事件 / 影子追蹤 | 30 日內 FOMC / CPI / NFP、日曆到期提示；影子版本嘅模擬結果 |
 
-| Command (run exactly) | HKT | UTC equivalent |
+Dashboard 係**唯讀**：佢唔會落單。「從交易所更新」只會讀交易所（`snapshot`），開住頁面時每 5 分鐘自動讀一次。
+交易控制只用下面嘅 .bat。
+
+## 6. 上實盤（GO）
+
+Smoketest PASS、你決定開始之後，雙擊 **`windows\3_Schedule_Install.bat`**，打 `GO`。佢會喺工作排程器
+開一個叫 `btcperp` 嘅資料夾，加入以下工作：
+
+| 工作 | 時間（HKT） | 做咩 |
 |---|---|---|
-| `cd ~/btcperp && python3 run.py decide` | 08:30 daily | 00:30 daily |
-| `cd ~/btcperp && python3 run.py decide` | 08:50 daily | 00:50 daily |
-| `cd ~/btcperp && python3 run.py manage` | 12:30, 16:30, 20:30, 00:30, 04:30 daily | 04:30, 08:30, 12:30, 16:30, 20:30 daily |
-| `cd ~/btcperp && python3 run.py report daily` | 08:45 daily | 00:45 daily |
-| `cd ~/btcperp && python3 run.py report weekly` | Sunday 20:00 | Sunday 12:00 |
-| `cd ~/btcperp && python3 run.py report monthly --only-first-sunday` | every Sunday 20:30 (the command itself only runs on the first Sunday of the month) | Sunday 12:30 |
-| `cd ~/btcperp && python3 run.py backup` | 03:00 daily | 19:00 daily (previous UTC day) |
+| decide_0830、decide_0850 | 每日 08:30、08:50 | 計分數、開倉 / 平倉 / flip（入場窗口 08:30–09:30，過咗唔補入） |
+| manage_1230 / 1630 / 2030 / 0030 / 0430 | 每日 5 次 | 對數、確保有 SL、完成未做完嘅平倉；**唔會開新倉** |
+| report_daily | 每日 08:45 | 日報（`data\reports\`） |
+| report_weekly | 星期日 20:00 | 週報同所有紀錄嘅 CSV zip |
+| report_monthly | 每月第一個星期日 20:30 | 月報 |
+| backup | 每日 03:00 | 備份資料庫（`data\backups\`） |
+| dashboard | 每次登入 | 背景 dashboard |
 
-The bot uses a lock, so if two routines overlap the second one waits. If your routines cannot hit
-these times (to within a few minutes), tell me BEFORE going live. After creating them, list them
-back to me with their times.
+裝完雙擊 **`windows\Schedule_Check.bat`** 睇吓全部工作都喺度，同埋下次執行時間。
+想停止自動交易：`windows\Schedule_Remove.bat`（倉位同交易所上面嘅 SL/TP 會留住）。
 
-**You are my alert channel. Every trade must reach me.** At the end of EVERY routine above (and after
-any command I ask you to run), also run:
+## 7. 通知
 
-```
-cd ~/btcperp && python3 run.py alerts
-```
+每個警報都會存入資料庫、喺 dashboard 顯示，同埋彈 **Windows 通知**（顯示為「Windows PowerShell」）：
+每次開倉、平倉、flip、SL/TP 改動、kill switch、警告、入場被擋、漏跑 08:30、SL 補唔到、平倉失敗、
+proxy key 就到期，同所有錯誤。
 
-It prints each new alert once, as lines starting with `PING OWNER`. If it prints any, ping me
-immediately with the full lines (keep the English text, add a one-line explanation in Traditional
-Chinese). If it prints `no new alerts`, do not message me.
+- 如果冇通知彈出：設定 → 系統 → 通知 → 開啟通知，並容許「Windows PowerShell」；
+  「勿打擾」/「專注輔助」開咗就會收埋。
+- 通知只會喺呢部電腦彈。人唔喺電腦前面嘅話，返嚟睇 dashboard 嘅「警報」，
+  或者雙擊 `windows\Alerts.bat`（列出未讀警報，然後標記已讀）。
 
-ALWAYS ping me for every trade: every `open`, `close`, `flip`, `entry recovered` / `position adopted`
-line, and every stop-loss / take-profit change. Also ping for every kill switch, warning, blocked or
-deferred entry, missed 08:30 run, SL re-place failure, close failure, proxy key expiry and any error. If a command's exit code is not 0, also send me the error and the log (see
-section 5).
+## 8. 日常控制（`C:\btcperp\windows\`）
 
-Reports:
-- after `report daily`: send me the report text it printed
-- after `report weekly`: send me the report text and the zip file whose path it printed (`ZIP: ...`)
-- after `report monthly`: do the monthly review in section 7
+| 檔案 | 作用 |
+|---|---|
+| `Dashboard.bat` | 開 dashboard |
+| `Status.bat` | 狀態、倉位、SL/TP、權益、kill switch、最後決定 |
+| `Pause_New_Entries.bat` | **暫停**：唔再開新倉；現有倉位同 SL/TP 保留 |
+| `Kill_Close_Position.bat` | **即刻平倉**（reduce-only 市價）並暫停；要打 `KILL` 確認 |
+| `Resume.bat` | 解除暫停 / kill switch（要打 `RESUME` 確認）；回撤高水位重設，連虧重新計 |
+| `Alerts.bat` | 列出未讀警報 |
+| `Report_Daily.bat` | 即刻出一份日報 |
+| `Schedule_Check.bat` | 睇排程工作 |
+| `Schedule_Remove.bat` | 移除排程（停止自動交易） |
+| `Edit_Secrets.bat` | 用記事本改 `.env`（換 proxy key 時用） |
 
-## 5. Rules (always)
+- **本金底線（EQUITY FLOOR）**觸發之後，`Resume.bat` 都解除唔到，只有新版本 config 先可以。即刻話 Claude 知。
+- 任何錯誤：dashboard「排程及錯誤」會顯示，亦會彈通知。記錄檔喺 `C:\btcperp\logs\btcperp_YYYY-MM-DD.log`
+  （已遮蔽私鑰同 secret），有需要可以畀 Claude 睇。**永遠唔好傳 `.env`。**
 
-- Never edit any code or config file (`config/`, `perpbot/`, anything in `~/btcperp` except `.env`
-  when I give you new secrets).
-- Never trade manually and never call the exchange yourself. Only run the commands in this file.
-- If I say "stop": run `cd ~/btcperp && python3 run.py kill` (closes the position with a reduce-only
-  order and pauses). If I say "pause": run `python3 run.py pause` (no new entries; the position and
-  its stop-loss/take-profit stay). Run `python3 run.py resume` ONLY when I explicitly ask for it.
-- `python3 run.py status` shows state, position, equity and kill-switch status whenever I ask.
-- On any error (non-zero exit code, or a `PING OWNER` line containing "ERROR"):
-  send me the command, its output and the last 200 lines of today's log:
-  `tail -n 200 ~/btcperp/logs/btcperp_$(date -u +%Y-%m-%d).log`
-- Exit codes: 0 ok, 1 error, 3 config/secrets error, 4 another command was still running, 5 selftest failed.
-- If I ask for the status, run `python3 run.py status` and send me the output.
-- Deposits / withdrawals: remind me not to deposit or withdraw while a position is open. If I want to
-  measure how deposits show up, run `python3 run.py flowwatch --minutes 30` while I make a small deposit
-  (only when flat) and send me the result file path it prints.
-- If the bot reports "EQUITY FLOOR": trading stays stopped even after `resume`; only a new version from
-  me can clear it. Tell me immediately.
+## 9. 電腦熄咗、瞓咗或者斷網會點？
 
-## 6. Upgrades
+- 交易所上面嘅 **SL / TP 單照樣有效**：你部電腦熄咗，倉位都有止損保護。
+- 08:30 同 08:50 都行唔到嘅話，當日唔會開新倉。下次再行嘅時候會出「missed」警報，**唔會補入場**。
+- 錯過 manage 冇問題：下一次 manage / decide 會先對數（reconcile），將期間 TP / SL 觸發嘅平倉記錄返。
+- 但係電腦熄咗嗰段時間，flip、3 日規則、資金費規則同 kill switch 都**唔會執行**，只有 SL / TP 保護。
+  所以盡量保持電腦開住、登入咗、有網絡。
 
-When I upload a new zip (`btcperp_vA.B.C.zip`):
+## 10. 升級（收到新版本 zip）
 
-```
-cd ~/btcperp && python3 run.py pause
-cd ~ && unzip -o btcperp_vA.B.C.zip -d ~/       # data/, logs/, venv/ and .env are not in the zip and stay untouched
-cd ~/btcperp && python3 install.py
-python3 run.py status
-```
+避開 08:20–09:35 HKT（decide 時段）。
 
-Report the install result and the status output to me. Run `python3 run.py resume` only after I confirm.
-Keep the existing routines unless the new CHANGELOG.md says otherwise (tell me if it does).
+1. 雙擊 `windows\Pause_New_Entries.bat`。
+2. 新 zip 同樣先「解除封鎖」，然後「解壓縮全部」去 `C:\`，揀**取代**所有檔案。
+   （`data\`、`logs\`、`venv\`、`.env` 唔喺 zip 入面，唔會被改動。）
+3. 雙擊 `windows\1_Install.bat`，要見到 `INSTALL PASS`。
+4. 如果新版本嘅 `CHANGELOG.md` 話要重新裝排程，就雙擊 `windows\3_Schedule_Install.bat` 再打 `GO`。
+5. 雙擊 `windows\Status.bat` 同開 dashboard 檢查，冇問題先雙擊 `windows\Resume.bat`。
 
-## 7. Monthly review
+## 11. 每月檢討
 
-On the first Sunday of each month, after `report monthly` has run, read
-`~/btcperp/data/reports/monthly/monthly_YYYY-MM.md` (and the `.json` next to it) and write me a
-review **in Traditional Chinese**:
+每月第一個星期日 20:30 會出月報：`C:\btcperp\data\reports\monthly\monthly_YYYY-MM.md`（同一個 `.json`）。
+將兩個檔案畀 Claude，佢會用繁體中文寫檢討，內容包括：
+- 整體表現，同埋按分數級別、閘門、出場原因、多空分開嘅表現
+- MAE / MFE 對比 SL / TP 距離、滑價、資金費成本
+- 影子追蹤對比實盤
+- 漏跑、錯誤、日曆提示
+- 建議嘅改動（每項都要有數據支持）
 
-- performance overall, by score tier, by gate, by exit reason, long vs short
-- MAE/MFE versus the SL/TP distances, slippage and fill quality, funding cost versus holding time
-- shadow results (gate-blocked trades, V2 breakeven, FLAT-allowed control) versus live
-- missed or late runs and errors, calendar warnings
-- your proposed changes, each with the data behind it
+每個版本嘅數字分開計，唔會混埋。任何改動都會係一個新版本 zip，由你決定裝唔裝。
 
-Keep each code/config version separate; never mix versions in one statistic. Never apply any change
-yourself: changes come back to me and I will send a new zip.
+## 12. 參考
+
+- 結束代碼：0 成功、1 錯誤、3 設定或 secret 錯誤、4 另一個指令仲行緊、5 單元測試失敗。
+- 所有參數：`config\config.yaml`。策略、指令同資料詳情：`README.md`。交易所 API 筆記：`API_NOTES.md`。
+- 入金 / 提款時間測試（只喺空倉時做）：喺 `C:\btcperp` 開「命令提示字元」，行
+  `venv\Scripts\python.exe run.py flowwatch --minutes 30`，同時入一筆小額，然後將佢印出嘅結果檔路徑話畀 Claude 知。

@@ -60,7 +60,7 @@ def setup_logging(logs_dir: Path, clock: Clock, level: str = "INFO", secrets: It
     fh.setFormatter(fmt)
     fh.addFilter(redact)
     root.addHandler(fh)
-    if stdout:
+    if stdout and sys.stdout is not None:           # pythonw.exe (Task Scheduler) has no console
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)
         sh.addFilter(redact)

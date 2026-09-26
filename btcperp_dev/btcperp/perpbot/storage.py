@@ -43,6 +43,7 @@ TABLES: dict[str, str] = {
     "shadow_log": "kind TEXT, variant TEXT, unique_key TEXT UNIQUE, data TEXT",
     "alerts": "kind TEXT, dedupe_key TEXT, sent INTEGER, text TEXT",
     "alert_deliveries": "alert_id INTEGER UNIQUE",
+    "dash_snapshots": "data TEXT",
     "telegram_updates": "update_id INTEGER UNIQUE, command TEXT, text TEXT",
     "flows": "flow_key TEXT UNIQUE, kind TEXT, amount REAL, status TEXT, flow_ts_ms INTEGER",
 }

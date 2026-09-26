@@ -1,17 +1,29 @@
 # btcperp - BTC-PERP bot for Polymarket Perps
 
 Daily hybrid trend/structure strategy on BTC-PERP with exchange-side bracket stop-loss/take-profit,
-fixed-risk sizing, gates, kill switches, full append-only logging and alerts delivered through Grok Bot.
-It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `START_HERE.md`.
+fixed-risk sizing, gates, kill switches, full append-only logging, a local dashboard and Windows
+desktop notifications. It runs on the owner's Windows PC from Windows Task Scheduler; see `START_HERE.md`
+(Traditional Chinese). The code is cross-platform (the unit tests also run on Linux).
 
-## Commands (`python3 run.py <command>`)
+## Windows shortcuts (`windows\*.bat`)
+
+`1_Install.bat` (install / upgrade), `Edit_Secrets.bat` (.env in Notepad), `2_Smoketest.bat`,
+`3_Schedule_Install.bat` (go live; asks for `GO`), `Dashboard.bat`, `Status.bat`, `Pause_New_Entries.bat`,
+`Kill_Close_Position.bat` (asks for `KILL`), `Resume.bat` (asks for `RESUME`), `Alerts.bat`,
+`Report_Daily.bat`, `Schedule_Check.bat`, `Schedule_Remove.bat` (asks for `REMOVE`).
+Each one runs `venv\Scripts\python.exe run.py <command>` from the install folder.
+
+## Commands (`python run.py <command>`)
 
 | Command | What it does |
 |---|---|
 | `decide` | 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. |
 | `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. Never opens. |
-| `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Printed reports (Grok Bot forwards them); daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
-| `alerts` | Print every new alert once (`PING OWNER ...`) and mark it delivered. Grok Bot runs it after every routine and pings the owner. |
+| `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Reports printed and saved in `data/reports/`; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
+| `alerts` | Print every unread alert once (`PING OWNER ...`) and mark it read (same list as the dashboard). |
+| `snapshot` | Read-only exchange read for the dashboard (position, SL/TP, mark, equity). No orders, no state changes, no kill checks. Waits at most 5 s for the lock (skips if a run is busy); failures are logged, never alerted. |
+| `dashboard [--port N] [--no-browser]` | Local web dashboard on `http://127.0.0.1:8765` (loopback only). No lock, no exchange access; reads the database. Its "refresh" button runs `snapshot`. |
+| `schedule install\|remove\|list\|show [--dry-run] [--no-dashboard]` | Windows Task Scheduler tasks under `\btcperp\` (HKT times converted to the PC's time zone). No lock. |
 | `backup` | SQLite backup (+config) into `data/backups/` (last 14 + first of each month kept). |
 | `status` | State, position, SL/TP, equity, drawdown, kill switches, last decision. |
 | `pause` | Stop new entries; keep position and SL/TP. |
@@ -21,9 +33,32 @@ It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `ST
 | `smoketest [--probe-withdrawal]` | Live minimum-size test (see START_HERE.md section 3). The withdrawal probe is off unless the flag is given. |
 | `flowwatch [--minutes N]` | Record balances / deposit-withdrawal statuses while the owner makes a small deposit (only when flat). |
 
-Every command takes an exclusive file lock (`data/btcperp.lock`), logs to `logs/btcperp_YYYY-MM-DD.log`
-(secrets redacted), writes a start/end row to the run log, and on error exits non-zero and sends a
-stored alert with the last log lines (shown by `alerts`). Telegram is optional and off (`telegram.enabled`).
+Every bot command takes an exclusive file lock (`data/btcperp.lock`), logs to `logs/btcperp_YYYY-MM-DD.log`
+(secrets redacted), writes a start/end row to the run log, and on error exits non-zero and stores an
+alert with the last log lines. Every alert is shown on the dashboard and popped up as a Windows toast
+notification (`notifications.windows_toast`; PowerShell WinRT, text passed by environment variables).
+Telegram is optional and off (`telegram.enabled`).
+
+## Scheduling (Windows Task Scheduler)
+
+`schedule install` writes one task XML per routine to `data/tasks/` and registers it with
+`schtasks /Create /XML` (folder `\btcperp\`). Tasks run `venv\Scripts\pythonw.exe -m perpbot <command>`
+(no console window) in the install folder, as the logged-on user (no stored Windows password: the user
+must be logged on; a locked screen is fine), wake the computer, start as soon as possible after a missed
+start (a late `decide` is logged as missed and never enters late), and queue instead of overlapping.
+The first run of each task is its next future time, so registering never triggers a "missed" run.
+If the PC is not on HKT, times are converted; the monthly report then runs weekly and
+`--only-first-sunday` checks the HKT date. The dashboard task starts at logon.
+
+## Dashboard
+
+`http://127.0.0.1:8765`, bound to 127.0.0.1 only (exclusive port bind on Windows). The Host header must be
+`127.0.0.1:<port>` or `localhost:<port>` (blocks DNS rebinding), and the two POST actions ("refresh from
+exchange", "mark alerts read") need a per-server random token embedded in the page. Cards: state and pause
+reasons, equity, drawdown / losing streak / equity floor against their limits, position with SL/TP and
+liquidation price (latest `snapshot` or `manage`), latest decision with score components and gates, equity
+curve with peak, statistics, trades, alerts, runs (last result per command, missed/late in 48 h, errors in
+7 days), economic calendar and shadow variants.
 
 ## Every trading run starts with reconcile
 
@@ -78,7 +113,7 @@ latency), `fills`, `funding_payments`, `trades` (open/update/close with exit rea
 hours, fees, funding, net PnL, R), `manage_log`, `equity_log`, `state_log`, `position_snapshots`,
 `market_snapshots` (mark, index, funding, spread, depth), `pm_klines_1h`/`pm_klines_1d`/`pm_funding`
 (our own Polymarket dataset, backfilled every run), `bn_klines_1d`/`bn_klines_4h`/`bn_funding`,
-`shadow_log`, `alerts`, `alert_deliveries`, `telegram_updates`, `flows`.
+`shadow_log`, `alerts`, `alert_deliveries`, `dash_snapshots`, `telegram_updates`, `flows`.
 
 Shadow tracking (simulation only): each day a gate blocked or reduced a trade gets a hypothetical trade
 (bracket outcome on Polymarket 1h candles); parallel variants `live_rules`, `v2_breakeven` (one-time SL
@@ -91,6 +126,7 @@ decisions.
 run.py            launcher (uses ./venv)          install.py     installer / upgrader
 config/           config.yaml, calendar.yaml       perpbot/       code
 tests/            unit tests (selftest)            API_NOTES.md   exchange API notes (untested items)
+windows/          .bat shortcuts                   START_HERE.md  setup guide (Traditional Chinese)
 data/  logs/      created at install, never in the zip, never touched by upgrades
 .env              secrets (created from .env.example), never in the zip
 ```

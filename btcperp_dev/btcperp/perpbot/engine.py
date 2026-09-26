@@ -109,7 +109,8 @@ def _fmt_dec(d: Decimal) -> str:
 
 class Engine:
     def __init__(self, *, cfg: Any, calendar: EventCalendar, store: Store, exchange: Exchange, binance: Any,
-                 telegram: Telegram, clock: Clock, secrets: Any, sleep: Callable[[float], None] = time.sleep) -> None:
+                 telegram: Telegram, clock: Clock, secrets: Any, sleep: Callable[[float], None] = time.sleep,
+                 notifier: Callable[[str, str], Any] | None = None) -> None:
         self.cfg = cfg
         self.calendar = calendar
         self.store = store
@@ -120,6 +121,7 @@ class Engine:
         self.clock = clock
         self.secrets = secrets
         self.sleep = sleep
+        self.notifier = notifier
         self._inst: Instrument | None = None
         self._kill_close_tried = False
 
@@ -131,14 +133,19 @@ class Engine:
         return utc_day(self.now()).isoformat()
 
     def alert(self, kind: str, text: str, dedupe_key: str | None = None) -> None:
-        """Store an alert for the owner. `python3 run.py alerts` prints undelivered alerts for Grok Bot
-        to forward; Telegram is used only if enabled in config."""
+        """Store an alert for the owner (shown on the dashboard) and pop up a Windows notification.
+        Telegram is used only if enabled in config."""
         if dedupe_key and self.rec.alert_sent(dedupe_key):
             return
         msg = f"[btcperp] {kind}: {text}\n({fmt_hkt(self.now())})"
         sent = self.tg.send(msg)
         self.store.insert("alerts", kind=kind, dedupe_key=dedupe_key, sent=int(sent), text=msg[:4000])
         log.warning("ALERT %s: %s", kind, text)
+        if self.notifier is not None:
+            try:
+                self.notifier(kind, text)
+            except Exception:  # noqa: BLE001
+                log.warning("desktop notification failed", exc_info=True)
 
     def instrument(self) -> Instrument:
         if self._inst is not None:
@@ -529,7 +536,7 @@ class Engine:
                 self.tg.send(self.status_text())
                 actions.append("telegram /status")
             elif cmd == "unknown":
-                self.tg.send("Commands: /pause /kill /status. Resume only via Grok Bot (`resume` after you confirm).")
+                self.tg.send("Commands: /pause /kill /status. Resume only on the bot computer (Resume.bat).")
         return actions
 
     # ================================================================ kill switches
@@ -635,7 +642,7 @@ class Engine:
         days_left = (exp_ms - to_ms(self.now())) / DAY_MS
         if days_left <= float(self.cfg.key.expiry_warn_days):
             self.alert("proxy key expiry", f"proxy signer key expires {fmt_utc(from_ms(exp_ms))} "
-                       f"({days_left:.1f} days). Create a new proxy key and send it to Grok Bot.",
+                       f"({days_left:.1f} days). Create a new proxy key and put it in .env (START_HERE.md).",
                        dedupe_key=f"key_expiry:{self.today()}")
 
     # ================================================================ orders
@@ -1474,6 +1481,22 @@ class Engine:
         if p.get("notes"):
             s += f" ({'; '.join(p['notes'])})"
         return s
+
+    def cmd_snapshot(self) -> dict[str, Any]:
+        """Read-only exchange snapshot for the dashboard: no orders, no state changes, no kill checks."""
+        inst = self.instrument()
+        acct = self.ex.get_account()
+        pos = acct.position(inst.id)
+        eq = self.equity(acct)
+        orders = self.ex.get_open_orders(inst.id)
+        mark = self.ex.get_ticker(inst.id).mark
+        data = {"mark": mark, "position": pos.__dict__ if pos else None,
+                "equity": {k: eq.get(k) for k in ("equity", "wallet", "upnl", "source", "valid")},
+                "sl": [o.trigger_price for o in orders if o.tpsl_kind == "sl" and o.status in ACTIVE_TRIGGER_STATUSES],
+                "tp": [o.trigger_price for o in orders if o.tpsl_kind == "tp" and o.status in ACTIVE_TRIGGER_STATUSES],
+                "open_orders": len(orders), "symbol": inst.symbol}
+        self.store.insert("dash_snapshots", data=data)
+        return data
 
     def status_text(self) -> str:
         st = self.rec.state()

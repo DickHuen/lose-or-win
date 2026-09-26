@@ -281,8 +281,11 @@ def test_d14_store_redacts_secrets(tmp_path):
     s = Store(tmp_path / "r.db", FixedClock(datetime(2026, 10, 5, tzinfo=UTC)), "x", "x")
     s.redact = RedactFilter(["my-proxy-secret-xyz"]).redact
     s.insert("runs", command="decide", event="end", error="boom my-proxy-secret-xyz", data={"e": "my-proxy-secret-xyz"})
-    raw = (tmp_path / "r.db").read_bytes()
+    assert s.count("runs", "error = 'boom ***'") == 1                # the row was written, redacted
+    raw = b"".join(p.read_bytes() for p in tmp_path.glob("r.db*"))    # db + WAL (rows live in the WAL first)
     assert b"my-proxy-secret-xyz" not in raw
+    s.close()
+    assert b"my-proxy-secret-xyz" not in (tmp_path / "r.db").read_bytes()
 
 
 # ---------------------------------------------------------------- D16

@@ -1,11 +1,14 @@
-"""Command-line entry points (the only things Grok Bot runs).
+"""Command-line entry points (run by Windows Task Scheduler and the .bat shortcuts).
 
   decide | manage | report daily|weekly|monthly [--month YYYY-MM] | backup | status
   pause | kill | resume | alerts | selftest | smoketest [--probe-withdrawal] | flowwatch | version
+  snapshot (read-only exchange read for the dashboard)
+  dashboard [--port N] [--no-browser] | schedule install|remove|list|show [--dry-run] [--no-dashboard]
 
-Every command: exclusive file lock, full logging, non-zero exit code on error.
-Alerts (including errors) are stored; `alerts` prints the undelivered ones so
-Grok Bot can ping the owner. Telegram is optional (off by default).
+Every bot command: exclusive file lock, full logging, non-zero exit code on error.
+Alerts (including errors) are stored, shown on the dashboard and popped up as Windows
+notifications; `alerts` prints the unread ones. Telegram is optional (off by default).
+`dashboard` and `schedule` take no lock: they never touch the exchange.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from perpbot.config import ConfigError, load_config
 from perpbot.envsecrets import SecretsError, load_secrets
 from perpbot.lockfile import FileLock, LockTimeout
 from perpbot.logging_setup import setup_logging, tail
+from perpbot.notify import make_notifier
 from perpbot.paths import Paths
 from perpbot.schedule_audit import audit, nearest_slot
 from perpbot.storage import Store
@@ -36,7 +40,10 @@ from perpbot.timeutil import Clock, SystemClock, fmt_hkt
 log = logging.getLogger("perpbot.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_LOCK, EXIT_SELFTEST = 0, 1, 3, 4, 5
-NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch"}
+NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch", "snapshot"}
+NO_LOCK = {"dashboard", "schedule"}
+QUIET = {"snapshot"}              # dashboard convenience read: failures are logged, never alerted
+SNAPSHOT_LOCK_WAIT_SECONDS = 5.0  # a snapshot never queues behind a real run
 NEEDS_BINANCE = {"decide", "manage", "smoketest"}
 TRADING = {"decide", "manage", "kill", "smoketest"}
 
@@ -46,13 +53,15 @@ class Factories:
     exchange: Callable[[Any, Any], Any] | None = None
     binance: Callable[[Any], Any] | None = None
     telegram: Callable[[Any, Any], Any] | None = None
+    notifier: Callable[[Any], Any] | None = None
     sleep: Callable[[float], None] = time.sleep
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="btcperp", description="BTC-PERP bot for Polymarket Perps")
     sub = p.add_subparsers(dest="command", required=True)
-    for c in ("decide", "manage", "backup", "status", "pause", "kill", "resume", "alerts", "selftest", "version"):
+    for c in ("decide", "manage", "backup", "status", "pause", "kill", "resume", "alerts", "selftest", "version",
+              "snapshot"):
         sub.add_parser(c)
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["daily", "weekly", "monthly"])
@@ -66,7 +75,31 @@ def build_parser() -> argparse.ArgumentParser:
     fw = sub.add_parser("flowwatch")
     fw.add_argument("--minutes", type=float, default=30.0, help="how long to watch (default 30)")
     fw.add_argument("--interval", type=float, default=15.0, help="seconds between reads (default 15)")
+    d = sub.add_parser("dashboard", help="local web dashboard on http://127.0.0.1:<port>")
+    d.add_argument("--port", type=int, default=None, help="port (default: dashboard.port in config)")
+    d.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    sc = sub.add_parser("schedule", help="Windows Task Scheduler tasks for the bot")
+    sc.add_argument("action", choices=["install", "remove", "list", "show"])
+    sc.add_argument("--dry-run", action="store_true", help="write the task XML files but do not register them")
+    sc.add_argument("--no-dashboard", action="store_true", help="do not start the dashboard at logon")
     return p
+
+
+def _utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def _notify(notifier: Any, kind: str, text: str) -> None:
+    if notifier is None:
+        return
+    try:
+        notifier(kind, text)
+    except Exception:  # noqa: BLE001
+        log.debug("notification failed", exc_info=True)
 
 
 def run_selftest(paths: Paths) -> int:
@@ -84,6 +117,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
     clock = clock or SystemClock()
     factories = factories or Factories()
     command = args.command if args.command != "report" else f"report_{args.kind}"
+    _utf8_console()
     paths.ensure()
     if command == "version":
         print(code_version())
@@ -102,15 +136,22 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         print(f"CONFIG ERROR: {e}", file=sys.stderr)
         return EXIT_CONFIG
     log_path, redactor = setup_logging(paths.logs_dir, clock, cfg.logging.level, secrets.secret_values())
+    if command in NO_LOCK:
+        return _run_unlocked(command, args, paths, cfg, calendar, clock)
     tg = (factories.telegram or (lambda c, s: Telegram(c, s.telegram_token, s.telegram_chat_id)))(cfg, secrets)
+    notifier = (factories.notifier or make_notifier)(cfg)
 
     lock = FileLock(paths.lock_file)
     try:
-        lock.acquire(float(cfg.lock.wait_seconds))
+        lock.acquire(SNAPSHOT_LOCK_WAIT_SECONDS if command in QUIET else float(cfg.lock.wait_seconds))
     except LockTimeout as e:
-        log.error("%s", e)
         print(f"NOT RUN: {command}: {e}")
+        if command in QUIET:
+            log.info("%s skipped: bot busy", command)
+            return EXIT_LOCK
+        log.error("%s", e)
         tg.send(f"[btcperp] {command} not run: {e}")
+        _notify(notifier, f"{command} not run", str(e))
         return EXIT_LOCK
 
     store = Store(paths.db_file, clock, cfg.config_version, code_version())
@@ -141,7 +182,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
             from perpbot.engine import Engine
 
             engine = Engine(cfg=cfg, calendar=calendar, store=store, exchange=exchange, binance=binance, telegram=tg,
-                            clock=clock, secrets=secrets, sleep=factories.sleep)
+                            clock=clock, secrets=secrets, sleep=factories.sleep, notifier=notifier)
             if command in TRADING:
                 _missed_run_alerts(engine, cfg, store, clock)
             result = _dispatch(command, args, engine, paths, cfg)
@@ -165,7 +206,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
             except Exception:  # noqa: BLE001
                 log.debug("close failed", exc_info=True)
         log.info("=== %s end: %s (%.1fs)", command, status, dur)
-        if status == "error":
+        if status == "error" and command not in QUIET:
             text = redactor.redact(f"[btcperp] ERROR in {command}: {err}\nlog: {log_path}\n--- last log lines ---\n"
                                    f"{_redacted_tail(log_path, redactor)}")
             try:
@@ -173,16 +214,55 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
                 store.insert("alerts", kind="ERROR", dedupe_key=None, sent=int(sent), text=text[:4000])
             except Exception:  # noqa: BLE001
                 log.exception("could not store error alert")
+            _notify(notifier, f"ERROR in {command}", str(err)[:300])
         if command != "alerts":
             try:
                 n = len(pending_alerts(store))
                 if n:
-                    print(f"NEW ALERTS FOR OWNER: {n} (run: python3 run.py alerts)")
+                    print(f"NEW ALERTS FOR OWNER: {n} (see the dashboard, or run: python run.py alerts)")
             except Exception:  # noqa: BLE001
                 log.debug("pending alert count failed", exc_info=True)
         store.close()
         lock.release()
     return rc
+
+
+def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock) -> int:
+    """dashboard / schedule: no lock, no exchange, no database writes by this process."""
+    try:
+        if command == "dashboard":
+            from perpbot.dashboard import serve
+
+            port = int(args.port or cfg.dashboard.port)
+            return serve(paths, cfg, calendar, clock, port=port, open_browser=not args.no_browser)
+        from perpbot import winsched
+
+        if args.action == "show":
+            for line in winsched.summary_lines(cfg):
+                print(line)
+            return EXIT_OK
+        if args.action == "install":
+            results = winsched.install(cfg, paths.root, paths.data_dir / "tasks", dry_run=bool(args.dry_run),
+                                       with_dashboard=not args.no_dashboard)
+        elif args.action == "remove":
+            results = winsched.remove(cfg)
+        else:
+            results = winsched.listing(cfg)
+        bad = [r for r in results if r["ok"] is False]
+        for r in results:
+            mark = {True: "OK  ", False: "FAIL", None: "--  "}[r["ok"]]
+            print(f"{mark} {r['task']}  {r['output'].splitlines()[0] if r['output'] else ''}")
+            if r["ok"] is False and args.action != "list":
+                print(r["output"])
+        if args.action == "install":
+            print()
+            for line in winsched.summary_lines(cfg):
+                print(line)
+        return EXIT_ERROR if bad else EXIT_OK
+    except Exception as e:  # noqa: BLE001
+        log.error("command %s failed: %s\n%s", command, e, traceback.format_exc())
+        print(f"ERROR: {command}: {e}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 def _redacted_tail(path: Any, redactor: Any) -> str:
@@ -195,7 +275,7 @@ def pending_alerts(store: Store) -> list[dict[str, Any]]:
 
 
 def deliver_alerts(store: Store) -> list[str]:
-    """Print undelivered alerts once, for Grok Bot to forward to the owner, and mark them delivered."""
+    """Print unread alerts once and mark them read (the dashboard shows the same list)."""
     out = []
     for a in pending_alerts(store):
         line = f"PING OWNER #{a['id']} [{a['ts_hkt']}] {a['kind']}: {a['text']}"
@@ -247,6 +327,8 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
         out = engine.cmd_decide()
     elif command == "manage":
         out = engine.cmd_manage()
+    elif command == "snapshot":
+        out = engine.cmd_snapshot()
     elif command == "status":
         text = engine.status_text()
         print(text)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Launcher: `python3 run.py <command>` runs the bot inside ./venv (created by install.py).
+"""Launcher: `python run.py <command>` runs the bot inside ./venv (created by install.py).
 
 Commands: decide | manage | report daily|weekly|monthly | backup | status | pause | kill |
-          resume | selftest | smoketest | version
+          resume | alerts | selftest | smoketest | snapshot | dashboard | schedule | version
+On Windows the .bat files in the windows folder call this for you.
 """
 
 import os
@@ -22,11 +23,12 @@ def venv_python() -> Path:
 def main() -> int:
     py = venv_python()
     if not py.exists():
-        print("venv not found - run `python3 install.py` first", file=sys.stderr)
+        print("venv not found - run install.py first (Windows: windows\\1_Install.bat)", file=sys.stderr)
         return 2
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     return subprocess.call([str(py), "-m", "perpbot", *sys.argv[1:]], cwd=str(ROOT), env=env)
 
 

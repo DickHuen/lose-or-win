@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command installer / upgrader:  python3 install.py
+"""One-command installer / upgrader:  python install.py   (Windows: double-click windows\\1_Install.bat)
 
 - checks the Python version (3.11+)
 - creates ./venv (or reuses it) and installs the pinned requirements
@@ -7,6 +7,7 @@
 - copies .env.example to .env only if .env does not exist
 - removes code files left over from an older version (per MANIFEST.txt);
   never touches data/, logs/, venv/ or .env
+- on Windows: stops the background dashboard during the upgrade and restarts it afterwards
 - runs `selftest` and prints PASS/FAIL and the next step
 Safe to re-run.
 """
@@ -36,7 +37,7 @@ def remove_stale_files() -> None:
     if not manifest.exists():
         return
     keep = {line.strip() for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()}
-    for sub in ("perpbot", "tests"):
+    for sub in ("perpbot", "tests", "windows"):
         base = ROOT / sub
         if not base.exists():
             continue
@@ -45,6 +46,16 @@ def remove_stale_files() -> None:
             if p.is_file() and "__pycache__" not in rel and rel not in keep:
                 say(f"removing stale file from an older version: {rel}")
                 p.unlink()
+
+
+def dashboard_task(action: str) -> None:
+    """Windows: /End or /Run the background dashboard task if it exists (files in use cannot be upgraded)."""
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(["schtasks", f"/{action}", "/TN", "\\btcperp\\dashboard"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def main() -> int:
@@ -62,6 +73,7 @@ def main() -> int:
         say(".env exists - left untouched")
     if os.name != "nt":
         env.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    dashboard_task("End")
     remove_stale_files()
     py = venv_python()
     if not py.exists():
@@ -76,12 +88,21 @@ def main() -> int:
     envv = dict(os.environ, PYTHONPATH=str(ROOT))
     rc = subprocess.call([str(py), "-m", "perpbot", "selftest"], cwd=str(ROOT), env=envv)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    dashboard_task("Run")
     if rc == 0:
         print(f"\nINSTALL PASS (btcperp v{version})")
-        print("Next step: fill in .env (proxy key, proxy secret, wallet address),")
-        print("then run:  python3 run.py smoketest   and report the result. Do NOT schedule routines before GO.")
+        if os.name == "nt":
+            print("Next steps (see START_HERE.md):")
+            print("  1. windows\\Edit_Secrets.bat  - fill in the proxy key, proxy secret and wallet address")
+            print("  2. windows\\2_Smoketest.bat   - live check at minimum size")
+            print("  3. windows\\3_Schedule_Install.bat - only when you decide to go live")
+            print("  Dashboard any time: windows\\Dashboard.bat")
+        else:
+            print("Next step: fill in .env (proxy key, proxy secret, wallet address),")
+            print("then run:  python3 run.py smoketest   and check the result. Do NOT schedule routines before GO.")
         return 0
-    print(f"\nINSTALL FAIL (btcperp v{version}): selftest failed - send logs/ and the output above to the owner.")
+    print(f"\nINSTALL FAIL (btcperp v{version}): selftest failed - keep the output above and the logs folder "
+          f"(never .env) for troubleshooting.")
     return 1
 
 
