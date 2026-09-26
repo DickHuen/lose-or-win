@@ -14,7 +14,13 @@ import traceback
 from decimal import Decimal
 from typing import Any, Callable
 
-from perpbot.exchange.base import ACTIVE_TRIGGER_STATUSES, FILLED_STATUSES
+from perpbot import code_version
+from perpbot.exchange.base import (
+    ACTIVE_TRIGGER_STATUSES,
+    FILLED_STATUSES,
+    NOT_FILLED_TERMINAL,
+    parse_server_time_ms,
+)
 from perpbot.paths import Paths
 from perpbot.risk import quantize_price
 from perpbot.strategy import compute_score
@@ -29,6 +35,7 @@ ZH = {
     "a_proxy_withdraw": "(a) 代理金鑰能否提款", "e_cancel_only": "(e) 只可撤單模式下的下單回應",
     "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知（已停用）", "server_time": "伺服器時間同步",
     "short_and_flip": "最細倉做空及反手測試", "g1_bracket_partial_reject": "括號單部分被拒時入場是否成交",
+    "fok_unfilled_status": "FOK 未成交時交易所回傳嘅狀態",
 }
 
 
@@ -95,16 +102,9 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
     def s_time() -> Any:
         raw = ex.get_server_time_raw()
         local = to_ms(engine.now())
-        server = None
-        if isinstance(raw, (int, float)):
-            server = int(raw)
-        elif isinstance(raw, dict):
-            for v in raw.values():
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 1_000_000_000:
-                    server = int(v if v > 10_000_000_000 else v * 1000)
-                    break
+        server = parse_server_time_ms(raw)
         skew = (server - local) if server is not None else None
-        ok = skew is None or abs(skew) < 30_000
+        ok = skew is not None and abs(skew) < float(cfg.schedule.max_clock_skew_seconds) * 1000
         return ok, {"raw": raw, "local_ms": local, "skew_ms": skew,
                     "note": "request signatures use this computer's clock; keep it NTP-synced"}
     step("server_time", s_time)
@@ -229,6 +229,29 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         return (bool(c and c[0].ok) and st in ("cancelled",)), {"order_id": oid, "status_before": o[0].status if o else None,
                                                                 "cancel": [r.__dict__ for r in c], "status_after": st}
     step("place_cancel", s_place_cancel, critical=True, trading=True)
+
+    def s_fok_unfilled() -> Any:
+        """Review v1.2.0 item 10: the exchange's real status for a FOK that cannot fill (priced below the bid)."""
+        inst = ctx["inst"]
+        b = ex.get_book(inst.id, int(cfg.polymarket.book_depth))
+        px = quantize_price(b.best_bid * (1 - float(cfg.smoketest.resting_order_offset_pct) / 100), inst.price_decimals, "down")
+        qty = min_qty(float(px))
+        coid = engine.coid(f"smoketest:{tag}:fok_unfilled")
+        engine.log_order("smoketest", "request", coid, None, None, {"side": "BUY", "qty": _dec(qty), "price": _dec(px), "tif": "fok"})
+        res = ex.place_order(instrument_id=inst.id, side="BUY", quantity=_dec(qty), tif="fok", price=_dec(px),
+                             reduce_only=False, client_order_id=coid)
+        engine.log_order("smoketest", "response", coid, res.order_id, str(res.accepted), {"error": res.error})
+        engine.sleep(1.0)
+        found = [x for x in ex.get_orders(client_order_id=coid) if not x.is_trigger]
+        st = found[0].status if found else None
+        flat = ex.get_account().position(inst.id) is None
+        known = st in NOT_FILLED_TERMINAL
+        return (flat and known), {"accepted": res.accepted, "error": res.error, "raw_status": st,
+                                  "status_known_as_not_filled": known, "position_flat": flat,
+                                  "note": ("status recognised: exits.entry_attempts may be raised to 2 in a new config "
+                                           "version" if known else "status NOT recognised: keep exits.entry_attempts at 1 "
+                                           "and send this result to Claude")}
+    step("fok_unfilled_status", s_fok_unfilled, critical=True, trading=True)
 
     def s_open() -> Any:
         inst = ctx["inst"]
@@ -406,7 +429,9 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
 
     all_ok = all(r["ok"] is not False for r in results) and not any(r["ok"] is None for r in results if allow_trading)
     out = paths.smoketest_dir / f"smoketest_{tag}.json"
-    out.write_text(json.dumps({"ok": all_ok, "results": results}, indent=2, default=str), encoding="utf-8")
+    meta = {"code_version": code_version(), "config_version": cfg.config_version, "allow_trading": allow_trading,
+            "proxy_address": getattr(engine.secrets, "proxy_address", ""), "run_utc": now.isoformat()}
+    out.write_text(json.dumps({"ok": all_ok, **meta, "results": results}, indent=2, default=str), encoding="utf-8")
     return all_ok, results
 
 

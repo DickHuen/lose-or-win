@@ -1,7 +1,7 @@
 """Hybrid trend/structure strategy: score, size tiers, gates and the daily plan.
 
-Pure functions only: no I/O. Both the live engine and the shadow simulator
-use `decide_plan`, so the rules are implemented exactly once.
+Pure functions only: no I/O. The live engine, the shadow simulator and the backtest all use
+`day_features` + `plan_for` (-> `decide_plan`), so the rules are implemented exactly once.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from typing import Any, Sequence
 
 from perpbot.indicators import Candle, atr_wilder, clip, clv, ema, last_value, percentile_rank
-from perpbot.timeutil import DAY_MS, day_start_ms
+from perpbot.timeutil import DAY_MS, MINUTE_MS, day_start_ms
 
 
 class InsufficientData(Exception):
@@ -234,6 +234,8 @@ class DecisionContext:
     flip_min_abs_score: float
     opposite_days_rule: int
     event_allows_rule_closes: bool
+    entry_block: str | None = None         # blocks NEW positions only (calendar expired, clock skew); closes still run
+    funding_rule_closes: bool = True       # backtest variant: False = crowded funding blocks entries but never closes
 
 
 @dataclass
@@ -263,6 +265,8 @@ def evaluate_entry(ctx: DecisionContext) -> tuple[int, float, list[str]]:
         return 0, 0.0, ["score is exactly 0 (no signal)"]
     if ctx.entered_today:
         blocked.append("already entered this UTC day (max one entry per day)")
+    if ctx.entry_block:
+        blocked.append(ctx.entry_block)
     if ctx.event_active:
         blocked.append("event window (FOMC/CPI/NFP): no new positions")
     if _funding_blocks(ctx, ctx.direction):
@@ -283,7 +287,9 @@ def decide_plan(ctx: DecisionContext) -> Plan:
     if pos != 0:
         crowded = ctx.funding_pct is not None and (
             (pos > 0 and ctx.funding_pct > ctx.funding_high) or (pos < 0 and ctx.funding_pct < ctx.funding_low))
-        if crowded:
+        if crowded and not ctx.funding_rule_closes:
+            notes.append("crowded funding: hold (variant without the funding close)")
+        if crowded and ctx.funding_rule_closes:
             if ctx.event_active and not ctx.event_allows_rule_closes:
                 notes.append("funding rule suppressed by event window")
             else:
@@ -327,3 +333,81 @@ def bracket_prices(direction: int, ref_price: float, atr: float, sl_mult: float,
     sl = ref_price - direction * sl_mult * atr
     tp = ref_price + direction * tp_mult * atr
     return sl, tp
+
+
+def restrict_to_close(plan: Plan, reason: str, position_dir: int) -> Plan:
+    """Drop the entry part of a plan (region blocked, late decision): closes still happen."""
+    if plan.enter_direction:
+        plan.entry_blocked.append(reason)
+        plan.enter_direction, plan.enter_fraction = 0, 0.0
+        plan.action = "close" if plan.close_reason else "none"
+        plan.target_direction = 0 if plan.close_reason else position_dir
+    return plan
+
+
+# ---------------------------------------------------------------- one day, shared by engine and backtest
+
+@dataclass
+class DayFeatures:
+    """Everything about UTC day D that does not depend on the position."""
+    day: date
+    score: ScoreResult
+    h4_fast: float
+    h4_slow: float
+    h4_open_ms: int
+    funding: FundingStat
+    directions: dict[str, int]
+    events: list[dict[str, Any]]
+    g_regime: GateResult
+    g_h4: GateResult
+    g_funding: GateResult
+    g_event: GateResult
+    caps: list[tuple[str, float]]
+
+    @property
+    def gates(self) -> list[GateResult]:
+        return [self.g_regime, self.g_h4, self.g_funding, self.g_event]
+
+    @property
+    def event_active(self) -> bool:
+        return self.g_event.triggered
+
+    def gates_triggered(self) -> list[str]:
+        return [g.name for g in self.gates if g.triggered]
+
+
+def day_features(cfg: Any, day_d: date, daily: Sequence[Candle], h4: Sequence[Candle],
+                 funding_records: Sequence[tuple[int, float]], events: list[dict[str, Any]]) -> DayFeatures:
+    """Score, gates and signal history for UTC day `day_d` from data closed before D 00:00 UTC.
+    `events`: event windows active at the decision time (from the calendar)."""
+    s, g = cfg.strategy, cfg.gates
+    sc = compute_score(daily, day_d, s)
+    e_fast, e_slow, h4_open = h4_emas(h4, day_d, int(g.h4_ema_fast), int(g.h4_ema_slow))
+    cutoff = day_start_ms(day_d) + int(float(g.funding_cutoff_tolerance_minutes) * MINUTE_MS)
+    fstat = funding_percentile(funding_records, cutoff, int(g.funding_lookback_days))
+    dirs = direction_history(daily, day_d, int(s.opposite_days_rule) + 2, s)
+    g_regime = regime_gate(sc.close, sc.ema_regime, sc.direction, float(g.regime_cap))
+    g_h4 = h4_gate(e_fast, e_slow, h4_open, sc.direction, float(g.h4_cap))
+    g_fund = funding_gate(fstat.percentile, sc.direction, float(g.funding_high_percentile), float(g.funding_low_percentile))
+    caps = [(x.name, float(x.cap)) for x in (g_regime, g_h4) if x.triggered and x.cap is not None]
+    return DayFeatures(day_d, sc, e_fast, e_slow, h4_open, fstat, dirs, events, g_regime, g_h4, g_fund,
+                       event_gate(events), caps)
+
+
+def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | None, entered_today: bool,
+             paused_reason: str | None, entry_block: str | None = None, ungated: bool = False,
+             funding_rule_closes: bool = True, ignore_events: bool = False) -> tuple[Plan, DecisionContext]:
+    s, g = cfg.strategy, cfg.gates
+    sc = f.score
+    ctx = DecisionContext(
+        direction=sc.direction, abs_score=sc.abs_score, tier_fraction=sc.tier_fraction,
+        caps=[] if ungated else list(f.caps),
+        funding_pct=None if ungated else f.funding.percentile,
+        funding_high=float(g.funding_high_percentile), funding_low=float(g.funding_low_percentile),
+        event_active=False if (ungated or ignore_events) else f.event_active, position_dir=position_dir,
+        opposite_streak=opposite_streak(position_dir, entry_day, f.directions, f.day),
+        entered_today=entered_today, paused_reason=paused_reason,
+        flip_min_abs_score=float(s.flip_min_abs_score), opposite_days_rule=int(s.opposite_days_rule),
+        event_allows_rule_closes=bool(g.event_allows_rule_closes), entry_block=entry_block,
+        funding_rule_closes=funding_rule_closes)
+    return decide_plan(ctx), ctx

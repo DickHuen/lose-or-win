@@ -6,7 +6,8 @@ if not exist "venv\Scripts\python.exe" goto notinstalled
 echo This registers the bot's routines in Windows Task Scheduler (folder "btcperp"):
 echo   decide 08:30 / 08:50 HKT, manage 5x a day, reports, backup, dashboard at logon.
 echo From then on the bot TRADES REAL MONEY automatically while this PC is on.
-echo Only do this after the smoketest passed and you decided to go live.
+echo It refuses unless a FULL smoketest (YES or W) of this version with this proxy key passed.
+echo Only do this after the go-live checklist in START_HERE.md is complete.
 echo.
 set "ANS="
 set /p "ANS=Type GO and press Enter to start: "

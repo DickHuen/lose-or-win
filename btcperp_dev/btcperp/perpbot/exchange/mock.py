@@ -61,6 +61,8 @@ class MockExchange(Exchange):
         self.used_coids: set[str] = set()
         # behaviour switches / failure injection
         self.fok_outcomes: deque[bool] = deque()     # queued FOK outcomes (True fill, False unfilled)
+        self.server_skew_ms = 0                       # exchange clock minus our clock
+        self.server_time_fails = False
         self.auto_cancel_leftovers = True
         self.cancel_only = False
         self.position_tpsl_fails = False
@@ -218,7 +220,9 @@ class MockExchange(Exchange):
         return dict(self.geoblock)
 
     def get_server_time_raw(self) -> Any:
-        return {"time": self._now_ms()}
+        if self.server_time_fails:
+            raise ExchangeError("server time read failed (mock)")
+        return {"time": self._now_ms() + self.server_skew_ms}
 
     # ------------------------------------------------------------ account
     def get_account(self) -> AccountSnapshot:

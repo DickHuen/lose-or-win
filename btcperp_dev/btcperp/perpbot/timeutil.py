@@ -11,6 +11,7 @@ UTC = timezone.utc
 HKT = timezone(timedelta(hours=8), "HKT")
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
+MINUTE_MS = 60_000
 
 
 class Clock:

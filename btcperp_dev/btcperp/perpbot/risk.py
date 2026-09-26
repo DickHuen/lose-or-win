@@ -160,12 +160,21 @@ class StreakState:
     triggered: bool
 
 
-def losing_streak(trades_newest_first: Sequence[dict[str, Any]], limit_pct: float) -> StreakState:
-    """trades: dicts with net_pnl and equity_at_entry, newest first (already filtered since last resume)."""
+def is_tie(t: dict[str, Any], tie_pct: float) -> bool:
+    """Review D11: |net PnL| within tie_pct % of equity at entry is a tie."""
+    eq = float(t.get("equity_at_entry") or 0.0)
+    return eq > 0 and abs(float(t["net_pnl"])) <= eq * tie_pct / 100.0
+
+
+def losing_streak(trades_newest_first: Sequence[dict[str, Any]], limit_pct: float, tie_pct: float = 0.0) -> StreakState:
+    """trades: dicts with net_pnl and equity_at_entry, newest first (already filtered since last resume).
+    A tie (review D11) neither ends nor extends the streak and is not counted in its loss."""
     loss = 0.0
     n = 0
     start_equity = 0.0
     for t in trades_newest_first:
+        if tie_pct > 0 and is_tie(t, tie_pct):
+            continue
         pnl = float(t["net_pnl"])
         if pnl >= 0:
             break

@@ -136,6 +136,8 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("risk.expectancy_window_trades", int, lambda v: v >= 1),
     ("risk.equity_source", str, lambda v: v in ("wallet_plus_upnl", "total_account_value")),
     ("risk.equity_floor_pct_of_net_funded", _NUM, lambda v: 0 < v < 100),
+    ("risk.losing_streak_tie_pct", _NUM, lambda v: 0 <= v < 5),
+    ("schedule.max_clock_skew_seconds", _NUM, lambda v: 0 < v <= 300),
     ("polymarket.flat_confirm_delay_seconds", _NUM, lambda v: v >= 0),
     ("smoketest.bracket_reject_test", bool, None),
     ("risk.equity_crosscheck_tolerance_pct", _NUM, lambda v: v >= 0),
@@ -148,6 +150,17 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("shadow.fee_rate_estimate", _NUM, lambda v: v >= 0),
     ("shadow.breakeven_trigger_atr", _NUM, lambda v: v > 0),
     ("reports.weekly_days", int, lambda v: v >= 1),
+    ("backtest.data_start", str, None),
+    ("backtest.first_window_start", str, None),
+    ("backtest.window_months", int, lambda v: 1 <= v <= 24),
+    ("backtest.start_offsets_days", list, lambda v: len(v) >= 1 and all(isinstance(x, int) and 0 <= x < 60 for x in v)),
+    ("backtest.start_equity_usd", _NUM, lambda v: v > 0),
+    ("backtest.kill_pause_days", int, lambda v: v >= 0),
+    ("backtest.exit_slippage_bps", _NUM, lambda v: 0 <= v <= 500),
+    ("backtest.quantity_decimals", int, lambda v: 0 <= v <= 8),
+    ("backtest.calendar_history_file", str, None),
+    ("backtest.criteria_file", str, None),
+    ("reports.max_missed_decision_days", int, lambda v: v >= 0),
     ("smoketest.resting_order_offset_pct", _NUM, lambda v: 0 < v < 50),
     ("smoketest.probe_proxy_withdrawal", bool, None),
     ("smoketest.perps_deposit_contract", str, None),
@@ -185,6 +198,12 @@ def validate(data: dict[str, Any]) -> None:
             continue
         if check is not None and not check(value):
             errors.append(f"config key {key}: invalid value {value!r}")
+    try:
+        base = data["risk"]["equity_floor_reset_baseline_usd"]
+        if base is not None and (isinstance(base, bool) or not isinstance(base, (int, float)) or base <= 0):
+            errors.append("config key risk.equity_floor_reset_baseline_usd: must be null or a positive number")
+    except (KeyError, TypeError):
+        errors.append("missing config key: risk.equity_floor_reset_baseline_usd")
     try:
         s = data["strategy"]
         if not s["tier_low_max"] < s["tier_mid_max"]:

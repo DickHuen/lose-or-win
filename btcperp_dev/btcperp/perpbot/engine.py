@@ -32,6 +32,7 @@ from perpbot.exchange.base import (
     Order,
     PlaceResult,
     Position,
+    parse_server_time_ms,
 )
 from perpbot.indicators import Candle
 from perpbot.records import Records, client_order_id
@@ -51,19 +52,12 @@ from perpbot.risk import (
 )
 from perpbot.storage import Store
 from perpbot.strategy import (
-    DecisionContext,
     InsufficientData,
     bracket_prices,
     compute_score,
-    decide_plan,
-    direction_history,
-    event_gate,
-    funding_gate,
-    funding_percentile,
-    h4_emas,
-    h4_gate,
-    opposite_streak,
-    regime_gate,
+    day_features,
+    plan_for,
+    restrict_to_close,
 )
 from perpbot.telegram import Telegram, parse_command
 from perpbot.timeutil import (
@@ -75,11 +69,30 @@ from perpbot.timeutil import (
     fmt_hkt,
     fmt_utc,
     from_ms,
+    hkt_at,
     to_ms,
     utc_day,
 )
 
 log = logging.getLogger("perpbot.engine")
+
+KILL_SWITCH_REASONS = ("kill_drawdown", "kill_losing_streak")
+REASON_HELP = {
+    "manual_pause": "you paused new entries (Unpause.bat removes it)",
+    "manual_kill": "you closed the position with Kill (Resume.bat clears it)",
+    "kill_drawdown": "drawdown kill switch (Resume.bat + RESET-PEAK)",
+    "kill_losing_streak": "losing-streak kill switch (Resume.bat + RESET-PEAK)",
+    "equity_floor": "equity floor hard stop (needs a new config version with the new baseline)",
+    "adopted_over_budget": "an adopted position was over the risk budget (Resume.bat clears it)",
+}
+
+
+def describe_reasons(reasons: list[str]) -> str:
+    return "; ".join(REASON_HELP.get(r, r) for r in reasons)
+
+
+class NeedsConfirmation(Exception):
+    """A command needs an extra typed confirmation (exit code 6)."""
 
 EXIT_REASON = {
     "flip": "flip", "three_day_rule": "3day_rule", "funding_rule": "funding_rule",
@@ -110,7 +123,7 @@ def _fmt_dec(d: Decimal) -> str:
 class Engine:
     def __init__(self, *, cfg: Any, calendar: EventCalendar, store: Store, exchange: Exchange, binance: Any,
                  telegram: Telegram, clock: Clock, secrets: Any, sleep: Callable[[float], None] = time.sleep,
-                 notifier: Callable[[str, str], Any] | None = None) -> None:
+                 notifier: Callable[[str, str], Any] | None = None, defer_notifications: bool = False) -> None:
         self.cfg = cfg
         self.calendar = calendar
         self.store = store
@@ -122,6 +135,8 @@ class Engine:
         self.secrets = secrets
         self.sleep = sleep
         self.notifier = notifier
+        self.defer_notifications = defer_notifications      # review v1.2.0 item 6: the CLI sends after the run
+        self.outbox: list[tuple[str, str, str]] = []
         self._inst: Instrument | None = None
         self._kill_close_tried = False
 
@@ -133,19 +148,45 @@ class Engine:
         return utc_day(self.now()).isoformat()
 
     def alert(self, kind: str, text: str, dedupe_key: str | None = None) -> None:
-        """Store an alert for the owner (shown on the dashboard) and pop up a Windows notification.
-        Telegram is used only if enabled in config."""
+        """Store an alert for the owner (shown on the dashboard); the Windows notification (and Telegram,
+        only if enabled in config) is sent after the run when `defer_notifications` is set, so a slow
+        notification can never delay trading actions such as re-placing a stop-loss."""
         if dedupe_key and self.rec.alert_sent(dedupe_key):
             return
         msg = f"[btcperp] {kind}: {text}\n({fmt_hkt(self.now())})"
-        sent = self.tg.send(msg)
-        self.store.insert("alerts", kind=kind, dedupe_key=dedupe_key, sent=int(sent), text=msg[:4000])
+        self.store.insert("alerts", kind=kind, dedupe_key=dedupe_key, sent=0, text=msg[:4000])
         log.warning("ALERT %s: %s", kind, text)
-        if self.notifier is not None:
+        if self.defer_notifications:
+            self.outbox.append((kind, text, msg))
+        else:
+            self._deliver(kind, text, msg)
+
+    def _deliver(self, kind: str, text: str, msg: str, *, desktop: bool = True) -> None:
+        try:
+            self.tg.send(msg)
+        except Exception:  # noqa: BLE001
+            log.warning("telegram send failed", exc_info=True)
+        if desktop and self.notifier is not None:
             try:
                 self.notifier(kind, text)
             except Exception:  # noqa: BLE001
                 log.warning("desktop notification failed", exc_info=True)
+
+    MAX_TOASTS_PER_RUN = 5
+
+    def flush_notifications(self) -> int:
+        """Send queued notifications (called by the CLI after the run and after the lock is released).
+        At most MAX_TOASTS_PER_RUN desktop pop-ups, then one summary; every alert is on the dashboard."""
+        items, self.outbox = self.outbox, []
+        for i, (kind, text, msg) in enumerate(items):
+            self._deliver(kind, text, msg, desktop=i < self.MAX_TOASTS_PER_RUN)
+        extra = len(items) - self.MAX_TOASTS_PER_RUN
+        if extra > 0 and self.notifier is not None:
+            try:
+                self.notifier("more alerts", f"{extra} more alerts - see the dashboard")
+            except Exception:  # noqa: BLE001
+                log.warning("desktop notification failed", exc_info=True)
+        return len(items)
 
     def instrument(self) -> Instrument:
         if self._inst is not None:
@@ -575,7 +616,8 @@ class Engine:
             floor, floor_hit = None, False
         st = self.rec.state()
         streak_trades = self.rec.closed_trades(since_ms=self.rec.last_resume_ms())
-        streak = losing_streak(streak_trades, float(self.cfg.risk.kill_losing_streak_pct))
+        streak = losing_streak(streak_trades, float(self.cfg.risk.kill_losing_streak_pct),
+                               float(self.cfg.risk.losing_streak_tie_pct))
         all_trades = self.rec.closed_trades()
         exp, n_exp = size_weighted_expectancy(all_trades, int(self.cfg.risk.expectancy_window_trades))
         status = {"evaluated": evaluate, "drawdown_pct": dd.drawdown_pct, "drawdown_triggered": dd.triggered,
@@ -1138,55 +1180,78 @@ class Engine:
                                                         "close": c.close, "volume": c.volume} for c in h4))
         self.store.insert_many_ignore("bn_funding", ({"fund_ts_ms": ts, "rate": r, "mark": m} for ts, r, m in funding))
 
-    def make_decision(self, day_d: Any, inputs: dict[str, Any], rr: ReconcileResult) -> dict[str, Any]:
+    def decision_blocks(self, day_d: Any) -> list[str]:
+        """Reasons that block NEW positions today but still allow closes (review v1.2.0 items 9 and 15)."""
+        out: list[str] = []
+        expired = self.calendar.expired_types(day_d)
+        if expired:
+            out.append(f"economic calendar coverage ended for {', '.join(expired)}: no new positions until an updated "
+                       f"calendar.yaml is installed")
+            self.alert("calendar expired", out[-1], dedupe_key=f"calendar_expired:{day_d.isoformat()}")
+        skew, err = self.clock_skew_ms()
+        limit_ms = float(self.cfg.schedule.max_clock_skew_seconds) * 1000.0
+        if skew is None:
+            out.append(f"exchange server time unreadable ({err}): clock not verified, no new positions")
+        elif abs(skew) > limit_ms:
+            out.append(f"this computer's clock differs from the exchange by {skew / 1000:+.1f}s "
+                       f"(limit {self.cfg.schedule.max_clock_skew_seconds}s): no new positions")
+            self.alert("clock skew", out[-1] + ". Sync the Windows clock (Settings > Time > Sync now).",
+                       dedupe_key=f"clock_skew:{day_d.isoformat()}")
+        return out
+
+    def clock_skew_ms(self) -> tuple[float | None, str]:
+        err = ""
+        for _ in range(2):
+            try:
+                server = parse_server_time_ms(self.ex.get_server_time_raw())
+                if server is not None:
+                    return float(server - to_ms(self.now())), ""
+                err = "unrecognised response"
+            except ExchangeError as e:
+                err = str(e)
+        return None, err
+
+    def make_decision(self, day_d: Any, inputs: dict[str, Any], rr: ReconcileResult, *,
+                      late: bool = False) -> dict[str, Any]:
+        """The daily decision. `late=True` (decide or manage after the entry window, no intent yet):
+        the same rules on the same data (closed at D 00:00 UTC, events at the window start), close part only."""
         cfg = self.cfg
         now = self.now()
         day = day_d.isoformat()
-        sc = compute_score(inputs["daily"], day_d, cfg.strategy)
-        e_fast, e_slow, h4_open = h4_emas(inputs["h4"], day_d, int(cfg.gates.h4_ema_fast), int(cfg.gates.h4_ema_slow))
-        cutoff = day_start_ms(day_d) + int(float(cfg.gates.funding_cutoff_tolerance_minutes) * 60_000)
-        fstat = funding_percentile([(ts, r) for ts, r, _ in inputs["funding"]], cutoff, int(cfg.gates.funding_lookback_days))
-        dirs = direction_history(inputs["daily"], day_d, int(cfg.strategy.opposite_days_rule) + 2, cfg.strategy)
+        at = hkt_at(day_d, cfg.schedule.entry_window_start_hkt) if late else now
+        active = self.calendar.active_windows(at, cfg.gates.event_anchor_hkt, float(cfg.gates.event_post_release_hours))
+        ev_list = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(st),
+                    "window_end_utc": fmt_utc(en), "note": e.note} for e, st, en in active]
+        f = day_features(cfg, day_d, inputs["daily"], inputs["h4"], [(ts, r) for ts, r, _ in inputs["funding"]], ev_list)
+        sc, fstat, dirs = f.score, f.funding, f.directions
+        e_fast, e_slow, h4_open = f.h4_fast, f.h4_slow, f.h4_open_ms
         trade = rr.trade
         pos_dir = rr.position.direction if rr.position else 0
         entry_day = datetime.fromisoformat(trade["entry_utc_day"]).date() if (trade and trade.get("entry_utc_day")) else day_d
-        streak = opposite_streak(pos_dir, entry_day, dirs, day_d)
-        active = self.calendar.active_windows(now, cfg.gates.event_anchor_hkt, float(cfg.gates.event_post_release_hours))
-        ev_list = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(s),
-                    "window_end_utc": fmt_utc(en), "note": e.note} for e, s, en in active]
-        g_regime = regime_gate(sc.close, sc.ema_regime, sc.direction, float(cfg.gates.regime_cap))
-        g_h4 = h4_gate(e_fast, e_slow, h4_open, sc.direction, float(cfg.gates.h4_cap))
-        g_fund = funding_gate(fstat.percentile, sc.direction, float(cfg.gates.funding_high_percentile),
-                              float(cfg.gates.funding_low_percentile))
-        g_event = event_gate(ev_list)
-        caps = [(g.name, float(g.cap)) for g in (g_regime, g_h4) if g.triggered and g.cap is not None]
         paused = self.paused_reason()
         geo = inputs.get("geoblock") or {}
         region_blocked = geo.get("blocked") is True
         entered = self.entered_today(day)
-        ctx = DecisionContext(
-            direction=sc.direction, abs_score=sc.abs_score, tier_fraction=sc.tier_fraction, caps=caps,
-            funding_pct=fstat.percentile, funding_high=float(cfg.gates.funding_high_percentile),
-            funding_low=float(cfg.gates.funding_low_percentile), event_active=g_event.triggered, position_dir=pos_dir,
-            opposite_streak=streak, entered_today=entered, paused_reason=paused,
-            flip_min_abs_score=float(cfg.strategy.flip_min_abs_score),
-            opposite_days_rule=int(cfg.strategy.opposite_days_rule),
-            event_allows_rule_closes=bool(cfg.gates.event_allows_rule_closes))
-        plan = decide_plan(ctx)
+        blocks = [] if late else self.decision_blocks(day_d)
+        plan, ctx = plan_for(f, cfg, position_dir=pos_dir, entry_day=entry_day, entered_today=entered,
+                             paused_reason=paused, entry_block="; ".join(blocks) or None)
+        streak = ctx.opposite_streak
         if region_blocked and plan.enter_direction:
-            plan.entry_blocked.append(f"region blocked by geoblock ({geo.get('country')}/{geo.get('region')})")
-            plan.enter_direction, plan.enter_fraction = 0, 0.0
-            plan.action = "close" if plan.close_reason else "none"
-            plan.target_direction = 0 if plan.close_reason else pos_dir
+            restrict_to_close(plan, f"region blocked by geoblock ({geo.get('country')}/{geo.get('region')})", pos_dir)
+        if late:
+            restrict_to_close(plan, "late decision after the entry window: close rules only, no late entry", pos_dir)
+        g_regime, g_h4, g_fund, g_event = f.g_regime, f.g_h4, f.g_funding, f.g_event
+        caps = f.caps
         ticker, book = inputs["ticker"], inputs["book"]
-        gates_triggered = [g.name for g in (g_regime, g_h4, g_fund, g_event) if g.triggered]
+        gates_triggered = f.gates_triggered()
         pm_rates = [r for _, r in inputs["pm_funding"]]
         plan_d = plan.to_dict()
         plan_d.update({
             "utc_day": day, "score": sc.score, "direction": sc.direction, "abs_score": sc.abs_score,
             "tier_fraction": sc.tier_fraction, "caps": caps, "gates_triggered": gates_triggered, "atr": sc.atr,
             "mark": ticker.mark, "decision_ts_ms": to_ms(now), "position_dir_at_decision": pos_dir,
-            "funding_percentile": fstat.percentile, "event_active": g_event.triggered,
+            "funding_percentile": fstat.percentile, "event_active": g_event.triggered, "late": late,
+            "entry_blocks": blocks,
         })
         spread = book.best_ask - book.best_bid if (book.bids and book.asks) else None
         decision = {
@@ -1369,6 +1434,8 @@ class Engine:
                                   reason="decide ran after the entry window", data={"run_hkt": fmt_hkt(now)})
                 self.alert("missed", f"decide ran at {fmt_hkt(now)}, after the entry window "
                            f"({cfg.schedule.entry_window_end_hkt} HKT); no late entry", dedupe_key=f"missed_window:{day}")
+            if intent is None and rr.position is not None:
+                intent = self.late_decision(day_d, rr)          # review v1.2.0 item 2: close rules still apply
             if intent is not None:
                 out["actions"] = self.execute_intent(day, intent, allow_entry=False, window_open=False)
             out["result"] = "missed entry window"
@@ -1388,6 +1455,22 @@ class Engine:
         self.update_shadow()
         return out
 
+    def late_decision(self, day_d: Any, rr: ReconcileResult) -> dict[str, Any]:
+        """No decision was made in today's entry window but a position is open: evaluate today's close
+        rules (reverse signal, 3-day rule, crowded funding) on the data closed at D 00:00 UTC. Never enters."""
+        day = day_d.isoformat()
+        inputs = self.gather_inputs(day_d)
+        try:
+            plan = self.make_decision(day_d, inputs, rr, late=True)
+        except InsufficientData as e:
+            self.store.insert("decisions", utc_day=day, score=None, direction=None, action="error",
+                              reason=f"insufficient data (late decision): {e}", data={})
+            raise EngineError(f"insufficient market data for the late decision: {e}") from e
+        self.rec.write_intent(day, plan)
+        self.alert("late decision", f"no decision in today's entry window; evaluated today's close rules late "
+                   f"(no entry): {self.decision_text(plan)}", dedupe_key=f"late_decision:{day}")
+        return plan
+
     def _entry_resolved(self, day: str) -> bool:
         return any(e["step"] == "entry" and e["status"] in ("done", "failed", "missed", "blocked")
                    for e in self.rec.intent_events(day))
@@ -1399,6 +1482,15 @@ class Engine:
         self.log_market_data()
         actions = list(rr.actions)
         intent = self.rec.intent(day)
+        day_d = utc_day(now)
+        if (intent is None and rr.position is not None
+                and now > hkt_at(day_d, self.cfg.schedule.entry_window_end_hkt)):
+            try:
+                intent = self.late_decision(day_d, rr)
+            except Exception as e:  # noqa: BLE001 - protection below must still run
+                log.error("late decision failed: %s", e)
+                self.alert("late decision failed", f"{e}; today's close rules were not evaluated, only the "
+                           f"exchange SL/TP protect the position", dedupe_key=f"late_decision_failed:{day}")
         if intent is not None:
             actions += self.execute_intent(day, intent, allow_entry=False,
                                            window_open=self._in_window(now))
@@ -1436,34 +1528,79 @@ class Engine:
         self.alert("killed", f"kill ({source}): {msg}{'' if clean else ', leftover orders remain'}; bot paused")
         return msg
 
-    def cmd_resume(self) -> str:
-        acct = self.ex.get_account()
-        eq = self.equity(acct)
-        if not eq["valid"]:
-            raise EngineError("cannot resume: equity is unreadable")
+    def cmd_unpause(self) -> str:
+        """Remove only the manual pause (review v1.2.0 item 7). Kill switches and the equity floor stay."""
         st = self.rec.state()
+        if "manual_pause" in st["pause_reasons"]:
+            self.rec.set_state(remove_reasons=("manual_pause",), note="unpause: manual pause removed")
+            msg = "manual pause removed"
+        else:
+            msg = "no manual pause was active"
+        rest = self.rec.state()["pause_reasons"]
+        if rest:
+            msg += f"; STILL PAUSED by: {', '.join(rest)} ({describe_reasons(rest)})"
+        self.alert("unpaused" if not rest else "unpause: still paused", msg)
+        return msg
+
+    def cmd_resume(self, reset_peak: bool = False) -> str:
+        """Clear pauses. A kill switch (drawdown / losing streak) is cleared only with reset_peak: the
+        drawdown peak is reset to the current equity and the losing-streak count restarts. The equity floor
+        needs a new config version that states `risk.equity_floor_reset_baseline_usd`."""
+        st = self.rec.state()
+        reasons = list(st["pause_reasons"])
+        kill = [r for r in reasons if r in KILL_SWITCH_REASONS]
+        if kill and not reset_peak:
+            raise NeedsConfirmation(
+                f"kill switch active ({', '.join(kill)}). Resuming it resets the drawdown peak to today's equity and "
+                f"restarts the losing-streak count. Confirm with RESET-PEAK (resume --reset-peak).")
         prev = self.store.latest("equity_log")
         net_funded = (prev["data"] or {}).get("net_funded") if prev and isinstance(prev["data"], dict) else None
         keep_floor = False
         floor_reset = False
-        if "equity_floor" in st["pause_reasons"]:
+        base = self.cfg.risk.equity_floor_reset_baseline_usd
+        if "equity_floor" in reasons:
             trig = self.store.latest("alerts", "kind = ?", ["KILL SWITCH: equity floor"])
-            if trig is None or trig["config_version"] == self.cfg.config_version:
+            if trig is None or trig["config_version"] == self.cfg.config_version or base is None:
                 keep_floor = True
             else:
                 floor_reset = True
-                net_funded = eq["equity"]        # new config version accepted the loss: new funded baseline
-        self.rec.set_state(clear_reasons=True, note="resume (user confirmed): pause, kill switches cleared; peak reset")
+                net_funded = float(base)       # the new config states the new funded baseline explicitly
+        eq = None
+        if reset_peak or floor_reset:
+            eq = self.equity(self.ex.get_account())
+            if not eq["valid"]:
+                raise EngineError("cannot resume: equity is unreadable")
+        if reset_peak:
+            note = "resume (user confirmed RESET-PEAK): pauses and kill switches cleared; peak reset; streak restarted"
+        else:
+            note = "clear pauses (no kill switch active): peak and losing-streak count unchanged"
+        self.rec.set_state(clear_reasons=True, note=note)
         if keep_floor:
-            self.rec.set_state(add_reason="equity_floor", note="equity floor stays: needs a new config version")
-        self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"], peak=eq["equity"],
-                          drawdown_pct=0.0, data={**eq, "peak_reset": True, "net_funded": net_funded,
-                                                  "floor_reset": floor_reset})
-        msg = f"pause cleared; drawdown peak reset to {eq['equity']:.2f}; losing-streak count restarted"
+            self.rec.set_state(add_reason="equity_floor", note="equity floor stays: needs a new config version with "
+                                                              "risk.equity_floor_reset_baseline_usd")
+        if eq is not None:
+            peak = eq["equity"] if reset_peak else (float(prev["peak"]) if prev and prev["peak"] is not None else eq["equity"])
+            self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"], peak=peak,
+                              drawdown_pct=0.0 if reset_peak else (prev["drawdown_pct"] if prev else 0.0),
+                              data={**eq, "peak_reset": reset_peak, "net_funded": net_funded, "floor_reset": floor_reset})
+        msg = "pauses cleared"
+        if reset_peak:
+            msg += f"; drawdown peak reset to {eq['equity']:.2f}; losing-streak count restarted"
+        if floor_reset:
+            msg += f"; equity floor re-based on the configured funded capital {net_funded:.2f}"
         if keep_floor:
-            msg += ". EQUITY FLOOR STOP REMAINS: it can only be cleared by a new config version"
+            msg += ". EQUITY FLOOR STOP REMAINS: it needs a new config version that states the new baseline"
         self.alert("resumed" if not keep_floor else "resume: equity floor still active", msg)
         return "resumed" if not keep_floor else "equity floor still active"
+
+    def pause_reasons_text(self) -> str:
+        st = self.rec.state()
+        lines = [f"state: {self.rec.display_state()}"]
+        if not st["pause_reasons"]:
+            lines.append("no pause is active")
+        for r in st["pause_reasons"]:
+            lines.append(f"- {r}: {REASON_HELP.get(r, 'see the dashboard alerts')}")
+        return "\n".join(lines)
 
     # ================================================================ text
     def decision_text(self, p: dict[str, Any]) -> str:

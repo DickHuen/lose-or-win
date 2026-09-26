@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.environ["BTCPERP_NO_TOAST"] = "1"      # never pop real Windows notifications from the test suite
+os.environ["BTCPERP_NO_SCHTASKS"] = "1"   # never touch the real Windows scheduled tasks (selftest runs on the bot PC)
 
 from perpbot.calendar_events import parse_calendar  # noqa: E402
 from perpbot.config import config_from_dict, load_config  # noqa: E402

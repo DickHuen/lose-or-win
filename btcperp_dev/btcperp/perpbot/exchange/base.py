@@ -276,3 +276,19 @@ class Exchange:
     def cancel_orders(self, order_ids: list[int]) -> list[CancelResult]: raise NotImplementedError
     def probe_proxy_withdrawal(self, *, owner: str, amount_base_units: int) -> dict[str, Any]: raise NotImplementedError
     def close(self) -> None: pass
+
+
+def parse_server_time_ms(raw: Any) -> int | None:
+    """Server time in ms from GET /v1/info/time (shape not in the SDK: first large number found)."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        v = raw
+    elif isinstance(raw, dict):
+        v = next((x for x in raw.values() if isinstance(x, (int, float)) and not isinstance(x, bool)
+                  and x > 1_000_000_000), None)
+        if v is None:
+            return None
+    else:
+        return None
+    return int(v if v > 10_000_000_000 else v * 1000)

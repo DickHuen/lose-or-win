@@ -51,7 +51,7 @@ def test_b1_unprotectable_sl_closes_single_entry(world, monkeypatch):
 
 
 def test_b1_rejected_and_stale_position_read_no_retry(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.reject_sl_row = True
     w.ex.hide_orders_from_status = True
@@ -69,7 +69,7 @@ def test_b1_rejected_and_stale_position_read_no_retry(world):
 
 
 def test_b1_rejected_and_long_stale_read_defers_to_next_run(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.reject_sl_row = True
     w.ex.hide_orders_from_status = True
@@ -91,7 +91,7 @@ def test_b1_rejected_and_long_stale_read_defers_to_next_run(world):
 
 
 def test_b1_true_fok_unfilled_still_retries_once(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.fok_outcomes.extend([False, True])
     w.decide()
@@ -307,15 +307,23 @@ def test_e_equity_floor_hard_stop_needs_new_config_version(world, cfg_dict, tmp_
     w.at(hkt(2026, 10, 5, 12, 30)).manage()
     st = w.state()
     assert w.pos() == 0 and "equity_floor" in st["pause_reasons"]
-    assert w.engine().cmd_resume() == "equity floor still active"
+    assert w.engine().cmd_resume(reset_peak=True) == "equity floor still active"
     assert w.state()["pause_reasons"] == ["equity_floor"]
     from perpbot.config import config_from_dict
 
     cfg_dict["config_version"] = "1.1.1-test"
     w.cfg = config_from_dict(cfg_dict)
     w.store.config_version = "1.1.1-test"
-    assert w.engine().cmd_resume() == "resumed"
+    assert w.engine().cmd_resume(reset_peak=True) == "equity floor still active"      # v1.3.0: new version alone is not enough
+    assert w.state()["pause_reasons"] == ["equity_floor"]
+    cfg_dict["config_version"] = "1.1.2-test"
+    cfg_dict["risk"]["equity_floor_reset_baseline_usd"] = 7_400        # owner states the new funded baseline
+    w.cfg = config_from_dict(cfg_dict)
+    w.store.config_version = "1.1.2-test"
+    assert w.engine().cmd_resume(reset_peak=True) == "resumed"
     assert not w.state()["paused"]
+    eq = w.store.latest("equity_log")
+    assert eq["data"]["net_funded"] == 7_400 and eq["data"]["floor_reset"] is True
     w.at(hkt(2026, 10, 5, 16, 30)).manage()
     assert not w.state()["paused"]                        # new funded baseline, no immediate re-trigger
 

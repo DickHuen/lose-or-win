@@ -2,7 +2,8 @@
 
 Read-only view of the bot's database (state, position, equity, decision, trades, alerts, runs,
 calendar, shadow results). The only actions are "refresh from exchange" (runs the read-only
-`snapshot` command) and "mark alerts read". Trading controls stay in the .bat shortcuts.
+`snapshot` command) and "mark alerts read". The dashboard NEVER gets trading controls (review
+v1.2.0 item 20): pause / kill / resume stay in the .bat shortcuts, which ask for typed confirmation.
 POST requests need a per-session token and the Host header must be localhost (blocks other
 websites from driving the page).
 """
@@ -31,6 +32,10 @@ from perpbot.storage import Store
 from perpbot.timeutil import Clock, fmt_hkt, from_ms, to_ms
 
 log = logging.getLogger("perpbot.dashboard")
+
+# The page is self-contained: inline script/style, data: favicon, fetches to itself only.
+CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; "
+       "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
 
 def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[str, Any]:
@@ -177,6 +182,8 @@ def make_handler(state: DashboardState, port: int) -> type[BaseHTTPRequestHandle
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", CSP)                 # review v1.2.0 item 20
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(body)
 

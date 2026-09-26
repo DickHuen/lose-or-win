@@ -70,14 +70,18 @@ def test_task_xml_daily_runs_pythonw_in_install_folder(cfg):
     assert _text(dom, "WakeToRun") == "true" and _text(dom, "StartWhenAvailable") == "true"
     assert _text(dom, "LogonType") == "InteractiveToken"
     assert dom.getElementsByTagName("ScheduleByDay")
-    # registered at 10:00 local: 08:30 already passed today, so the first run is tomorrow (never "missed")
-    assert _text(dom, "StartBoundary") == "2026-10-06T08:30:00"
+    # registered at 10:00 local: 08:30 already passed today, so the first run is tomorrow (never "missed");
+    # daily tasks are pinned to HKT with an explicit +08:00 offset (review v1.2.0 item 13)
+    assert _text(dom, "StartBoundary") == "2026-10-06T08:30:00+08:00"
 
 
 def test_task_xml_start_boundary_today_when_still_ahead(cfg):
     spec = next(s for s in winsched.plan(cfg) if s.name == "manage_1230")
     _, dom = _xml(spec)
-    assert _text(dom, "StartBoundary") == "2026-10-05T12:30:00"
+    assert _text(dom, "StartBoundary") == "2026-10-05T12:30:00+08:00"
+    # a London computer (UTC+1) at 10:00 local = 17:00 HKT: 12:30 HKT already passed -> tomorrow, still 12:30 HKT
+    _, dom = _xml(spec, offset=1.0)
+    assert _text(dom, "StartBoundary") == "2026-10-06T12:30:00+08:00"
 
 
 def test_task_xml_weekly_and_monthly_day_shift(cfg):
@@ -127,7 +131,7 @@ def test_cli_schedule_show_and_dry_run(tmp_root, capsys):
 def test_notifier_is_off_outside_windows(cfg):
     if notify.os.name != "nt":
         assert notify.make_notifier(cfg) is None
-        assert notify.windows_toast("t", "b") is False
+        assert notify.windows_toast("t", "b") is None
 
 
 def test_notifier_on_windows_unless_tests_disable_it(cfg, monkeypatch):
@@ -137,22 +141,33 @@ def test_notifier_on_windows_unless_tests_disable_it(cfg, monkeypatch):
     assert notify.make_notifier(cfg) is None
 
 
-def test_windows_toast_passes_text_by_environment(monkeypatch):
+def test_windows_toast_passes_text_by_environment_and_does_not_wait(monkeypatch):
     calls = []
 
-    def fake_run(args, **kw):
-        calls.append((args, kw))
-        return SimpleNamespace(returncode=0, stderr=b"")
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, args, **kw):
+            calls.append((args, kw))
+
+        def communicate(self, timeout=None):
+            calls.append(("waited", timeout))
+            return b"", b""
 
     monkeypatch.setattr(notify, "os", SimpleNamespace(name="nt", environ={"PATH": "x"}))
-    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    monkeypatch.setattr(notify.subprocess, "Popen", FakePopen)
     evil = "'); Remove-Item C:\\ -Recurse; ('"
-    assert notify.windows_toast("title", evil) is True
+    n = notify.ToastNotifier()
+    assert n("title", evil) is True
     args, kw = calls[0]
+    assert len(calls) == 1                                # started, not waited for (review v1.2.0 item 6)
     assert evil not in " ".join(args)                     # user text never becomes script text
-    assert kw["env"]["BTCPERP_TOAST_BODY"] == evil and kw["env"]["BTCPERP_TOAST_TITLE"] == "title"
-    monkeypatch.setattr(notify.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("no powershell")))
-    assert notify.windows_toast("t", "b") is False        # failures never raise
+    assert kw["env"]["BTCPERP_TOAST_BODY"] == evil and kw["env"]["BTCPERP_TOAST_TITLE"] == "btcperp: title"
+    n.wait(5)
+    assert calls[-1][0] == "waited" and n.procs == []
+    monkeypatch.setattr(notify.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError("no powershell")))
+    assert notify.windows_toast("t", "b") is None         # failures never raise
+    assert n("t", "b") is False
 
 
 def test_engine_alert_calls_notifier_and_survives_its_failure(world):
@@ -400,3 +415,16 @@ def test_snapshot_skips_when_bot_busy(tmp_root):
         cli_mod.SNAPSHOT_LOCK_WAIT_SECONDS = old
         held.release()
     assert got == []
+
+
+def test_suite_never_touches_real_scheduled_tasks(cfg, tmp_path, monkeypatch):
+    """The selftest runs on the owner's Windows PC: even there it must not call schtasks or read the real marker."""
+    import os
+
+    assert os.environ.get("BTCPERP_NO_SCHTASKS") == "1"
+    monkeypatch.setattr(winsched, "os", SimpleNamespace(name="nt", environ=os.environ))
+    called = []
+    monkeypatch.setattr(winsched, "_run", lambda args: called.append(args) or (0, ""))
+    res = winsched.install(cfg, tmp_path, tmp_path / "tasks", dry_run=False)
+    assert called == [] and all(r["ok"] is None for r in res)
+    assert winsched.registered_root() is None and winsched.remove(cfg)[0]["ok"] is None

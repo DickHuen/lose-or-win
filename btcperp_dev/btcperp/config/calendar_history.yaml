@@ -1,0 +1,212 @@
+# HISTORICAL macro event calendar, used ONLY by the backtest (review v1.2.0 item 1 / B3).
+# The live bot uses config/calendar.yaml. Times are US Eastern (America/New_York).
+#
+# COMPILED BY THE DEVELOPER FROM MEMORY (no internet access to federalreserve.gov / bls.gov from the
+# development environment). The committee is asked to verify every date against the official sources:
+#   FOMC: federalreserve.gov/monetarypolicy/fomccalendars.htm (+ historical pages); statement 14:00 ET
+#   CPI:  bls.gov/schedule/news_release/cpi.htm (archive per year); 08:30 ET
+#   NFP:  bls.gov/schedule/news_release/empsit.htm (archive per year); 08:30 ET
+# Entries marked `verify: true` are the least certain (2025 shutdown, 2026). The backtest also reports
+# the live rules WITHOUT the event gate, which bounds the effect of any calendar error.
+calendar_version: "history-2026-09-26-unverified"
+timezone: "America/New_York"
+
+coverage_end:
+  FOMC: "2026-09-26"
+  CPI: "2026-09-26"
+  NFP: "2026-09-26"
+
+events:
+  - {type: NFP, date: "2020-09-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2020-09-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2020-09-16", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2020-10-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2020-10-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2020-11-05", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2020-11-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2020-11-12", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2020-12-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2020-12-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2020-12-16", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-01-08", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-01-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-01-27", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-02-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-02-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2021-03-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-03-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-03-17", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-04-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-04-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-04-28", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-05-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-05-12", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2021-06-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-06-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-06-16", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-07-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-07-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-07-28", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-08-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-08-11", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2021-09-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-09-14", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-09-22", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-10-08", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-10-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-11-03", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2021-11-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-11-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2021-12-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2021-12-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2021-12-15", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-01-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-01-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-01-26", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-02-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-02-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2022-03-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-03-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-03-16", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-04-01", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-04-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-05-04", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-05-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-05-11", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2022-06-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-06-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-06-15", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-07-08", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-07-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-07-27", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-08-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-08-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2022-09-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-09-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-09-21", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-10-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-10-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-11-02", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2022-11-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-11-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2022-12-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2022-12-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2022-12-14", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-01-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-01-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-02-01", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-02-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-02-14", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2023-03-10", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-03-14", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-03-22", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-04-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-04-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-05-03", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-05-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-05-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2023-06-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-06-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-06-14", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-07-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-07-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-07-26", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-08-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-08-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2023-09-01", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-09-13", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-09-20", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-10-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-10-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-11-01", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2023-11-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-11-14", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2023-12-08", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2023-12-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2023-12-13", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-01-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-01-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-01-31", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-02-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-02-13", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2024-03-08", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-03-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-03-20", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-04-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-04-10", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-05-01", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-05-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-05-15", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2024-06-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-06-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-06-12", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-07-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-07-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-07-31", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-08-02", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-08-14", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2024-09-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-09-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-09-18", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2024-10-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-10-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2024-11-01", time: "08:30", note: "Employment Situation"}
+  - {type: FOMC, date: "2024-11-07", time: "14:00", note: "FOMC statement"}
+  - {type: CPI, date: "2024-11-13", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2024-12-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2024-12-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2024-12-18", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-01-10", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-01-15", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2025-01-29", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-02-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-02-12", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2025-03-07", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-03-12", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2025-03-19", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-04-04", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-04-10", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2025-05-02", time: "08:30", note: "Employment Situation"}
+  - {type: FOMC, date: "2025-05-07", time: "14:00", note: "FOMC statement"}
+  - {type: CPI, date: "2025-05-13", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2025-06-06", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-06-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2025-06-18", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-07-03", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-07-15", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2025-07-30", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-08-01", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-08-12", time: "08:30", note: "CPI release"}
+  - {type: NFP, date: "2025-09-05", time: "08:30", note: "Employment Situation"}
+  - {type: CPI, date: "2025-09-11", time: "08:30", note: "CPI release"}
+  - {type: FOMC, date: "2025-09-17", time: "14:00", note: "FOMC statement"}
+  - {type: CPI, date: "2025-10-24", time: "08:30", note: "Sep 2025 CPI, delayed by the Oct-Nov 2025 federal shutdown; Oct 2025 CPI not published", verify: true}
+  - {type: FOMC, date: "2025-10-29", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-11-20", time: "08:30", note: "Sep 2025 report, delayed by the shutdown; Oct 2025 report folded into Dec", verify: true}
+  - {type: FOMC, date: "2025-12-10", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2025-12-16", time: "08:30", note: "Oct+Nov 2025 data after the shutdown", verify: true}
+  - {type: CPI, date: "2025-12-18", time: "08:30", note: "Nov 2025 CPI after the shutdown", verify: true}
+  - {type: NFP, date: "2026-01-09", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-01-13", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-01-28", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2026-02-11", time: "08:30", note: "Jan 2026 report; scheduled 02-06, believed moved by the brief Feb 2026 funding lapse", verify: true}
+  - {type: CPI, date: "2026-02-13", time: "08:30", note: "Jan 2026 CPI; scheduled 02-11, believed moved by the brief Feb 2026 funding lapse", verify: true}
+  - {type: NFP, date: "2026-03-06", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-03-11", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-03-18", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2026-04-03", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-04-10", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-04-29", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2026-05-08", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-05-12", time: "08:30", note: "CPI release", verify: true}
+  - {type: NFP, date: "2026-06-05", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-06-10", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-06-17", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2026-07-02", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-07-14", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-07-29", time: "14:00", note: "FOMC statement"}
+  - {type: NFP, date: "2026-08-07", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-08-12", time: "08:30", note: "CPI release", verify: true}
+  - {type: NFP, date: "2026-09-04", time: "08:30", note: "Employment Situation", verify: true}
+  - {type: CPI, date: "2026-09-11", time: "08:30", note: "CPI release", verify: true}
+  - {type: FOMC, date: "2026-09-16", time: "14:00", note: "FOMC statement"}

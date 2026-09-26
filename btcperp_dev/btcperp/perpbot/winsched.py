@@ -4,11 +4,16 @@
 `schtasks /Create /XML` under the Task Scheduler folder "\\btcperp\\". Tasks run the venv's pythonw.exe
 (no console window) as the logged-on user, wake the computer if allowed, and start as soon as possible
 after a missed start (a late `decide` is recognised by the bot and logged as missed; it never enters late).
+Daily tasks are pinned to Hong Kong time (StartBoundary with +08:00), so a time-zone or daylight-saving
+change on this computer does not move them (review v1.2.0 item 13).
+The folder the tasks run in is recorded in %LOCALAPPDATA%\\btcperp\\install_root.txt; manual commands
+refuse to run from any other copy (review v1.2.0 item 16).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -72,14 +77,32 @@ def start_boundary(h: int, m: int, now_local: datetime) -> str:
     return first.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, now_local: datetime) -> str:
+def hkt_boundary(hhmm: str, now_local: datetime, offset_hours: float) -> str:
+    """Next future HH:MM Hong Kong time, written with its +08:00 offset."""
+    now_hkt = now_local - timedelta(hours=offset_hours) + timedelta(hours=8)
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    first = now_hkt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if first <= now_hkt:
+        first += timedelta(days=1)
+    return first.strftime("%Y-%m-%dT%H:%M:%S") + "+08:00"
+
+
+def user_id() -> str | None:
+    dom, user = os.environ.get("USERDOMAIN"), os.environ.get("USERNAME")
+    return f"{dom}\\{user}" if (os.name == "nt" and dom and user) else None
+
+
+def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, now_local: datetime,
+             user: str | None = None) -> str:
     trig = ""
+    uid = f"<UserId>{escape(user)}</UserId>" if user else ""
     if spec.kind == "logon":
-        trig = "<LogonTrigger><Enabled>true</Enabled><Delay>PT1M</Delay></LogonTrigger>"
+        trig = f"<LogonTrigger><Enabled>true</Enabled>{uid}<Delay>PT1M</Delay></LogonTrigger>"
     else:
         h, m, shift = hkt_to_local(spec.hkt, offset_hours)
         boundary = start_boundary(h, m, now_local)
         if spec.kind == "daily":
+            boundary = hkt_boundary(spec.hkt, now_local, offset_hours)
             sched = "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
         elif spec.kind == "monthly_first" and shift == 0:
             months = "".join(f"<{mo} />" for mo in MONTHS)
@@ -100,7 +123,7 @@ def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, 
   <Triggers>{trig}</Triggers>
   <Principals>
     <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
+      {uid}<LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -131,6 +154,12 @@ def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, 
 """
 
 
+def _live() -> bool:
+    """Real Task Scheduler calls only on Windows and never from the test suite (conftest sets
+    BTCPERP_NO_SCHTASKS): the selftest runs on the owner's PC and must never touch the real tasks."""
+    return os.name == "nt" and not os.environ.get("BTCPERP_NO_SCHTASKS")
+
+
 def _python_exe(root: Path) -> Path:
     return root / "venv" / "Scripts" / "pythonw.exe"
 
@@ -148,31 +177,80 @@ def install(cfg: Any, root: Path, tasks_dir: Path, *, dry_run: bool = False, wit
     tasks_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for spec in plan(cfg, with_dashboard):
-        xml = task_xml(spec, root, _python_exe(root), off, now_local)
+        xml = task_xml(spec, root, _python_exe(root), off, now_local, user_id())
         path = tasks_dir / f"{spec.name}.xml"
         path.write_text(xml, encoding="utf-16")
         name = f"\\{FOLDER}\\{spec.name}"
-        if dry_run or os.name != "nt":
+        if dry_run or not _live():
             results.append({"task": name, "ok": None, "xml": str(path), "output": "dry run (not registered)"})
             continue
         rc, out = _run(["schtasks", "/Create", "/TN", name, "/XML", str(path), "/F"])
         results.append({"task": name, "ok": rc == 0, "xml": str(path), "output": out})
         if rc == 0 and spec.kind == "logon":
             _run(["schtasks", "/Run", "/TN", name])        # start the dashboard now, not only at next logon
+    if _live() and not dry_run and any(r["ok"] for r in results):
+        write_marker(root)
     return results
+
+
+def _marker() -> Path | None:
+    base = os.environ.get("LOCALAPPDATA")
+    return Path(base) / "btcperp" / "install_root.txt" if base else None
+
+
+def write_marker(root: Path) -> None:
+    m = _marker()
+    if m is not None:
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text(str(root), encoding="utf-8")
+
+
+def registered_root() -> Path | None:
+    """The install folder the scheduled tasks run in (None: not Windows, not installed, or folder gone)."""
+    if not _live():
+        return None
+    m = _marker()
+    if m is None or not m.exists():
+        return None
+    root = Path(m.read_text(encoding="utf-8").strip())
+    return root if (root / "run.py").exists() else None
+
+
+def power_lines() -> list[str]:
+    """Review v1.2.0 item 14: sleep and wake-timer settings of the active power plan (plugged in)."""
+    if os.name != "nt":
+        return []
+    out = []
+    for label, sub, setting in (("sleep after (plugged in)", "SUB_SLEEP", "STANDBYIDLE"),
+                                ("wake timers (plugged in)", "SUB_SLEEP", "RTCWAKE")):
+        rc, text = _run(["powercfg", "/q", "SCHEME_CURRENT", sub, setting])
+        vals = re.findall(r"0x[0-9a-fA-F]{8}", text)
+        if rc != 0 or len(vals) < 2:
+            out.append(f"power: {label}: unknown (powercfg failed)")
+            continue
+        ac = int(vals[-2], 16)
+        if setting == "STANDBYIDLE":
+            out.append(f"power: {label}: " + ("never  OK" if ac == 0 else f"{ac // 60} min  WARNING: set sleep to Never"))
+        else:
+            out.append(f"power: {label}: " + {0: "disabled  WARNING: enable wake timers", 1: "enabled  OK",
+                                                2: "important only  WARNING: set to Enable"}.get(ac, str(ac)))
+    return out
 
 
 def remove(cfg: Any) -> list[dict[str, Any]]:
     results = []
     for spec in plan(cfg, True):
         name = f"\\{FOLDER}\\{spec.name}"
-        if os.name != "nt":
+        if not _live():
             results.append({"task": name, "ok": None, "output": "not Windows"})
             continue
         if spec.kind == "logon":
             _run(["schtasks", "/End", "/TN", name])        # stop the running dashboard server first
         rc, out = _run(["schtasks", "/Delete", "/TN", name, "/F"])
         results.append({"task": name, "ok": rc == 0, "output": out})
+    m = _marker()
+    if _live() and m is not None and m.exists():
+        m.unlink()
     return results
 
 
@@ -180,7 +258,7 @@ def listing(cfg: Any) -> list[dict[str, Any]]:
     results = []
     for spec in plan(cfg, True):
         name = f"\\{FOLDER}\\{spec.name}"
-        if os.name != "nt":
+        if not _live():
             results.append({"task": name, "ok": None, "output": "not Windows"})
             continue
         rc, out = _run(["schtasks", "/Query", "/TN", name, "/FO", "LIST"])
@@ -192,13 +270,15 @@ def summary_lines(cfg: Any, offset_hours: float | None = None) -> list[str]:
     off = local_offset_hours() if offset_hours is None else offset_hours
     lines = []
     if abs(off - 8.0) > 1e-9:
-        lines.append(f"WARNING: this computer is at UTC{off:+.1f}, not HKT (UTC+8). Times were converted; if your "
-                     f"clock changes for daylight saving, run `schedule install` again.")
+        lines.append(f"NOTE: this computer is at UTC{off:+.1f}, not HKT (UTC+8). Daily tasks stay on HKT by themselves; "
+                     f"after a daylight-saving change run `schedule install --upgrade` so the weekly reports follow.")
     for spec in plan(cfg, True):
         if spec.kind == "logon":
             lines.append(f"{spec.name:<16} at logon (dashboard server)")
             continue
         h, m, shift = hkt_to_local(spec.hkt, off)
         when = {"daily": "daily", "weekly": f"every {spec.weekday}", "monthly_first": "first Sunday"}[spec.kind]
-        lines.append(f"{spec.name:<16} {spec.hkt} HKT = {h:02d}:{m:02d} local{' (day shift %+d)' % shift if shift else ''}  {when}")
+        pinned = "  (pinned to HKT)" if spec.kind == "daily" else ""
+        lines.append(f"{spec.name:<16} {spec.hkt} HKT = {h:02d}:{m:02d} local{' (day shift %+d)' % shift if shift else ''}  "
+                     f"{when}{pinned}")
     return lines

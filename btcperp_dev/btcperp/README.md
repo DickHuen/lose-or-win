@@ -7,37 +7,62 @@ desktop notifications. It runs on the owner's Windows PC from Windows Task Sched
 
 ## Windows shortcuts (`windows\*.bat`)
 
-`1_Install.bat` (install / upgrade), `Edit_Secrets.bat` (.env in Notepad), `2_Smoketest.bat`,
-`3_Schedule_Install.bat` (go live; asks for `GO`), `Dashboard.bat`, `Status.bat`, `Pause_New_Entries.bat`,
-`Kill_Close_Position.bat` (asks for `KILL`), `Resume.bat` (asks for `RESUME`), `Alerts.bat`,
-`Report_Daily.bat`, `Schedule_Check.bat`, `Schedule_Remove.bat` (asks for `REMOVE`).
-Each one runs `venv\Scripts\python.exe run.py <command>` from the install folder.
+| Shortcut | What it does |
+|---|---|
+| `1_Install.bat` | First install |
+| `Upgrade.bat` | Upgrade from the newest zip in Downloads (asks for `UPGRADE`) |
+| `Proxy_Key.bat` | Proxy key; the main wallet only signs |
+| `Edit_Secrets.bat` | Open .env in Notepad |
+| `2_Smoketest.bat` | Smoketest: YES / W (+ withdrawal probe) / R |
+| `Backtest.bat` | Backtest (asks for `CONFIRM` on the criteria the first time) |
+| `3_Schedule_Install.bat` | Go live (asks for `GO`; needs a passing full smoketest) |
+| `Dashboard.bat` | Open the dashboard |
+| `Status.bat` | Status |
+| `Pause_New_Entries.bat` | Stop new entries |
+| `Unpause.bat` | Remove your manual pause only |
+| `Kill_Close_Position.bat` | Close the position now (asks for `KILL`) |
+| `Resume.bat` | Clear pauses (asks for `RESUME`, plus `RESET-PEAK` for a kill switch) |
+| `Alerts.bat` | Print unread alerts |
+| `Report_Daily.bat` | Daily report now |
+| `Schedule_Check.bat` | Show the scheduled tasks and power settings |
+| `Schedule_Remove.bat` | Remove the scheduled tasks (asks for `REMOVE`) |
+
+Each one runs `venv\Scripts\python.exe run.py <command>` from the install folder, and refuses to run from any
+other copy of the folder.
 
 ## Commands (`python run.py <command>`)
 
 | Command | What it does |
 |---|---|
-| `decide` | 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. |
-| `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. Never opens. |
+| `decide` | 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
+| `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. If no decision was made in today's window and a position is open, runs the late close-only decision. Never opens. |
 | `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Reports printed and saved in `data/reports/`; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
 | `alerts` | Print every unread alert once (`PING OWNER ...`) and mark it read (same list as the dashboard). |
 | `snapshot` | Read-only exchange read for the dashboard (position, SL/TP, mark, equity). No orders, no state changes, no kill checks. Waits at most 5 s for the lock (skips if a run is busy); failures are logged, never alerted. |
 | `dashboard [--port N] [--no-browser]` | Local web dashboard on `http://127.0.0.1:8765` (loopback only). No lock, no exchange access; reads the database. Its "refresh" button runs `snapshot`. |
-| `schedule install\|remove\|list\|show [--dry-run] [--no-dashboard]` | Windows Task Scheduler tasks under `\btcperp\` (HKT times converted to the PC's time zone). No lock. |
+| `schedule install\|remove\|list\|show [--dry-run] [--no-dashboard] [--upgrade]` | Windows Task Scheduler tasks under `\btcperp\`. Daily tasks are pinned to HKT (`+08:00`). `install` needs a passing full smoketest of this version with this proxy key; `--upgrade` re-registers tasks that already run from this folder. `show`/`list` also print the sleep and wake-timer settings. No lock. |
+| `proxykey new [--days N] [--offline] \| finish [--signature] \| status` | Create a proxy key here; the main wallet only signs the EIP-712 CreateProxy message, in a browser wallet (one-off page on 127.0.0.1:8766) or on another computer. Writes .env. |
+| `backtest download \| criteria \| confirm \| run` | See BACKTEST.md. `run` refuses until the owner has confirmed the current criteria file (SHA-256 recorded). Never trades; no lock. |
 | `backup` | SQLite backup (+config) into `data/backups/` (last 14 + first of each month kept). |
 | `status` | State, position, SL/TP, equity, drawdown, kill switches, last decision. |
-| `pause` | Stop new entries; keep position and SL/TP. |
+| `pause` / `unpause` | Stop new entries (position and SL/TP kept) / remove only that manual pause. |
+| `reasons` | Print the active pause reasons and what clears each one. |
 | `kill` | Close the position with a reduce-only order, cancel its TP/SL by id, and pause. |
-| `resume` | Clear pause and kill switches (only when the owner asks). Resets the drawdown peak and the losing-streak count. |
+| `resume [--reset-peak]` | Clear pauses (only when the owner asks). A drawdown / losing-streak kill needs `--reset-peak` (exit code 6 without it): the peak is reset and the streak restarts. The equity floor needs a new config version stating `risk.equity_floor_reset_baseline_usd`. |
 | `selftest` | Run the unit tests (mocked exchange, no network). |
-| `smoketest [--probe-withdrawal]` | Live minimum-size test (see START_HERE.md section 3). The withdrawal probe is off unless the flag is given. |
+| `smoketest [--no-trade] [--probe-withdrawal]` | Live minimum-size test (START_HERE.md section 4). Records the exchange's status for an unfillable FOK. The withdrawal probe runs only with the flag. |
 | `flowwatch [--minutes N]` | Record balances / deposit-withdrawal statuses while the owner makes a small deposit (only when flat). |
 
 Every bot command takes an exclusive file lock (`data/btcperp.lock`), logs to `logs/btcperp_YYYY-MM-DD.log`
 (secrets redacted), writes a start/end row to the run log, and on error exits non-zero and stores an
-alert with the last log lines. Every alert is shown on the dashboard and popped up as a Windows toast
-notification (`notifications.windows_toast`; PowerShell WinRT, text passed by environment variables).
-Telegram is optional and off (`telegram.enabled`).
+alert with the last log lines. Every alert is shown on the dashboard.
+
+After the run, once the lock is released, Windows toasts are sent (at most 5 per run), so a slow
+notification can never delay a trading action. Toasts use `notifications.windows_toast` (PowerShell WinRT,
+text passed by environment variables). `decide` / `manage` also ping the optional heartbeat URL
+(`HEALTHCHECK_PING_URL`), or `<url>/fail` on an error. Telegram is optional and off (`telegram.enabled`).
+Exit codes: 0 ok, 1 error, 3 config / secrets / wrong folder, 4 lock busy, 5 selftest, 6 needs a typed
+confirmation.
 
 ## Scheduling (Windows Task Scheduler)
 
@@ -74,8 +99,9 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 6. Equity log and kill switches. Equity = the exchange's `total_account_value` for both peak and current
    (wallet + uPnL is a cross-check; disagreement blocks new entries). Drawdown 15% from peak (confirmed
    deposits/withdrawals adjust the peak) -> close and pause; losing streak with cumulative loss of 8% of equity
+   (a trade within +/-0.1% of equity at entry is a tie: it neither ends nor extends the streak, review D11)
    -> pause, keep SL/TP; equity below 75% of net funded capital -> close and hard stop (`resume` cannot clear
-   it; only a new config version); a failed kill close is retried every run; pending deposits/withdrawals skip
+   it; only a new config version that states the new baseline); a failed kill close is retried every run; pending deposits/withdrawals skip
    the drawdown/floor checks and block entries; 25-trade size-weighted expectancy < 0 -> warning.
    Proxy key expiry alert 5 days ahead. (8%, 75% and the 30% notional cap are pending the owner's decision.)
 7. A missing position on one read is not trusted: closes are booked and leftover orders cancelled only with
@@ -94,9 +120,11 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 - Holding: opposite |score| >= 30 -> flip (reduce-only IOC close, confirm flat with no leftover orders,
   then FOK bracket entry); weaker opposite -> hold; 3 consecutive UTC days of opposite signal -> close and
   re-enter per today's signal and gates; crowded side of extreme funding -> close and re-enter per gates.
-- One entry per UTC day. Entry window 08:30-09:30 HKT; after that "missed", no late entry.
+- One entry per UTC day. Entry window 08:30-09:30 HKT; after that "missed", no late entry (the day's close
+  rules are still evaluated late on the same data, close part only).
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
-  full size); one retry; then no entry that day.
+  full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
+  entry that day.
 - Risk: 1.5% of equity at SL for the 100% tier (first 10 live trades: half), leverage 3x isolated
   (checked/set before every entry; failure = no trade), notional <= 30% of equity (pending decision),
   liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the
@@ -113,7 +141,7 @@ latency), `fills`, `funding_payments`, `trades` (open/update/close with exit rea
 hours, fees, funding, net PnL, R), `manage_log`, `equity_log`, `state_log`, `position_snapshots`,
 `market_snapshots` (mark, index, funding, spread, depth), `pm_klines_1h`/`pm_klines_1d`/`pm_funding`
 (our own Polymarket dataset, backfilled every run), `bn_klines_1d`/`bn_klines_4h`/`bn_funding`,
-`shadow_log`, `alerts`, `alert_deliveries`, `dash_snapshots`, `telegram_updates`, `flows`.
+`shadow_log`, `alerts`, `alert_deliveries`, `dash_snapshots`, `backtest_log`, `telegram_updates`, `flows`.
 
 Shadow tracking (simulation only): each day a gate blocked or reduced a trade gets a hypothetical trade
 (bracket outcome on Polymarket 1h candles); parallel variants `live_rules`, `v2_breakeven` (one-time SL
@@ -127,6 +155,7 @@ run.py            launcher (uses ./venv)          install.py     installer / upg
 config/           config.yaml, calendar.yaml       perpbot/       code
 tests/            unit tests (selftest)            API_NOTES.md   exchange API notes (untested items)
 windows/          .bat shortcuts                   START_HERE.md  setup guide (Traditional Chinese)
+BACKTEST.md       backtest design + criteria       REVIEW_v*.md   committee reviews and what was done
 data/  logs/      created at install, never in the zip, never touched by upgrades
 .env              secrets (created from .env.example), never in the zip
 ```

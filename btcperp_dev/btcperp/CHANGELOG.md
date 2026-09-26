@@ -3,6 +3,52 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.3.0 - 2026-09-26 (config 1.3.0) - committee review of v1.2.0
+
+All items the developer agreed with, as decided by the owner. REVIEW_v1.2.0.md has the item-by-item
+record. Strategy scoring, gates and tiers are unchanged. Bankroll stays at a fixed 1.5% risk. No Telegram.
+
+- **Backtest (B3):**
+  - new `backtest download|criteria|confirm|run` command and `Backtest.bat`, running on the owner's PC from Binance data;
+  - pre-registered variants, 6-month windows × 5 start offsets, conservative execution; BACKTEST.md describes it;
+  - pass/fail rules in `config/backtest_criteria.yaml`, which must be confirmed (SHA-256) before a run;
+  - historical calendar `config/calendar_history.yaml`, still to be verified by the committee;
+  - live and backtest share `strategy.day_features` + `plan_for`, and a test checks the backtest equals live `decide` on 20+ days.
+- **Missed decide:** a late `decide`, or the first `manage` with no decision and a position open, runs the day's
+  close rules on the same data. It never enters.
+- **D11:** ±0.1% of equity at entry is a tie in the losing streak (`risk.losing_streak_tie_pct`).
+- **Notifications:** sent after the run, once the lock is released. Toasts do not block; at most 5 per run.
+- **Heartbeat:** optional `HEALTHCHECK_PING_URL` pinged after every `decide` / `manage` (`/fail` on error).
+- **Pauses and resume:**
+  - `unpause` / `Unpause.bat` removes only the manual pause, and the upgrade flow uses it;
+  - `reasons` lists the active pauses;
+  - `resume` needs `--reset-peak` (`RESET-PEAK` in Resume.bat) to clear a drawdown / losing-streak kill;
+  - the equity floor clears only with a new config version stating `risk.equity_floor_reset_baseline_usd`.
+- **Upgrade:** `Upgrade.bat` / `install.py --from-zip` disables the tasks, waits for the bot lock, replaces the
+  files, installs and tests, then re-registers the tasks. If the tests fail, the tasks stay disabled.
+- **Calendar fail-safe:** once an event type's coverage has ended, new positions are blocked; closes still run.
+- **FOK:** `exits.entry_attempts: 1`. The smoketest records the exchange's status for an unfillable FOK.
+- **Clock check:** a difference of more than 30 s from the exchange server time (or an unreadable server time)
+  blocks new positions.
+- **Proxy key:** `proxykey` command and `Proxy_Key.bat`. The proxy key is generated on the bot PC and the main
+  wallet only signs, in a browser or hardware wallet or on another computer (`offline_sign.py`).
+  `tools/create_proxy_key.py`, which needed the main key typed in, is removed.
+- **Windows:**
+  - daily tasks pinned to HKT (`+08:00`);
+  - `UserId` on the tasks;
+  - power and wake-timer check in `schedule show/list`;
+  - wrong-copy guard for manual commands;
+  - `schedule install` needs a passing full smoketest of this version and proxy key (`--upgrade` for upgrades);
+  - `2_Smoketest.bat` option W adds the withdrawal probe.
+- **Reports:** the monthly report lists days without an on-time decision; more than 2 marks it INCOMPLETE and
+  raises an alert.
+- **Dashboard:** Content-Security-Policy header; header shows snapshot failures (not listed as errors).
+- **Docs:** START_HERE.md rewritten with a go-live checklist (committee go/no-go), proxy key, backtest,
+  heartbeat, power and sign-in settings, offline guidance and the new upgrade flow.
+- **Tests:** 215 (+51). Redaction tests also read the SQLite WAL. The test suite never calls the real Task Scheduler
+  (`BTCPERP_NO_SCHTASKS`), because it also runs on the bot PC during install and upgrade.
+- **From v1.2.0:** nothing is installed yet, so install v1.3.0 fresh (START_HERE.md). Later versions use Upgrade.bat.
+
 ## 1.2.0 - 2026-09-26 (config 1.2.0) - Windows edition
 
 The bot now runs on the owner's Windows PC instead of Grok Bot. Strategy, risk rules and all

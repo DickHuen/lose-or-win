@@ -56,6 +56,10 @@ class EventCalendar:
         limit = now + timedelta(days=days)
         return [e for e in self.events if now <= e.release_utc <= limit]
 
+    def expired_types(self, day: date) -> list[str]:
+        """Event types whose calendar coverage ended before `day` (review v1.2.0 item 9: fail-safe)."""
+        return [t for t in VALID_TYPES if self.coverage_end.get(t) is None or self.coverage_end[t] < day]
+
     def coverage_warnings(self, today: date, warn_days: int) -> list[str]:
         warns = []
         for t in VALID_TYPES:

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 ENV_KEYS = ("PM_PROXY_PRIVATE_KEY", "PM_PROXY_SECRET", "PM_WALLET_ADDRESS", "PM_PROXY_EXPIRES_AT",
-            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "HEALTHCHECK_PING_URL")
 SECRET_KEYS = ("PM_PROXY_PRIVATE_KEY", "PM_PROXY_SECRET", "TELEGRAM_BOT_TOKEN")
 
 
@@ -41,9 +41,11 @@ class Secrets:
     telegram_token: str = field(default="", repr=False)
     telegram_chat_id: str = ""
     proxy_address: str = ""
+    healthcheck_url: str = field(default="", repr=False)
 
     def secret_values(self) -> list[str]:
-        return [v for v in (self.proxy_private_key, self.proxy_secret, self.telegram_token) if v and len(v) >= 6]
+        return [v for v in (self.proxy_private_key, self.proxy_secret, self.telegram_token, self.healthcheck_url)
+                if v and len(v) >= 6]
 
     def require_trading(self) -> None:
         missing = [n for n, v in (("PM_PROXY_PRIVATE_KEY", self.proxy_private_key), ("PM_PROXY_SECRET", self.proxy_secret),
@@ -61,7 +63,9 @@ def load_secrets(env_file: Path) -> Secrets:
             env[k] = os.environ[k]
     s = Secrets(proxy_private_key=env.get("PM_PROXY_PRIVATE_KEY", ""), proxy_secret=env.get("PM_PROXY_SECRET", ""),
                 wallet_address=env.get("PM_WALLET_ADDRESS", ""), telegram_token=env.get("TELEGRAM_BOT_TOKEN", ""),
-                telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""))
+                telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""), healthcheck_url=env.get("HEALTHCHECK_PING_URL", "").strip())
+    if s.healthcheck_url and not s.healthcheck_url.startswith("https://"):
+        raise SecretsError("HEALTHCHECK_PING_URL must start with https:// (e.g. https://hc-ping.com/<your-uuid>)")
     exp = env.get("PM_PROXY_EXPIRES_AT", "").strip()
     if exp:
         try:

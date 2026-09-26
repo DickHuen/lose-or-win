@@ -30,12 +30,12 @@ class Records:
                 "since_ms": row["ts_ms"]}
 
     def set_state(self, *, position_state: str | None = None, add_reason: str | None = None,
-                  clear_reasons: bool = False, note: str = "") -> dict[str, Any]:
+                  clear_reasons: bool = False, remove_reasons: tuple[str, ...] = (), note: str = "") -> dict[str, Any]:
         cur = self.state()
         ps = position_state or cur["position_state"]
         if ps not in POSITION_STATES:
             raise ValueError(f"bad position state {ps}")
-        reasons = [] if clear_reasons else list(cur["pause_reasons"])
+        reasons = [] if clear_reasons else [r for r in cur["pause_reasons"] if r not in remove_reasons]
         if add_reason and add_reason not in reasons:
             reasons.append(add_reason)
         if ps == cur["position_state"] and reasons == cur["pause_reasons"] and not note:

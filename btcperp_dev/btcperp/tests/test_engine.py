@@ -89,7 +89,7 @@ def test_score_zero_flat_no_entry(world):
 
 
 def test_fok_not_filled_twice(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.fok_outcomes.extend([False, False])
     w.decide()
@@ -101,7 +101,7 @@ def test_fok_not_filled_twice(world):
 
 
 def test_fok_retry_once_then_fills(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.fok_outcomes.extend([False, True])
     w.decide()
@@ -129,7 +129,7 @@ def test_region_blocked_no_entry(world):
 
 
 def test_cancel_only_mode(world):
-    w = world(hkt(2026, 10, 5, 8, 30))
+    w = world(hkt(2026, 10, 5, 8, 30), exits__entry_attempts=2)
     w.bn.signal(D1, "strong_long")
     w.ex.cancel_only = True
     w.decide()
@@ -421,7 +421,7 @@ def test_drawdown_kill_switch_closes_and_pauses(world):
     w.bn.signal(D2, "strong_long")
     w.at(hkt(2026, 10, 6, 8, 30)).decide()
     assert w.pos() == 0 and len(w.fok_calls()) == 1
-    w.engine().cmd_resume()
+    w.engine().cmd_resume(reset_peak=True)
     assert not w.state()["paused"]
     w.at(hkt(2026, 10, 6, 8, 50)).decide()
     assert w.pos() > 0                        # resumed inside the window -> fresh decision

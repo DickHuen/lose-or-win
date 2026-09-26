@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from typing import Callable
+import time
 
 log = logging.getLogger("perpbot.notify")
 
@@ -28,24 +28,47 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 """
 
 
-def windows_toast(title: str, body: str) -> bool:
+def windows_toast(title: str, body: str) -> subprocess.Popen[bytes] | None:
+    """Start a toast without waiting for it (review v1.2.0 item 6). Returns the process, or None."""
     if os.name != "nt":
-        return False
+        return None
     env = dict(os.environ, BTCPERP_TOAST_TITLE=title[:120], BTCPERP_TOAST_BODY=body[:600], BTCPERP_TOAST_APP=_APP_ID)
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _PS],
-                           env=env, timeout=20, capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if r.returncode != 0:
-            log.warning("toast failed: %s", r.stderr.decode(errors="replace")[:300])
-            return False
-        return True
+        return subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                 "-Command", _PS], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("toast failed: %s", e)
-        return False
+        return None
 
 
-def make_notifier(cfg: object) -> Callable[[str, str], bool] | None:
+class ToastNotifier:
+    """Callable notifier: starts toasts immediately, `wait()` lets them finish before the process exits."""
+
+    def __init__(self) -> None:
+        self.procs: list[subprocess.Popen[bytes]] = []
+
+    def __call__(self, kind: str, text: str) -> bool:
+        proc = windows_toast(f"btcperp: {kind}", text)
+        if proc is not None:
+            self.procs.append(proc)
+        return proc is not None
+
+    def wait(self, timeout: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout
+        for proc in self.procs:
+            try:
+                _, err = proc.communicate(timeout=max(0.1, deadline - time.monotonic()))
+                if proc.returncode:
+                    log.warning("toast failed: %s", (err or b"").decode(errors="replace")[:300])
+            except subprocess.TimeoutExpired:
+                log.warning("toast still running after %.0fs; leaving it", timeout)
+            except (OSError, ValueError):
+                pass
+        self.procs = []
+
+
+def make_notifier(cfg: object) -> ToastNotifier | None:
     try:
         enabled = bool(cfg.notifications.windows_toast)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
@@ -53,5 +76,5 @@ def make_notifier(cfg: object) -> Callable[[str, str], bool] | None:
     if os.environ.get("BTCPERP_NO_TOAST"):          # set by the unit tests (selftest must not pop toasts)
         enabled = False
     if enabled and os.name == "nt":
-        return lambda kind, text: windows_toast(f"btcperp: {kind}", text)
+        return ToastNotifier()
     return None

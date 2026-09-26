@@ -69,11 +69,33 @@ class BinanceData:
                               open_ms + step))
         return out
 
+    def klines_range(self, interval: str, start_ms: int, end_ms: int, max_pages: int = 200) -> list[Candle]:
+        """Closed candles with open time in [start_ms, end_ms), paged 1000 at a time (backtest download)."""
+        step = INTERVAL_MS[interval]
+        out: dict[int, Candle] = {}
+        cur = start_ms
+        for _ in range(max_pages):
+            data = self._get(list(self._b.spot_base_urls), "/api/v3/klines",
+                             {"symbol": self._b.symbol, "interval": interval, "startTime": cur, "endTime": end_ms - 1,
+                              "limit": 1000})
+            if not data:
+                break
+            for row in data:
+                open_ms = int(row[0])
+                if start_ms <= open_ms and open_ms + step <= end_ms:
+                    out[open_ms] = Candle(open_ms, float(row[1]), float(row[2]), float(row[3]), float(row[4]),
+                                          float(row[5]), open_ms + step)
+            last = int(data[-1][0])
+            if len(data) < 1000 or last + step >= end_ms:
+                break
+            cur = last + step
+        return [out[k] for k in sorted(out)]
+
     def funding(self, start_ms: int, end_ms: int) -> list[tuple[int, float, float]]:
         """(fundingTime ms, fundingRate, markPrice) ascending."""
         out: list[tuple[int, float, float]] = []
         cur = start_ms
-        for _ in range(50):
+        for _ in range(200):
             data = self._get(list(self._b.futures_base_urls), "/fapi/v1/fundingRate",
                              {"symbol": self._b.symbol, "startTime": cur, "endTime": end_ms, "limit": 1000})
             if not data:

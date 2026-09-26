@@ -14,7 +14,8 @@ DEV = Path(__file__).resolve().parent.parent
 SRC = DEV / "btcperp"
 DIST = DEV / "dist"
 TOP_FILES = ["run.py", "install.py", "requirements.txt", "VERSION", "README.md", "START_HERE.md", "API_NOTES.md",
-             "CHANGELOG.md", "REVIEW_v1.1.0.md", ".env.example", "config/config.yaml", "config/calendar.yaml"]
+             "CHANGELOG.md", "REVIEW_v1.1.0.md", "REVIEW_v1.2.0.md", "BACKTEST.md", ".env.example", "config/config.yaml",
+             "config/calendar.yaml", "config/calendar_history.yaml", "config/backtest_criteria.yaml"]
 CODE_DIRS = ["perpbot", "tests"]
 BAT_DIR = "windows"                      # Windows shortcuts: packaged with CRLF line endings
 FORBIDDEN_PARTS = {".env", "data", "logs", "venv", "__pycache__", ".git", ".pytest_cache"}

@@ -1,0 +1,60 @@
+# Backtest pass/fail rules (review B3 / v1.2.0 item 1). DRAFT written by the developer BEFORE any run.
+# The owner (after the committee has reviewed it) confirms THIS file by typing CONFIRM in
+# windows\Backtest.bat; the file's SHA-256 is recorded and `backtest run` refuses to run on any other
+# version of the file. Changing a rule means a new version of this file and a new confirmation.
+# Metrics are computed by perpbot/backtest.py (aggregate()); all on the primary variant unless stated.
+criteria_version: "draft-1 (2026-09-26)"
+primary_variant: A_live
+rules:
+  - id: C1
+    text: "Full period (2020-10 onward), EVERY start offset: size-weighted expectancy after all costs > 0 R"
+    metric: full_expectancy_r_min
+    op: ">"
+    value: 0
+  - id: C2
+    text: "6-month windows with a positive net return: median share over the start offsets >= 50%"
+    metric: window_positive_share_median
+    op: ">="
+    value: 0.5
+  - id: C3
+    text: "Worst max drawdown in any 6-month window / start offset <= 20% (kill switch 15% + gap risk)"
+    metric: window_max_drawdown_pct_max
+    op: "<="
+    value: 20
+  - id: C4
+    text: "Equity floor (-25% of starting equity) never hit, in any window or full-period run"
+    metric: floor_hits_total
+    op: "=="
+    value: 0
+  - id: C5
+    text: "Enough trades to judge: full period, median over start offsets >= 30 trades"
+    metric: full_trades_median
+    op: ">="
+    value: 30
+  # ---- informational (reported, not part of the verdict)
+  - id: I1
+    informational: true
+    text: "Hybrid adds value over the control (|score| < 30 = flat): A_live minus C_control, full-period total R (median)"
+    metric: full_total_r_median
+    metric_minus: {variant: C_control, metric: full_total_r_median}
+    op: ">"
+    value: 0
+  - id: I2
+    informational: true
+    text: "Calendar sensitivity: A_live minus A_live_noevents, full-period expectancy R (min over offsets)"
+    metric: full_expectancy_r_min
+    metric_minus: {variant: A_live_noevents, metric: full_expectancy_r_min}
+    op: ">"
+    value: -1000
+  - id: I3
+    informational: true
+    text: "Losing-streak loss, 99th percentile over all runs (% of equity) - for reviewing the 8% kill"
+    metric: streak_loss_pct_p99
+    op: "<="
+    value: 8
+  - id: I4
+    informational: true
+    text: "Share of trades capped by the 30% notional cap (median over offsets) - for reviewing the 30% cap"
+    metric: notional_cap_binding_share_median
+    op: "<="
+    value: 1

@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0.."
 title btcperp - pause
 if not exist "venv\Scripts\python.exe" goto notinstalled
-echo PAUSE: stops NEW entries. An open position and its SL/TP stay as they are.
+echo PAUSE: stops NEW entries. An open position and its SL/TP stay as they are. Undo with Unpause.bat.
 "venv\Scripts\python.exe" run.py pause
 echo.
 pause

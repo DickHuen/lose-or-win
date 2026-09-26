@@ -239,6 +239,7 @@ class Reporter:
                                 "AND ts_ms >= ? AND ts_ms < ?", [start_ms, end_ms])
         report["runs"] = {"slots": len(aud), "missed": [a for a in aud if a["status"] == "missed"],
                           "late": [a for a in aud if a["status"] == "late"], "errors": errs}
+        report["decision_days"] = self._decision_days(start_d, end_d, utc_day(now), f"{y:04d}-{m:02d}")
         eq = self._equity_rows(start_ms, end_ms)
         report["equity"] = {"start": eq[0]["equity"] if eq else None, "end": eq[-1]["equity"] if eq else None,
                             "max_drawdown_pct": max_drawdown([r["equity"] for r in eq])}
@@ -255,6 +256,24 @@ class Reporter:
         self.e.tg.send_document(mpath, caption=f"btcperp monthly report {report['month']}")
         return f"monthly report: {mpath}\njson: {jpath}"
 
+    def _decision_days(self, start_d: date, end_d: date, today: date, month: str) -> dict[str, Any]:
+        """Review v1.2.0 item 17: UTC days without an on-time decision (late close-only decisions count as missed)."""
+        first = self.store.query("SELECT MIN(utc_day) AS d FROM decisions")
+        first_d = date.fromisoformat(first[0]["d"]) if first and first[0]["d"] else today
+        lo, hi = max(start_d, first_d), min(end_d, today)
+        days = [lo + timedelta(days=i) for i in range(max(0, (hi - lo).days))]
+        rows = self.store.query("SELECT utc_day, data FROM decisions WHERE score IS NOT NULL AND utc_day >= ? AND utc_day < ?",
+                                [start_d.isoformat(), end_d.isoformat()])
+        on_time = {r["utc_day"] for r in rows if isinstance(r["data"], dict) and not (r["data"].get("plan") or {}).get("late")}
+        missed = [d.isoformat() for d in days if d.isoformat() not in on_time]
+        limit = int(self.cfg.reports.max_missed_decision_days)
+        incomplete = len(missed) > limit
+        if incomplete:
+            self.e.alert("incomplete month", f"{month}: no on-time decision on {len(missed)} days ({', '.join(missed)}); "
+                         f"the month is marked incomplete - do not judge the strategy on it",
+                         dedupe_key=f"incomplete_month:{month}")
+        return {"days_counted": len(days), "missed_days": missed, "limit": limit, "incomplete_month": incomplete}
+
     def _monthly_md(self, r: dict[str, Any]) -> str:
         L = [f"# BTC-PERP monthly report {r['month']}", "",
              "Each version is reported separately; statistics never mix versions.", ""]
@@ -263,7 +282,11 @@ class Reporter:
             for sec in ("by_score_tier", "by_gate", "by_exit_reason", "long_vs_short", "mae_mfe_vs_sl_tp",
                         "slippage_fill_quality", "funding_vs_holding"):
                 L += [f"### {sec}", "```", json.dumps(s[sec], indent=2, default=str), "```"]
-        for sec in ("entry_attempts", "shadow_vs_live", "equity", "runs", "calendar_warnings"):
+        if r.get("decision_days", {}).get("incomplete_month"):
+            L = L[:3] + ["**INCOMPLETE MONTH: no on-time decision on "
+                         f"{len(r['decision_days']['missed_days'])} days - do not judge the strategy on this month.**",
+                         ""] + L[3:]
+        for sec in ("decision_days", "entry_attempts", "shadow_vs_live", "equity", "runs", "calendar_warnings"):
             L += [f"## {sec}", "```", json.dumps(r[sec], indent=2, default=str), "```"]
         L += ["", r["calendar_check_reminder"]]
         return "\n".join(L) + "\n"
