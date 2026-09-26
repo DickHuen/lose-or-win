@@ -1,0 +1,149 @@
+# BTC-PERP bot configuration.
+# Grok Bot must NEVER edit this file. Changes come back as a new zip with a
+# higher config_version and a CHANGELOG entry.
+config_version: "1.0.0"
+
+market:
+  # The instrument is resolved from GET /v1/info/instruments on every start.
+  # The first symbol found in this list wins; if none match, the single
+  # instrument with base_asset/quote_asset/category below is used.
+  symbol_candidates: ["BTC-PERP", "BTC-USD"]
+  base_asset: "BTC"
+  quote_asset: "USD"
+  category: "crypto"
+
+polymarket:
+  # Values from the official SDK polymarket-client 0.11.0 (environments.py).
+  rest_url: "https://api.perpetuals.polymarket.com"
+  ws_url: "wss://ws.perpetuals.polymarket.com/v1/ws"
+  chain_id: 137
+  geoblock_url: "https://polymarket.com/api/geoblock"
+  http_timeout_seconds: 20
+  command_timeout_seconds: 45
+  book_depth: 10                 # allowed: 10, 100, 500, 1000
+  order_status_poll_attempts: 6
+  order_status_poll_interval_seconds: 1.0
+  fills_lookback_hours: 48       # overlap when re-reading fills on reconcile
+  kline_backfill_max_days: 30    # max 1h-kline backfill per run
+  collateral_asset_hint: ""      # empty = sum all balances' "value"
+
+binance:
+  spot_base_urls: ["https://api.binance.com", "https://data-api.binance.vision"]
+  futures_base_urls: ["https://fapi.binance.com"]
+  symbol: "BTCUSDT"
+  http_timeout_seconds: 20
+  daily_candles_to_load: 500     # spec minimum 200; 500 lets EMA200 converge
+  h4_candles_to_load: 300
+  funding_days_to_load: 400      # spec minimum 365
+
+telegram:
+  api_base: "https://api.telegram.org"
+  http_timeout_seconds: 20
+  max_message_chars: 3900
+
+schedule:
+  # All times HKT (UTC+8). Used for the entry window, run-lateness and missed-run audit.
+  decide_times_hkt: ["08:30", "08:50"]
+  manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]
+  report_daily_time_hkt: "08:45"
+  report_weekly: {weekday: "sunday", time_hkt: "20:00"}
+  report_monthly: {rule: "first_sunday", time_hkt: "20:30"}
+  backup_time_hkt: "03:00"
+  entry_window_start_hkt: "08:30"
+  entry_window_end_hkt: "09:30"
+  late_tolerance_minutes: 10     # a run starting later than this counts as "late"
+  missed_tolerance_minutes: 30   # no run within this window of a slot = "missed"
+
+strategy:
+  ema_trend_period: 50
+  ema_regime_period: 200
+  atr_period: 14
+  min_daily_candles: 200
+  trend_weight: 50
+  trend_atr_multiple: 2.0
+  breakout_points: 25
+  clv_weight: 25
+  score_round_decimals: 4
+  # |score| < tier_low_max -> tier_low_fraction; tier_low_max <= |score| <= tier_mid_max -> tier_mid_fraction; above -> tier_high_fraction
+  tier_low_max: 30
+  tier_mid_max: 50
+  tier_low_fraction: 0.25
+  tier_mid_fraction: 0.50
+  tier_high_fraction: 1.00
+  flip_min_abs_score: 30
+  opposite_days_rule: 3
+  # "Same direction: hold; SL/TP may only be tightened." Active tightening is OFF in v1.0.0;
+  # the guard that refuses any loosening is always on.
+  tighten_sl_on_same_direction: false
+
+gates:
+  regime_cap: 0.50
+  h4_cap: 0.50
+  h4_ema_fast: 20
+  h4_ema_slow: 50
+  funding_lookback_days: 365
+  funding_high_percentile: 95
+  funding_low_percentile: 5
+  funding_cutoff_tolerance_minutes: 5
+  event_anchor_hkt: "08:30"
+  event_post_release_hours: 4
+  calendar_file: "config/calendar.yaml"
+  calendar_coverage_warn_days: 45
+  # Event window: strategy flips are suppressed (hold). 3-day-rule and funding-rule
+  # closes still execute; any new entry is blocked.
+  event_allows_rule_closes: true
+
+exits:
+  sl_atr_multiple: 1.5
+  tp_atr_multiple: 3.0
+  entry_slippage_bps: 10
+  entry_attempts: 2              # FOK: first try + one retry
+  close_slippage_bps: 50         # reduce-only IOC limit allowance
+  close_attempts: 3              # last attempt is a market-style IOC (no price)
+
+risk:
+  risk_per_trade_pct: 1.5        # at the 100% tier
+  ramp_trades: 10                # first N live trades use ramp_factor x risk
+  ramp_factor: 0.5
+  leverage: 3
+  cross_margin: false            # false = isolated
+  notional_cap_pct_equity: 50
+  liq_min_sl_multiple: 2.0
+  # Pre-trade liquidation ESTIMATE only (exchange formula not published):
+  # maintenance margin rate = 1 / (liq_estimate_mmr_divisor * instrument max_leverage).
+  # The authoritative check runs after the fill on the exchange's liquidation_price.
+  liq_estimate_mmr_divisor: 2
+  kill_drawdown_pct: 15
+  kill_losing_streak_pct: 20
+  expectancy_window_trades: 25
+  # Mark-to-market equity = wallet + unrealized PnL. "auto" uses wallet + uPnL but falls
+  # back to the exchange's total_account_value (and alerts) when the two disagree by more
+  # than equity_crosscheck_tolerance_pct (e.g. if balances exclude isolated margin).
+  equity_source: "auto"          # auto | wallet_plus_upnl | total_account_value
+  equity_crosscheck_tolerance_pct: 0.5
+  funding_payment_sign: 1        # +1: API "funding" > 0 is a credit to us (verify in smoketest)
+
+key:
+  expiry_warn_days: 5
+
+lock:
+  wait_seconds: 900
+
+logging:
+  level: "INFO"
+
+shadow:
+  enabled: true
+  gate_trade_max_hold_days: 5
+  fee_rate_estimate: 0.0005      # used only when /v1/info/fees is unavailable
+  breakeven_trigger_atr: 1.0     # V2: one-time SL move to breakeven at +1 ATR
+
+reports:
+  weekly_days: 7
+
+smoketest:
+  resting_order_offset_pct: 2.0  # post-only buy this far below best bid, then cancel
+  probe_proxy_withdrawal: true   # (a): proxy-signed withdraw of 1 base unit to YOUR wallet; expected to be rejected
+  # From the official SDK polymarket-client 0.11.0 environments.py (production):
+  perps_deposit_contract: "0xDCa4af75705dbB50f62437045afF9921947917d2"
+  collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"

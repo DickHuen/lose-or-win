@@ -1,0 +1,8 @@
+# never commit runtime data, secrets or environments
+btcperp/.env
+btcperp/data/
+btcperp/logs/
+btcperp/venv/
+__pycache__/
+*.pyc
+.pytest_cache/
