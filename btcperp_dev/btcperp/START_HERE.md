@@ -43,8 +43,14 @@ cd ~/btcperp && python3 run.py smoketest
 
 It reads prices, checks that trading is allowed from your computer's region (never use a VPN or
 network proxy to change this), checks the proxy key and wallet, sets 3x isolated, places and cancels
-one order, opens and closes one minimum-size position with a bracket stop-loss/take-profit, and
-answers the questions (a)-(e) in `API_NOTES.md` live.
+one order, opens and closes minimum-size positions (long with a bracket stop-loss/take-profit, a short,
+a two-step flip, and one bracket with a deliberately invalid stop-loss row that is closed immediately),
+and answers the questions (a)-(e) in `API_NOTES.md` live, plus the review checks listed at the end of
+`API_NOTES.md`. It costs a few small trading fees.
+
+Question (a) (can the proxy key withdraw?) is only tested if I explicitly tell you to run
+`python3 run.py smoketest --probe-withdrawal` (it sends a real 1-base-unit withdrawal request to my own
+wallet, expected to be rejected). Do not add that flag unless I ask.
 
 Report the result to me **in Traditional Chinese**: PASS/FAIL for every step, the live answers to
 (a)-(e), and anything marked FAIL. The full JSON is in `~/btcperp/data/smoketest/`. Then **WAIT**.
@@ -66,8 +72,8 @@ The bot uses a lock, so if two routines overlap the second one waits. If your ro
 these times (to within a few minutes), tell me BEFORE going live. After creating them, list them
 back to me with their times.
 
-**You are my alert channel.** At the end of EVERY routine above (and after any command I ask you to
-run), also run:
+**You are my alert channel. Every trade must reach me.** At the end of EVERY routine above (and after
+any command I ask you to run), also run:
 
 ```
 cd ~/btcperp && python3 run.py alerts
@@ -75,9 +81,11 @@ cd ~/btcperp && python3 run.py alerts
 
 It prints each new alert once, as lines starting with `PING OWNER`. If it prints any, ping me
 immediately with the full lines (keep the English text, add a one-line explanation in Traditional
-Chinese). If it prints `no new alerts`, do not message me. Alerts include every open, close, flip,
-SL/TP change, kill switch, warning, missed 08:30 run, SL re-place failure, close failure, proxy key
-expiry and any error. If a command's exit code is not 0, also send me the error and the log (see
+Chinese). If it prints `no new alerts`, do not message me.
+
+ALWAYS ping me for every trade: every `open`, `close`, `flip`, `entry recovered` / `position adopted`
+line, and every stop-loss / take-profit change. Also ping for every kill switch, warning, blocked or
+deferred entry, missed 08:30 run, SL re-place failure, close failure, proxy key expiry and any error. If a command's exit code is not 0, also send me the error and the log (see
 section 5).
 
 Reports:
@@ -99,6 +107,11 @@ Reports:
   `tail -n 200 ~/btcperp/logs/btcperp_$(date -u +%Y-%m-%d).log`
 - Exit codes: 0 ok, 1 error, 3 config/secrets error, 4 another command was still running, 5 selftest failed.
 - If I ask for the status, run `python3 run.py status` and send me the output.
+- Deposits / withdrawals: remind me not to deposit or withdraw while a position is open. If I want to
+  measure how deposits show up, run `python3 run.py flowwatch --minutes 30` while I make a small deposit
+  (only when flat) and send me the result file path it prints.
+- If the bot reports "EQUITY FLOOR": trading stays stopped even after `resume`; only a new version from
+  me can clear it. Tell me immediately.
 
 ## 6. Upgrades
 

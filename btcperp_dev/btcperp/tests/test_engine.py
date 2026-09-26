@@ -133,7 +133,11 @@ def test_cancel_only_mode(world):
     w.bn.signal(D1, "strong_long")
     w.ex.cancel_only = True
     w.decide()
-    assert w.pos() == 0 and len(w.fok_calls()) == 2
+    assert w.pos() == 0 and len(w.fok_calls()) == 1      # rejected -> no retry in the same run (review B1)
+    assert w.tg.has("entry retry deferred")
+    w.at(hkt(2026, 10, 5, 8, 50)).decide()
+    assert w.pos() == 0 and len(w.fok_calls()) == 2      # next run re-checks, then the one retry
+    assert w.tg.has("FOK entry not filled after 2 attempts")
     resp = w.store.query("SELECT data FROM orders WHERE purpose='entry' AND event='response'")
     assert all(r["data"]["restriction"] == "cancel_only" for r in resp)
 
@@ -408,7 +412,7 @@ def test_event_window_blocks_new_position(world):
 def test_drawdown_kill_switch_closes_and_pauses(world):
     w = world(hkt(2026, 10, 5, 8, 30))
     enter_long(w)
-    w.ex.cash -= 2_500                        # equity -25% vs peak
+    w.ex.cash -= 1_800                        # equity -18% vs peak (above the 75% equity floor)
     w.at(hkt(2026, 10, 5, 12, 30)).manage()
     assert w.pos() == 0
     st = w.state()

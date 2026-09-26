@@ -18,7 +18,8 @@ It runs headless on Linux (Grok Bot's computer) from scheduled routines; see `ST
 | `kill` | Close the position with a reduce-only order, cancel its TP/SL by id, and pause. |
 | `resume` | Clear pause and kill switches (only when the owner asks). Resets the drawdown peak and the losing-streak count. |
 | `selftest` | Run the unit tests (mocked exchange, no network). |
-| `smoketest` | Live minimum-size test (see START_HERE.md section 3). |
+| `smoketest [--probe-withdrawal]` | Live minimum-size test (see START_HERE.md section 3). The withdrawal probe is off unless the flag is given. |
+| `flowwatch [--minutes N]` | Record balances / deposit-withdrawal statuses while the owner makes a small deposit (only when flat). |
 
 Every command takes an exclusive file lock (`data/btcperp.lock`), logs to `logs/btcperp_YYYY-MM-DD.log`
 (secrets redacted), writes a start/end row to the run log, and on error exits non-zero and sends a
@@ -35,9 +36,15 @@ stored alert with the last log lines (shown by `alerts`). Telegram is optional a
 3. When flat, leftover TP/SL/reduce-only orders are cancelled by id (never cancel-all, never auto-cancel).
 4. `cumulative_funding` is recorded; fills and funding payments are synced.
 5. (Only if Telegram is enabled in config: /pause, /kill, /status from the configured chat id.)
-6. Equity log and kill switches: drawdown 15% of mark-to-market equity from peak (deposits/withdrawals
-   adjust the peak) -> close and pause; losing streak with cumulative loss of 20% of equity -> pause, keep
-   SL/TP; 25-trade size-weighted expectancy < 0 -> warning. Proxy key expiry alert 5 days ahead.
+6. Equity log and kill switches. Equity = the exchange's `total_account_value` for both peak and current
+   (wallet + uPnL is a cross-check; disagreement blocks new entries). Drawdown 15% from peak (confirmed
+   deposits/withdrawals adjust the peak) -> close and pause; losing streak with cumulative loss of 8% of equity
+   -> pause, keep SL/TP; equity below 75% of net funded capital -> close and hard stop (`resume` cannot clear
+   it; only a new config version); a failed kill close is retried every run; pending deposits/withdrawals skip
+   the drawdown/floor checks and block entries; 25-trade size-weighted expectancy < 0 -> warning.
+   Proxy key expiry alert 5 days ahead. (8%, 75% and the 30% notional cap are pending the owner's decision.)
+7. A missing position on one read is not trusted: closes are booked and leftover orders cancelled only with
+   evidence (exit fills, fired trigger, or two reads apart).
 
 ## Strategy (all numbers in `config/config.yaml`)
 
@@ -56,8 +63,11 @@ stored alert with the last log lines (shown by `alerts`). Telegram is optional a
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
   full size); one retry; then no entry that day.
 - Risk: 1.5% of equity at SL for the 100% tier (first 10 live trades: half), leverage 3x isolated
-  (checked/set before every entry; failure = no trade), notional <= 50% of equity, liquidation price must
-  be >= 2 x SL distance away (pre-trade estimate and post-fill check on the exchange's value).
+  (checked/set before every entry; failure = no trade), notional <= 30% of equity (pending decision),
+  liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the
+  exchange's value; a missing liquidation price fails the check).
+- A rejected or unknown FOK is never retried in the same run (the SDK reports a whole bracket as rejected
+  even if the entry row filled); the retry needs proof the first order did not fill.
 
 ## Data (`data/btcperp.sqlite3`, append-only; UPDATE/DELETE blocked by triggers)
 

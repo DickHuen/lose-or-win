@@ -1,7 +1,7 @@
 """Command-line entry points (the only things Grok Bot runs).
 
   decide | manage | report daily|weekly|monthly [--month YYYY-MM] | backup | status
-  pause | kill | resume | alerts | selftest | smoketest | version
+  pause | kill | resume | alerts | selftest | smoketest [--probe-withdrawal] | flowwatch | version
 
 Every command: exclusive file lock, full logging, non-zero exit code on error.
 Alerts (including errors) are stored; `alerts` prints the undelivered ones so
@@ -36,7 +36,7 @@ from perpbot.timeutil import Clock, SystemClock, fmt_hkt
 log = logging.getLogger("perpbot.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_LOCK, EXIT_SELFTEST = 0, 1, 3, 4, 5
-NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume"}
+NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch"}
 NEEDS_BINANCE = {"decide", "manage", "smoketest"}
 TRADING = {"decide", "manage", "kill", "smoketest"}
 
@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="monthly: do nothing unless today (HKT) is the first Sunday of the month")
     s = sub.add_parser("smoketest")
     s.add_argument("--no-trade", action="store_true", help="read-only checks, no orders")
+    s.add_argument("--probe-withdrawal", action="store_true",
+                   help="also test (a): send a proxy-signed 1-base-unit withdrawal to your own wallet (expected rejection)")
+    fw = sub.add_parser("flowwatch")
+    fw.add_argument("--minutes", type=float, default=30.0, help="how long to watch (default 30)")
+    fw.add_argument("--interval", type=float, default=15.0, help="seconds between reads (default 15)")
     return p
 
 
@@ -96,7 +101,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
     except (ConfigError, CalendarError) as e:
         print(f"CONFIG ERROR: {e}", file=sys.stderr)
         return EXIT_CONFIG
-    log_path, _ = setup_logging(paths.logs_dir, clock, cfg.logging.level, secrets.secret_values())
+    log_path, redactor = setup_logging(paths.logs_dir, clock, cfg.logging.level, secrets.secret_values())
     tg = (factories.telegram or (lambda c, s: Telegram(c, s.telegram_token, s.telegram_chat_id)))(cfg, secrets)
 
     lock = FileLock(paths.lock_file)
@@ -109,6 +114,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         return EXIT_LOCK
 
     store = Store(paths.db_file, clock, cfg.config_version, code_version())
+    store.redact = redactor.redact                     # review D14: nothing secret reaches the database
     store.run_id = uuid.uuid4().hex
     started = clock.now()
     slot, lateness = nearest_slot(cfg, command, started)
@@ -142,7 +148,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
             if command == "smoketest" and not result.get("ok", True):
                 rc, status, err = EXIT_ERROR, "error", "smoketest failed"
     except Exception as e:  # noqa: BLE001
-        rc, status, err = EXIT_ERROR, "error", f"{type(e).__name__}: {e}"
+        rc, status, err = EXIT_ERROR, "error", redactor.redact(f"{type(e).__name__}: {e}")
         log.error("command %s failed: %s\n%s", command, err, traceback.format_exc())
     finally:
         dur = (clock.now() - started).total_seconds()
@@ -160,7 +166,8 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
                 log.debug("close failed", exc_info=True)
         log.info("=== %s end: %s (%.1fs)", command, status, dur)
         if status == "error":
-            text = f"[btcperp] ERROR in {command}: {err}\nlog: {log_path}\n--- last log lines ---\n{_redacted_tail(log_path)}"
+            text = redactor.redact(f"[btcperp] ERROR in {command}: {err}\nlog: {log_path}\n--- last log lines ---\n"
+                                   f"{_redacted_tail(log_path, redactor)}")
             try:
                 sent = tg.send(text)
                 store.insert("alerts", kind="ERROR", dedupe_key=None, sent=int(sent), text=text[:4000])
@@ -178,11 +185,8 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
     return rc
 
 
-def _redacted_tail(path: Any) -> str:
-    t = tail(path, 25)
-    from perpbot.logging_setup import RedactFilter
-
-    return RedactFilter().redact(t)[-3000:]
+def _redacted_tail(path: Any, redactor: Any) -> str:
+    return redactor.redact(tail(path, 25))[-3000:]
 
 
 def pending_alerts(store: Store) -> list[dict[str, Any]]:
@@ -256,6 +260,12 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
         out = {"result": engine.cmd_resume()}
     elif command == "alerts":
         return {"alerts": deliver_alerts(engine.store)}
+    elif command == "flowwatch":
+        from perpbot.smoketest import flowwatch
+
+        path = flowwatch(engine, paths, minutes=float(args.minutes), interval=float(args.interval))
+        print(f"flowwatch log: {path}")
+        return {"path": str(path)}
     elif command == "backup":
         dest = backup(engine.store, paths, engine.now())
         out = {"backup": str(dest)}
@@ -275,7 +285,8 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
     elif command == "smoketest":
         from perpbot.smoketest import run_smoketest, summary_text
 
-        ok, results = run_smoketest(engine, paths, allow_trading=not args.no_trade)
+        ok, results = run_smoketest(engine, paths, allow_trading=not args.no_trade,
+                                    probe_withdrawal=bool(args.probe_withdrawal))
         text = summary_text(ok, results)
         print(text)
         print(json.dumps(results, indent=2, default=str)[:20000])

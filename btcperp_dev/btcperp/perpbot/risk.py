@@ -119,16 +119,19 @@ def validate_price(inst: Instrument, price: Decimal) -> None:
 
 def estimate_liquidation(entry: float, direction: int, leverage: int, inst: Instrument, notional: float,
                          mmr_divisor: float) -> float:
-    """Isolated-margin liquidation ESTIMATE: distance = 1/leverage - mmr (fees ignored)."""
+    """Isolated-margin liquidation ESTIMATE: distance = 1/leverage - mmr (fees ignored), with
+    mmr = 1 / (mmr_divisor * max_leverage); divisor 2 gives 0.5 / max_leverage."""
     mmr = 1.0 / (mmr_divisor * max_leverage_for_notional(inst, notional))
     frac = max(1.0 / leverage - mmr, 0.0)
     return entry * (1 - frac) if direction > 0 else entry * (1 + frac)
 
 
-def liquidation_ok(entry: float, liq_price: float | None, sl_distance: float, min_multiple: float) -> bool:
-    """Reject if the liquidation price is closer than min_multiple x SL distance."""
-    if liq_price is None or liq_price <= 0 or math.isnan(liq_price):
-        return True  # no liquidation price reported (e.g. fully collateralised)
+def liquidation_ok(entry: float, liq_price: float | None, sl_distance: float, min_multiple: float,
+                   isolated: bool = True) -> bool:
+    """Reject if the liquidation price is closer than min_multiple x SL distance.
+    On an isolated position a missing, zero or NaN liquidation price also fails."""
+    if liq_price is None or math.isnan(liq_price) or liq_price <= 0:
+        return not isolated
     return abs(entry - liq_price) >= min_multiple * sl_distance
 
 

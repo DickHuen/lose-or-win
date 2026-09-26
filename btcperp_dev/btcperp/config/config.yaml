@@ -1,7 +1,7 @@
 # BTC-PERP bot configuration.
 # Grok Bot must NEVER edit this file. Changes come back as a new zip with a
 # higher config_version and a CHANGELOG entry.
-config_version: "1.0.1"
+config_version: "1.1.0"
 
 market:
   # The instrument is resolved from GET /v1/info/instruments on every start.
@@ -25,6 +25,7 @@ polymarket:
   order_status_poll_interval_seconds: 1.0
   fills_lookback_hours: 48       # overlap when re-reading fills on reconcile
   kline_backfill_max_days: 30    # max 1h-kline backfill per run
+  flat_confirm_delay_seconds: 5  # review C5: second position read before treating the account as flat
   collateral_asset_hint: ""      # empty = sum all balances' "value"
 
 binance:
@@ -32,7 +33,7 @@ binance:
   futures_base_urls: ["https://fapi.binance.com"]
   symbol: "BTCUSDT"
   http_timeout_seconds: 20
-  daily_candles_to_load: 500     # spec minimum 200; 500 lets EMA200 converge
+  daily_candles_to_load: 1000    # review C7: EMA200 within 0.1% of a full-history EMA200
   h4_candles_to_load: 300
   funding_days_to_load: 400      # spec minimum 365
 
@@ -110,19 +111,25 @@ risk:
   ramp_factor: 0.5
   leverage: 3
   cross_margin: false            # false = isolated
-  notional_cap_pct_equity: 50
+  notional_cap_pct_equity: 30    # PENDING USER DECISION (review E; spec v1 said 50)
   liq_min_sl_multiple: 2.0
-  # Pre-trade liquidation ESTIMATE only (exchange formula not published):
-  # maintenance margin rate = 1 / (liq_estimate_mmr_divisor * instrument max_leverage).
-  # The authoritative check runs after the fill on the exchange's liquidation_price.
+  # Pre-trade liquidation ESTIMATE only: maintenance margin rate = 0.5 / instrument max_leverage
+  # (= 1 / (divisor * max_leverage) with divisor 2; formula as cited by the review, not verified by
+  # the developer). The authoritative check runs after the fill on the exchange's liquidation_price;
+  # a missing / zero liquidation price on an isolated position fails the check (review D10).
   liq_estimate_mmr_divisor: 2
   kill_drawdown_pct: 15
-  kill_losing_streak_pct: 20
+  kill_losing_streak_pct: 8      # PENDING USER DECISION (review E; was 20, which could never fire before the 15% drawdown switch)
+  # Hard stop (review E): equity below this % of net funded capital (first equity seen + net
+  # confirmed deposits/withdrawals) closes the position and pauses; `resume` cannot clear it,
+  # only a new config version can. PENDING USER DECISION.
+  equity_floor_pct_of_net_funded: 75
   expectancy_window_trades: 25
-  # Mark-to-market equity = wallet + unrealized PnL. "auto" uses wallet + uPnL but falls
-  # back to the exchange's total_account_value (and alerts) when the two disagree by more
-  # than equity_crosscheck_tolerance_pct (e.g. if balances exclude isolated margin).
-  equity_source: "auto"          # auto | wallet_plus_upnl | total_account_value
+  # Mark-to-market equity source, used for BOTH the peak and the current value (review C8).
+  # total_account_value = the exchange's own account value (collateral incl. margin + uPnL).
+  # wallet + uPnL is computed as a cross-check; a disagreement > tolerance blocks new entries
+  # and alerts. An unreadable equity skips the kill-switch evaluation for that run and alerts.
+  equity_source: "total_account_value"   # total_account_value | wallet_plus_upnl
   equity_crosscheck_tolerance_pct: 0.5
   funding_payment_sign: 1        # +1: API "funding" > 0 is a credit to us (verify in smoketest)
 
@@ -146,7 +153,10 @@ reports:
 
 smoketest:
   resting_order_offset_pct: 2.0  # post-only buy this far below best bid, then cancel
-  probe_proxy_withdrawal: true   # (a): proxy-signed withdraw of 1 base unit to YOUR wallet; expected to be rejected
+  # (a): proxy-signed withdraw of 1 base unit to YOUR wallet; expected to be rejected. Sends a real
+  # request, so it is OFF unless you run `smoketest --probe-withdrawal` (review A2).
+  probe_proxy_withdrawal: false
+  bracket_reject_test: true      # review G1: bracket with an invalid SL row, min size, closed immediately
   # From the official SDK polymarket-client 0.11.0 environments.py (production):
   perps_deposit_contract: "0xDCa4af75705dbB50f62437045afF9921947917d2"
   collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"

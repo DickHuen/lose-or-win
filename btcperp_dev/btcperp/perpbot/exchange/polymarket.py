@@ -235,7 +235,7 @@ class PolymarketExchange(Exchange):
             data = r.json()
         except (httpx.HTTPError, ValueError) as e:
             raise ExchangeError(f"geoblock check failed: {e}") from e
-        return {"blocked": data.get("blocked"), "country": data.get("country"), "region": data.get("region")}
+        return dict(data) if isinstance(data, dict) else {"raw": data}   # review G4: full response
 
     def get_server_time_raw(self) -> Any:
         """GET /v1/info/time (docs: sync against it before signing). Raw body; shape not in the SDK."""

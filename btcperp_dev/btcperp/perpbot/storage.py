@@ -59,6 +59,7 @@ class Store:
         self.config_version = config_version
         self.code_version = code_version
         self.run_id: str | None = None
+        self.redact: Any = None          # callable(str) -> str; set by the CLI (review D14)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
@@ -89,7 +90,10 @@ class Store:
     def _prep(self, fields: dict[str, Any]) -> dict[str, Any]:
         row = self._common()
         for k, v in fields.items():
-            row[k] = _json(v) if (k == "data" or isinstance(v, (dict, list))) else v
+            v = _json(v) if (k == "data" or isinstance(v, (dict, list))) else v
+            if isinstance(v, str) and self.redact is not None:
+                v = self.redact(v)
+            row[k] = v
         return row
 
     def insert(self, table: str, **fields: Any) -> int:

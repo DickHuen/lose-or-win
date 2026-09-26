@@ -84,7 +84,10 @@ def test_liquidation_check():
     assert liquidation_ok(100_000, 70_000, 3_000, 2.0)
     assert not liquidation_ok(100_000, 95_000, 3_000, 2.0)      # 5000 < 2 x 3000
     assert liquidation_ok(100_000, 94_000, 3_000, 2.0)          # exactly 2x is allowed
-    assert liquidation_ok(100_000, None, 3_000, 2.0)
+    assert not liquidation_ok(100_000, None, 3_000, 2.0)       # isolated: missing liquidation price fails (D10)
+    assert not liquidation_ok(100_000, 0.0, 3_000, 2.0)
+    assert not liquidation_ok(100_000, float("nan"), 3_000, 2.0)
+    assert liquidation_ok(100_000, None, 3_000, 2.0, isolated=False)
     est = estimate_liquidation(100_000, 1, 3, INST, 5_000, 2)
     assert 60_000 < est < 70_000
     est_s = estimate_liquidation(100_000, -1, 3, INST, 5_000, 2)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import traceback
 from decimal import Decimal
 from typing import Any, Callable
@@ -27,6 +28,7 @@ ZH = {
     "c_leftovers_after_close": "(c) 平倉後剩餘訂單是否自動清除", "d_funding_after_close": "(d) 平倉後能否讀取累計資金費",
     "a_proxy_withdraw": "(a) 代理金鑰能否提款", "e_cancel_only": "(e) 只可撤單模式下的下單回應",
     "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知（已停用）", "server_time": "伺服器時間同步",
+    "short_and_flip": "最細倉做空及反手測試", "g1_bracket_partial_reject": "括號單部分被拒時入場是否成交",
 }
 
 
@@ -34,7 +36,8 @@ def _dec(d: Decimal) -> str:
     return format(d, "f")
 
 
-def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> tuple[bool, list[dict[str, Any]]]:
+def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
+                  probe_withdrawal: bool = False) -> tuple[bool, list[dict[str, Any]]]:
     ex, cfg = engine.ex, engine.cfg
     results: list[dict[str, Any]] = []
     ctx: dict[str, Any] = {}
@@ -148,6 +151,60 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
 
     tag = now.strftime("%Y%m%d%H%M%S")
 
+    def wait_flat(max_reads: int = 20) -> dict[str, Any]:
+        """Review G3: how long until the account read shows the position gone."""
+        t0 = time.monotonic()
+        for i in range(1, max_reads + 1):
+            if ex.get_account().position(ctx["inst"].id) is None:
+                return {"flat": True, "reads": i, "seconds": round(time.monotonic() - t0, 2)}
+            engine.sleep(0.5)
+        return {"flat": False, "reads": max_reads, "seconds": round(time.monotonic() - t0, 2)}
+
+    def fok(side: str, label: str, sl_mult: float | None = None, tp_mult: float | None = None,
+            sl_override: Decimal | None = None) -> tuple[Any, Any, Any]:
+        inst = ctx["inst"]
+        b = ex.get_book(inst.id, int(cfg.polymarket.book_depth))
+        d = 1 if side == "BUY" else -1
+        ref = b.best_ask if d > 0 else b.best_bid
+        px = quantize_price(ref * (1 + d * float(cfg.exits.entry_slippage_bps) / 1e4), inst.price_decimals,
+                            "down" if d > 0 else "up")
+        qty = min_qty(ref)
+        atr = ctx.get("atr") or ref * 0.02
+        sl = sl_override if sl_override is not None else quantize_price(
+            ref - d * float(sl_mult or cfg.exits.sl_atr_multiple) * atr, inst.price_decimals, "nearest")
+        tp = quantize_price(ref + d * float(tp_mult or cfg.exits.tp_atr_multiple) * atr, inst.price_decimals, "nearest")
+        coid = engine.coid(f"smoketest:{tag}:{label}")
+        engine.log_order("smoketest", "request", coid, None, None, {"side": side, "qty": _dec(qty), "price": _dec(px),
+                                                                   "tif": "fok", "tp": _dec(tp), "sl": _dec(sl)})
+        res = ex.place_order(instrument_id=inst.id, side=side, quantity=_dec(qty), tif="fok", price=_dec(px),
+                             reduce_only=False, client_order_id=coid, tp_trigger=_dec(tp), sl_trigger=_dec(sl))
+        engine.log_order("smoketest", "response", coid, res.order_id, str(res.accepted),
+                         {"error": res.error, "tp_order_id": res.tp_order_id, "sl_order_id": res.sl_order_id})
+        o = engine.confirm_order(coid, res, "smoketest")
+        return res, o, ex.get_account().position(inst.id)
+
+    def close_now(label: str) -> dict[str, Any]:
+        """Reduce-only market IOC close of whatever is open, wait for flat, cancel leftovers by id."""
+        inst = ctx["inst"]
+        pos = ex.get_account().position(inst.id)
+        out: dict[str, Any] = {"had_position": pos is not None}
+        if pos is not None:
+            side = "SELL" if pos.direction > 0 else "BUY"
+            coid = engine.coid(f"smoketest:{tag}:{label}")
+            engine.log_order("smoketest", "request", coid, None, None, {"side": side, "qty": str(abs(pos.size)),
+                                                                       "tif": "ioc", "reduce_only": True})
+            res = ex.place_order(instrument_id=inst.id, side=side, quantity=format(Decimal(str(abs(pos.size))), "f"),
+                                 tif="ioc", price=None, reduce_only=True, client_order_id=coid)
+            engine.log_order("smoketest", "response", coid, res.order_id, str(res.accepted), {"error": res.error})
+            engine.confirm_order(coid, res, "smoketest")
+            out["wait_flat"] = wait_flat()
+        left = [x for x in ex.get_open_orders(inst.id) if x.is_active and (x.is_trigger or x.reduce_only)]
+        if left:
+            ex.cancel_orders([x.id for x in left])
+        out["leftovers_cancelled"] = [x.id for x in left]
+        out["flat"] = ex.get_account().position(inst.id) is None
+        return out
+
     def s_place_cancel() -> Any:
         inst = ctx["inst"]
         b = ex.get_book(inst.id, int(cfg.polymarket.book_depth))
@@ -204,7 +261,9 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
         filled = o is not None and o.status in FILLED_STATUSES and pos is not None
         has_sl = any(t["kind"] == "sl" and t["status"] in ACTIVE_TRIGGER_STATUSES for t in trig)
         return (filled and has_sl), {"order_status": o.status if o else None, "position": pos.__dict__ if pos else None,
-                                     "triggers": trig, "sl_present": has_sl, "liquidation_price": pos.liquidation_price if pos else None}
+                                     "triggers": trig, "sl_present": has_sl,
+                                     "liquidation_price_raw": repr(pos.liquidation_price) if pos else None,
+                                     "cross": pos.cross if pos else None}
     step("open_bracket", s_open, critical=True, trading=True)
 
     def s_b() -> Any:
@@ -231,9 +290,11 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
                              reduce_only=True, client_order_id=coid)
         engine.log_order("smoketest", "response", coid, res.order_id, str(res.accepted), {"error": res.error})
         o = engine.confirm_order(coid, res, "smoketest")
+        wf = wait_flat()
         pos = ex.get_account().position(inst.id)
         ctx["exit_ts"] = to_ms(engine.now())
-        return pos is None, {"order_status": o.status if o else None, "position_after": pos.__dict__ if pos else None}
+        return pos is None, {"order_status": o.status if o else None, "position_after": pos.__dict__ if pos else None,
+                             "g3_account_read_after_close": wf}
     step("close", s_close, critical=True, trading=True)
 
     def s_c() -> Any:
@@ -276,6 +337,37 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
                       "fills": [f.__dict__ for f in fills], "pnl_check": ctx["pnl_check"]}
     step("d_funding_after_close", s_d, trading=True)
 
+    def s_short_flip() -> Any:
+        """Review D17: minimum short with bracket, two-step flip to long, then close."""
+        res1, o1, pos1 = fok("SELL", "short")
+        short_ok = pos1 is not None and pos1.direction < 0
+        trig = [{"kind": x.tpsl_kind, "status": x.status, "trigger": x.trigger_price}
+                for x in ex.get_open_orders(ctx["inst"].id) if x.is_trigger]
+        step1 = close_now("flip_close")
+        res2, o2, pos2 = fok("BUY", "flip_long")
+        long_ok = pos2 is not None and pos2.direction > 0
+        step2 = close_now("final_close")
+        ok = short_ok and step1["flat"] and not step1.get("error") and long_ok and step2["flat"]
+        return ok, {"short_filled": short_ok, "short_triggers": trig, "short_error": res1.error,
+                    "flip_close": step1, "long_filled": long_ok, "long_error": res2.error, "final_close": step2}
+    step("short_and_flip", s_short_flip, critical=True, trading=True)
+
+    def s_g1() -> Any:
+        """Review G1: bracket whose SL row is invalid (above the market for a long). Does the entry still fill?"""
+        if not bool(cfg.smoketest.bracket_reject_test):
+            return True, "disabled in config"
+        b = ex.get_book(ctx["inst"].id, int(cfg.polymarket.book_depth))
+        bad_sl = quantize_price(b.best_ask * 1.5, ctx["inst"].price_decimals, "nearest")
+        res, o, pos = fok("BUY", "g1", sl_override=bad_sl)
+        filled_anyway = pos is not None
+        cleanup = close_now("g1_close")
+        return cleanup["flat"], {"accepted": res.accepted, "error": res.error, "outcome_unknown": res.outcome_unknown,
+                                 "entry_status": o.status if o else None, "entry_filled_anyway": filled_anyway,
+                                 "cleanup": cleanup,
+                                 "answer_g1": ("entry row FILLED although the command was rejected" if (filled_anyway and not res.accepted)
+                                               else "entry not filled" if not filled_anyway else "command accepted")}
+    step("g1_bracket_partial_reject", s_g1, trading=True)
+
     def s_eq() -> Any:
         a = ctx.get("after_entry") or {}
         wb = ctx.get("wallet_before")
@@ -289,8 +381,8 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True) -> t
     step("equity_formula", s_eq, trading=True)
 
     def s_a() -> Any:
-        if not bool(cfg.smoketest.probe_proxy_withdrawal):
-            return True, "disabled in config"
+        if not (bool(cfg.smoketest.probe_proxy_withdrawal) or probe_withdrawal):
+            return True, {"answer_a": "not tested live (off by default; run `smoketest --probe-withdrawal` to test)"}
         r = ex.probe_proxy_withdrawal(owner=engine.secrets.wallet_address, amount_base_units=1)
         resp = r.get("response")
         ok_status = isinstance(resp, dict) and resp.get("status") == "ok"
@@ -328,3 +420,32 @@ def summary_text(ok: bool, results: list[dict[str, Any]]) -> str:
             ans = next((str(v) for k, v in det.items() if k.startswith("answer_")), "")
         lines.append(f"[{mark}] {r['step']} / {r['zh']}" + (f" -> {ans}" if ans else ""))
     return "\n".join(lines)
+
+
+def flowwatch(engine: Any, paths: Paths, *, minutes: float, interval: float) -> Any:
+    """Review G7: watch balances / account value / deposit+withdrawal statuses while the owner makes a
+    small deposit or withdrawal, to learn when balances change between 'pending' and 'confirmed'."""
+    ex = engine.ex
+    start_ms = to_ms(engine.now())
+    rows: list[dict[str, Any]] = []
+    last_sig = None
+    n = max(1, int(minutes * 60 / max(interval, 1.0)))
+    for i in range(n + 1):
+        acct = ex.get_account()
+        try:
+            flows = [f.__dict__ for f in ex.get_flows(start_ms - 7 * DAY_MS)]
+        except Exception as e:  # noqa: BLE001
+            flows = [{"error": str(e)}]
+        snap = {"t": to_ms(engine.now()), "balances": [b.__dict__ for b in acct.balances],
+                "total_account_value": acct.total_account_value, "withdrawable": acct.withdrawable, "flows": flows}
+        sig = json.dumps({k: v for k, v in snap.items() if k != "t"}, sort_keys=True, default=str)
+        if sig != last_sig:
+            rows.append(snap)
+            print(f"[flowwatch] change at read {i}: TAV={acct.total_account_value} withdrawable={acct.withdrawable} "
+                  f"flows={[(f.get('kind'), f.get('amount'), f.get('status')) for f in flows]}", flush=True)
+            last_sig = sig
+        if i < n:
+            engine.sleep(interval)
+    out = paths.smoketest_dir / f"flowwatch_{engine.now().strftime('%Y%m%d%H%M%S')}.json"
+    out.write_text(json.dumps(rows, indent=2, default=str), encoding="utf-8")
+    return out

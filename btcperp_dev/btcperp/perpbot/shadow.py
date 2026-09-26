@@ -8,7 +8,8 @@
    - v2_breakeven: live rules + one-time SL move to breakeven at +1 ATR
    - flat_allowed: |score| < tier_low_max means flat (close / no entry)
    - ungated:      live rules with all gates ignored
-Results are in R (multiples of the full 100%-tier risk), fees included.
+Results are in R (multiples of the full 100%-tier risk), after fees, funding over the holding
+time (Polymarket funding prints, Binance as fallback) and the configured FOK entry slippage.
 """
 
 from __future__ import annotations
@@ -63,11 +64,27 @@ def _candles(store: Any, start_ms: int) -> list[dict[str, Any]]:
     return store.query("SELECT open_ms, open, high, low, close FROM pm_klines_1h WHERE open_ms >= ? ORDER BY open_ms", [start_ms])
 
 
-def _r(t: SimTrade, sl_mult: float, fee_rate: float) -> float:
+def _funding_series(store: Any) -> list[tuple[int, float]]:
+    rows = store.query("SELECT fund_ts_ms AS ts, rate FROM pm_funding ORDER BY fund_ts_ms")
+    if not rows:
+        rows = store.query("SELECT fund_ts_ms AS ts, rate FROM bn_funding ORDER BY fund_ts_ms")
+    return [(int(r["ts"]), float(r["rate"])) for r in rows]
+
+
+def _r(t: SimTrade, sl_mult: float, fee_rate: float, funding: list[tuple[int, float]] | None = None) -> float:
+    """R after fees and funding (review D16). Positive funding rate: longs pay, shorts receive."""
     risk_unit = sl_mult * t.atr
     gross = (t.exit_price - t.entry_price) * t.direction / risk_unit
     fees = 2 * fee_rate * t.entry_price / risk_unit
-    return (gross - fees) * t.fraction
+    paid = 0.0
+    if funding and t.exit_ts_ms is not None:
+        rate_sum = sum(r for ts, r in funding if t.entry_ts_ms < ts <= t.exit_ts_ms)
+        paid = rate_sum * t.entry_price * t.direction / risk_unit
+    return (gross - fees - paid) * t.fraction
+
+
+def _slipped(mark: float, direction: int, cfg: Any) -> float:
+    return mark * (1 + direction * float(cfg.exits.entry_slippage_bps) / 1e4)
 
 
 def _walk(state: SimState, candles: list[dict[str, Any]], until_ms: int, v2: bool, be_atr: float) -> None:
@@ -108,7 +125,7 @@ def _streak(dirs: dict[str, int], pos_dir: int, entry_day: str, today: str) -> i
 
 
 def simulate_variant(variant: str, days: list[dict[str, Any]], candles: list[dict[str, Any]], cfg: Any,
-                     now_ms: int, fee_rate: float) -> SimState:
+                     now_ms: int, fee_rate: float, funding: list[tuple[int, float]] | None = None) -> SimState:
     s, g, ex = cfg.strategy, cfg.gates, cfg.exits
     sl_mult, tp_mult = float(ex.sl_atr_multiple), float(ex.tp_atr_multiple)
     be_atr = float(cfg.shadow.breakeven_trigger_atr)
@@ -148,16 +165,17 @@ def simulate_variant(variant: str, days: list[dict[str, Any]], candles: list[dic
             state.trade = None
         if enter_dir and state.trade is None:
             atr = float(sc["atr"])
-            state.trade = SimTrade(variant, day, enter_dir, frac, mark, ts, atr,
-                                   mark - enter_dir * sl_mult * atr, mark + enter_dir * tp_mult * atr)
+            px = _slipped(mark, enter_dir, cfg)
+            state.trade = SimTrade(variant, day, enter_dir, frac, px, ts, atr,
+                                   px - enter_dir * sl_mult * atr, px + enter_dir * tp_mult * atr)
     _walk(state, candles, now_ms, v2, be_atr)
     for tr in state.closed:
-        tr.r = _r(tr, sl_mult, fee_rate)
+        tr.r = _r(tr, sl_mult, fee_rate, funding)
     return state
 
 
 def gate_trades(days: list[dict[str, Any]], candles: list[dict[str, Any]], cfg: Any, now_ms: int,
-                fee_rate: float) -> list[dict[str, Any]]:
+                fee_rate: float, funding: list[tuple[int, float]] | None = None) -> list[dict[str, Any]]:
     """Resolved hypothetical trades for days where a gate blocked or reduced the entry."""
     sl_mult, tp_mult = float(cfg.exits.sl_atr_multiple), float(cfg.exits.tp_atr_multiple)
     max_hold = float(cfg.shadow.gate_trade_max_hold_days) * DAY_MS
@@ -175,8 +193,9 @@ def gate_trades(days: list[dict[str, Any]], candles: list[dict[str, Any]], cfg: 
         if not ts or not mark:
             continue
         d, atr = int(sc["direction"]), float(sc["atr"])
-        t = SimTrade("gate", rec["utc_day"], d, float(sc["tier_fraction"]), mark, ts, atr,
-                     mark - d * sl_mult * atr, mark + d * tp_mult * atr)
+        px = _slipped(mark, d, cfg)
+        t = SimTrade("gate", rec["utc_day"], d, float(sc["tier_fraction"]), px, ts, atr,
+                     px - d * sl_mult * atr, px + d * tp_mult * atr)
         st = SimState(trade=t)
         horizon = min(ts + int(max_hold), now_ms)
         _walk(st, candles, horizon, False, 0.0)
@@ -187,7 +206,7 @@ def gate_trades(days: list[dict[str, Any]], candles: list[dict[str, Any]], cfg: 
             if not last:
                 continue
             t.exit_price, t.exit_ts_ms, t.exit_reason = last[-1]["close"], last[-1]["open_ms"] + HOUR_MS, "time"
-        t.r = _r(t, sl_mult, fee_rate)
+        t.r = _r(t, sl_mult, fee_rate, funding)
         live_frac = float(plan.get("enter_fraction") or 0.0) if plan.get("enter_direction") else 0.0
         out.append({"utc_day": rec["utc_day"], "gates": plan.get("gates_triggered"), "blocked": gated_blocks,
                     "reduced": bool(reduced), "ungated_fraction": t.fraction, "live_fraction": live_frac,
@@ -215,10 +234,11 @@ def update_shadow(engine: Any) -> None:
     candles = _candles(store, first_ts)
     now_ms = to_ms(engine.now())
     fee = _fee_rate(engine)
-    for g in gate_trades(days, candles, cfg, now_ms, fee):
+    funding = _funding_series(store)
+    for g in gate_trades(days, candles, cfg, now_ms, fee, funding):
         store.insert_ignore("shadow_log", kind="gate_trade", variant="gate", unique_key=f"gate:{g['utc_day']}", data=g)
     for v in VARIANTS:
-        st = simulate_variant(v, days, candles, cfg, now_ms, fee)
+        st = simulate_variant(v, days, candles, cfg, now_ms, fee, funding)
         trades = [asdict(t) for t in st.closed]
         summary = {"variant": v, "closed_trades": len(trades), "total_r": sum(t["r"] or 0 for t in trades),
                    "wins": sum(1 for t in trades if (t["r"] or 0) > 0),

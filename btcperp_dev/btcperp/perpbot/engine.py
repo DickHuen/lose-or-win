@@ -36,6 +36,7 @@ from perpbot.exchange.base import (
 from perpbot.indicators import Candle
 from perpbot.records import Records, client_order_id
 from perpbot.risk import (
+    DrawdownState,
     compute_size,
     drawdown,
     estimate_liquidation,
@@ -120,6 +121,7 @@ class Engine:
         self.secrets = secrets
         self.sleep = sleep
         self._inst: Instrument | None = None
+        self._kill_close_tried = False
 
     # ================================================================ utilities
     def now(self) -> datetime:
@@ -173,23 +175,30 @@ class Engine:
 
     # ================================================================ equity
     def equity(self, acct: AccountSnapshot) -> dict[str, Any]:
+        """Equity from ONE fixed source (config) for both the peak and the current value (review C8).
+        The other measure is a cross-check: disagreement blocks new entries and alerts; an unreadable
+        value marks the equity invalid (kill-switch evaluation is skipped for that run)."""
         hint = self.cfg.polymarket.collateral_asset_hint
         wallet = sum(b.value for b in acct.balances if not hint or b.asset == hint)
         upnl = sum(p.unrealized_pnl for p in acct.positions)
         mtm = wallet + upnl
         tav = acct.total_account_value
         src = self.cfg.risk.equity_source
-        used, source, disagree = mtm, "wallet_plus_upnl", False
-        if tav > 0:
+        used = tav if src == "total_account_value" else mtm
+        valid = used is not None and used == used and used > 0
+        disagree = False
+        if valid and tav and tav > 0:
             disagree = abs(mtm - tav) / tav * 100.0 > float(self.cfg.risk.equity_crosscheck_tolerance_pct)
-        if src == "total_account_value" or (src == "auto" and disagree):
-            used, source = tav, "total_account_value"
-        if disagree and src == "auto":
-            self.alert("equity cross-check",
-                       f"wallet+uPnL={mtm:.2f} vs exchange total_account_value={tav:.2f}; using total_account_value",
+        if not valid:
+            self.alert("equity unreadable", f"{src} = {used!r}; kill switches skipped this run, new entries blocked",
+                       dedupe_key=f"equity_invalid:{self.today()}")
+        elif disagree:
+            self.alert("equity cross-check", f"wallet+uPnL={mtm:.2f} vs total_account_value={tav:.2f} "
+                       f"(> {self.cfg.risk.equity_crosscheck_tolerance_pct}%); using {src}; new entries blocked",
                        dedupe_key=f"equity_xcheck:{self.today()}")
         return {"equity": used, "wallet": wallet, "upnl": upnl, "mtm_wallet_plus_upnl": mtm,
-                "total_account_value": tav, "source": source, "withdrawable": acct.withdrawable}
+                "total_account_value": tav, "source": src, "withdrawable": acct.withdrawable,
+                "valid": valid, "sources_disagree": disagree, "block_entries": (not valid) or disagree}
 
     # ================================================================ sync
     def sync_fills(self) -> int:
@@ -215,20 +224,25 @@ class Engine:
                 n += 1
         return n
 
-    def sync_flows(self) -> float:
-        """Newly confirmed deposits(+)/withdrawals(-) since last seen."""
+    def sync_flows(self) -> tuple[float, list[Any], list[Any]]:
+        """(net newly confirmed deposits(+)/withdrawals(-), pending flows, newly seen flows)."""
         adj = 0.0
         try:
             flows = self.ex.get_flows(to_ms(self.now()) - 90 * DAY_MS)
         except ExchangeError as e:
             log.warning("flows read failed: %s", e)
-            return 0.0
+            return 0.0, [], []
+        pending, new_seen = [], []
         for f in flows:
             new = self.store.insert_ignore("flows", flow_key=f"{f.key}:{f.status}", kind=f.kind, amount=f.amount,
                                            status=f.status, flow_ts_ms=f.ts_ms)
-            if new and f.status == "confirmed":
-                adj += f.amount if f.kind == "deposit" else -f.amount
-        return adj
+            if f.status == "pending":
+                pending.append(f)
+            if new:
+                new_seen.append(f)
+                if f.status == "confirmed":
+                    adj += f.amount if f.kind == "deposit" else -f.amount
+        return adj, pending, new_seen
 
     def stored_fills(self, since_ms: int) -> list[Fill]:
         rows = self.store.query("SELECT data FROM fills WHERE fill_ts_ms >= ? ORDER BY fill_ts_ms, trade_id", [since_ms])
@@ -274,10 +288,16 @@ class Engine:
             actions.append(f"resolving interrupted state {prev_state['position_state']}")
 
         if trade and pos is None:
-            self.book_closed_trade(trade, forced_reason=None)
-            actions.append("booked intraday close")
-            trade = None
-        elif trade and pos is not None and pos.direction != trade["direction"]:
+            flat, why = self.confirm_flat(inst, trade)
+            if flat:
+                self.book_closed_trade(trade, forced_reason=None)
+                actions.append(f"booked intraday close ({why})")
+                trade = None
+            else:
+                pos = self.ex.get_account().position(inst.id)
+                orders = self.ex.get_open_orders(inst.id)
+                actions.append(f"position missing on one read only ({why}); nothing booked or cancelled")
+        if trade and pos is not None and pos.direction != trade["direction"]:
             self.book_closed_trade(trade, forced_reason="external")
             actions.append("local trade direction differs from exchange: booked as external close")
             trade = None
@@ -291,8 +311,12 @@ class Engine:
                               liquidation_price=pos.liquidation_price, data={"trade_uid": trade["trade_uid"]})
             if allow_actions:
                 actions += self.ensure_protection(inst, trade, pos, orders)
-        elif pos is None:
-            actions += self.cancel_leftovers(inst, orders)
+        elif pos is None and any(o.is_active and (o.is_trigger or o.reduce_only) for o in orders):
+            flat, why = self.confirm_flat(inst, None)
+            if flat:
+                actions += self.cancel_leftovers(inst, orders)
+            else:
+                actions.append(f"leftover orders kept: flat not confirmed ({why})")
 
         acct = self.ex.get_account()
         pos = acct.position(inst.id)
@@ -312,6 +336,32 @@ class Engine:
             trade = self.rec.open_trade()
         self.check_key_expiry()
         return ReconcileResult(inst, acct, pos, orders, trade, eq, actions)
+
+    def confirm_flat(self, inst: Instrument, trade: dict[str, Any] | None) -> tuple[bool, str]:
+        """Evidence that the position is really gone (review C5): exit fills covering the trade,
+        a trigger that fired / was closed with the position, or two reads apart that both show flat."""
+        if trade is not None:
+            covered = sum(min(f.quantity, abs(f.previous_size)) for f in self.exit_fill_candidates(trade))
+            if covered >= float(trade["qty"]) - 1e-9:
+                return True, "exit fills cover the position"
+            for oid in (trade.get("sl_order_id"), trade.get("tp_order_id")):
+                if not oid:
+                    continue
+                try:
+                    for o in self.ex.get_orders(order_id=int(oid)):
+                        if o.status in ("triggered", "filled", "position_closed"):
+                            return True, f"trigger {oid} {o.status}"
+                except ExchangeError:
+                    pass
+        self.sleep(float(self.cfg.polymarket.flat_confirm_delay_seconds))
+        if self.ex.get_account().position(inst.id) is None:
+            return True, "flat on two reads"
+        return False, "position visible again on the second read"
+
+    def _opening_fill_for(self, pos: Position) -> Fill | None:
+        """Most recent fill that opened a position from flat (the start of the current position)."""
+        fills = [f for f in self.stored_fills(to_ms(self.now()) - 30 * DAY_MS) if f.is_opening]
+        return fills[-1] if fills else None
 
     def adopt_position(self, inst: Instrument, pos: Position, orders: list[Order]) -> dict[str, Any]:
         day = self.today()
@@ -334,16 +384,19 @@ class Engine:
             tp = pos.entry_price + pos.direction * tp_mult * atr
         external = entry_order is None or intent.get("enter_direction") != pos.direction
         fills = [f for f in self.stored_fills(to_ms(self.now()) - 2 * DAY_MS) if entry_order and f.order_id == entry_order.id]
-        entry_fees = sum(f.fee for f in fills)
+        opening = fills[0] if fills else self._opening_fill_for(pos)
+        entry_ts = opening.ts_ms if opening else to_ms(self.now())
+        entry_day = utc_day(from_ms(entry_ts)).isoformat()          # review D12: from the opening fill
+        entry_fees = sum(f.fee for f in fills) if fills else (opening.fee if opening else 0.0)
         sl_dist = abs(pos.entry_price - sl) if sl else (sl_mult * atr if atr else 0.0)
         acct = self.ex.get_account()
         eq = self.equity(acct)["equity"]
         trade = {
             "trade_uid": uuid.uuid4().hex, "direction": pos.direction, "qty": abs(pos.size),
-            "entry_price": pos.entry_price, "entry_ts_ms": (fills[0].ts_ms if fills else to_ms(self.now())),
-            "entry_utc_day": day, "sl_price": sl, "tp_price": tp,
-            "sl_order_id": next((o.id for o in orders if o.tpsl_kind == "sl"), None),
-            "tp_order_id": next((o.id for o in orders if o.tpsl_kind == "tp"), None),
+            "entry_price": pos.entry_price, "entry_ts_ms": entry_ts,
+            "entry_utc_day": entry_day, "sl_price": sl, "tp_price": tp,
+            "sl_order_id": next((o.id for o in orders if o.tpsl_kind == "sl" and o.status in ACTIVE_TRIGGER_STATUSES), None),
+            "tp_order_id": next((o.id for o in orders if o.tpsl_kind == "tp" and o.status in ACTIVE_TRIGGER_STATUSES), None),
             "atr": atr, "sl_distance": sl_dist, "initial_risk_usd": sl_dist * abs(pos.size),
             "equity_at_entry": eq, "entry_fees": entry_fees, "adopted": True, "external": external, "live": True,
             "score": intent.get("score"), "tier_fraction": intent.get("tier_fraction"),
@@ -357,12 +410,24 @@ class Engine:
         self.alert("position adopted" if external else "entry recovered",
                    f"{'Unknown' if external else 'Interrupted-entry'} position on exchange: size {pos.size} @ {pos.entry_price}; "
                    f"SL {sl} TP {tp}")
+        budget = eq * float(self.cfg.risk.risk_per_trade_pct) / 100.0 if eq else 0.0
+        if budget and trade["initial_risk_usd"] > budget * 1.01:
+            self.rec.set_state(add_reason="adopted_over_budget", note="adopted position risk above budget")
+            self.alert("adopted position over risk budget",
+                       f"risk at SL {trade['initial_risk_usd']:.2f} > budget {budget:.2f} "
+                       f"({self.cfg.risk.risk_per_trade_pct}% of equity). Bot paused; SL/TP kept. Resume only after you confirm.")
         return trade
 
     def _latest_atr(self) -> float | None:
         row = self.store.latest("decisions", "score IS NOT NULL")
-        if row and isinstance(row["data"], dict):
+        if row and isinstance(row["data"], dict) and (row["data"].get("score") or {}).get("atr"):
             return (row["data"].get("score") or {}).get("atr")
+        if self.bn is not None:                      # no decision yet: compute ATR from Binance now
+            try:
+                daily = self.bn.klines("1d", int(self.cfg.binance.daily_candles_to_load), to_ms(self.now()))
+                return compute_score(daily, utc_day(self.now()), self.cfg.strategy).atr
+            except Exception as e:  # noqa: BLE001
+                log.warning("ATR for adopted position unavailable: %s", e)
         return None
 
     # ================================================================ protection
@@ -370,11 +435,15 @@ class Engine:
         actions: list[str] = []
         sls = [o for o in orders if o.tpsl_kind == "sl" and o.status in ACTIVE_TRIGGER_STATUSES]
         tps = [o for o in orders if o.tpsl_kind == "tp" and o.status in ACTIVE_TRIGGER_STATUSES]
-        if sls and tps:
+        # review C4: an order-scoped SL must cover the whole position, else add a position SL (qty "0")
+        full_sls = [o for o in sls if o.tpsl_scope == "position" or o.quantity >= abs(pos.size) - 1e-9]
+        if full_sls and tps:
             return actions
         sl_price, tp_price = trade.get("sl_price"), trade.get("tp_price")
-        if not sls:
-            self.alert("SL missing", f"no active stop-loss on exchange for {pos.size} {inst.symbol}; re-placing at {sl_price}")
+        if not full_sls:
+            what = ("no active stop-loss" if not sls else
+                    f"stop-loss covers only {max(o.quantity for o in sls)} of {abs(pos.size)}")
+            self.alert("SL missing", f"{what} on exchange for {pos.size} {inst.symbol}; placing position SL at {sl_price}")
             mark = self.ex.get_ticker(inst.id).mark
             if sl_price is None:
                 ok = False
@@ -389,6 +458,14 @@ class Engine:
                 self.log_order("sl_replace", "response", None, res.sl_order_id, "accepted" if res.accepted else "rejected",
                                {"error": res.error, "restriction": res.restriction, "tp_order_id": res.tp_order_id})
                 ok, err = res.accepted and res.sl_order_id is not None, res.error
+                if not ok and res.outcome_unknown:
+                    # review D13: outcome unknown -> re-read before deciding to close
+                    self.sleep(float(self.cfg.polymarket.order_status_poll_interval_seconds))
+                    again = [o for o in self.ex.get_open_orders(inst.id) if o.tpsl_kind == "sl"
+                             and o.status in ACTIVE_TRIGGER_STATUSES
+                             and (o.tpsl_scope == "position" or o.quantity >= abs(pos.size) - 1e-9)]
+                    if again:
+                        res.sl_order_id, ok = again[0].id, True
                 if ok:
                     upd = {"sl_order_id": res.sl_order_id, "note": "SL re-placed on reconcile"}
                     if res.tp_order_id:
@@ -457,29 +534,65 @@ class Engine:
 
     # ================================================================ kill switches
     def kill_switch_check(self, acct: AccountSnapshot, *, allow_actions: bool) -> dict[str, Any]:
+        inst = self.instrument()
         eq = self.equity(acct)
         prev = self.store.latest("equity_log")
-        flow_adj = self.sync_flows()
-        prev_peak = (float(prev["peak"]) + flow_adj) if prev else None
-        dd = drawdown(eq["equity"], prev_peak, float(self.cfg.risk.kill_drawdown_pct))
+        prev_data = prev["data"] if prev and isinstance(prev["data"], dict) else {}
+        flow_adj, pending, new_flows = self.sync_flows()
+        pos = acct.position(inst.id)
+        if pos is not None:
+            for f in new_flows:
+                self.alert("deposit/withdrawal while holding",
+                           f"{f.kind} {f.amount} ({f.status}) while a position is open. Not allowed until the smoketest "
+                           f"has measured deposit/withdrawal timing.", dedupe_key=f"flow_hold:{f.key}:{f.status}")
+        if pending:
+            eq["block_entries"] = True
+            self.alert("pending deposit/withdrawal",
+                       f"{len(pending)} pending ({', '.join(f.kind for f in pending)}): drawdown and equity-floor checks "
+                       f"skipped and new entries blocked until confirmed",
+                       dedupe_key=f"flow_pending:{','.join(sorted(f.key for f in pending))}")
+        prev_peak = (float(prev["peak"]) + flow_adj) if (prev and prev["peak"] is not None) else None
+        nf_prev = prev_data.get("net_funded")
+        net_funded = (float(nf_prev) + flow_adj) if nf_prev is not None else None
+        evaluate = bool(eq["valid"]) and not pending          # review C8 / C9
+        limit = float(self.cfg.risk.kill_drawdown_pct)
+        if evaluate:
+            dd = drawdown(eq["equity"], prev_peak, limit)
+            if net_funded is None:
+                net_funded = eq["equity"]                        # first valid equity = funded capital baseline
+            floor = net_funded * float(self.cfg.risk.equity_floor_pct_of_net_funded) / 100.0
+            floor_hit = eq["equity"] < floor
+        else:
+            peak = prev_peak if prev_peak is not None else 0.0
+            dd = DrawdownState(eq["equity"] or 0.0, peak, float(prev["drawdown_pct"] or 0.0) if prev else 0.0, False)
+            floor, floor_hit = None, False
         st = self.rec.state()
         streak_trades = self.rec.closed_trades(since_ms=self.rec.last_resume_ms())
         streak = losing_streak(streak_trades, float(self.cfg.risk.kill_losing_streak_pct))
         all_trades = self.rec.closed_trades()
         exp, n_exp = size_weighted_expectancy(all_trades, int(self.cfg.risk.expectancy_window_trades))
-        status = {"drawdown_pct": dd.drawdown_pct, "drawdown_triggered": dd.triggered,
+        status = {"evaluated": evaluate, "drawdown_pct": dd.drawdown_pct, "drawdown_triggered": dd.triggered,
+                  "equity_floor": floor, "equity_floor_hit": floor_hit, "net_funded": net_funded,
                   "losing_streak_trades": streak.losing_trades, "losing_streak_pct": streak.loss_pct,
                   "losing_streak_triggered": streak.triggered, "expectancy_r": exp, "expectancy_n": n_exp,
-                  "paused": st["paused"], "pause_reasons": st["pause_reasons"]}
-        self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"], peak=dd.peak,
-                          drawdown_pct=dd.drawdown_pct, data={**eq, "flow_adjustment": flow_adj, "kill": status})
+                  "pending_flows": len(pending), "paused": st["paused"], "pause_reasons": st["pause_reasons"]}
+        self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"],
+                          peak=dd.peak if (evaluate or prev_peak is not None) else None, drawdown_pct=dd.drawdown_pct,
+                          data={**eq, "flow_adjustment": flow_adj, "net_funded": net_funded, "kill": status})
+        needs_close = False
+        if floor_hit and "equity_floor" not in st["pause_reasons"]:
+            self.rec.set_state(add_reason="equity_floor", note="equity floor hard stop")
+            self.alert("KILL SWITCH: equity floor",
+                       f"equity {eq['equity']:.2f} is below {self.cfg.risk.equity_floor_pct_of_net_funded}% of net funded "
+                       f"capital {net_funded:.2f}. Closing position and stopping. `resume` cannot clear this; only a new "
+                       f"config version can.")
+            needs_close = True
         if dd.triggered and "kill_drawdown" not in st["pause_reasons"]:
             self.rec.set_state(add_reason="kill_drawdown", note="drawdown kill switch")
             self.alert("KILL SWITCH: drawdown",
                        f"equity {eq['equity']:.2f} is {dd.drawdown_pct:.2f}% below peak {dd.peak:.2f} "
-                       f"(limit {self.cfg.risk.kill_drawdown_pct}%). Closing position and pausing. Resume only after you confirm.")
-            if allow_actions:
-                self.close_position(reason="kill_switch")
+                       f"(limit {limit}%). Closing position and pausing. Resume only after you confirm.")
+            needs_close = True
         if streak.triggered and "kill_losing_streak" not in st["pause_reasons"]:
             self.rec.set_state(add_reason="kill_losing_streak", note="losing streak kill switch")
             self.alert("KILL SWITCH: losing streak",
@@ -489,6 +602,16 @@ class Engine:
         if exp is not None and exp < 0:
             self.alert("warning: expectancy", f"{n_exp}-trade size-weighted expectancy is {exp:.3f} R (< 0)",
                        dedupe_key=f"expectancy:{len(all_trades)}")
+        # review B2: while a closing kill is active and a position is still open, retry the close every run
+        reasons_now = self.rec.state()["pause_reasons"]
+        closing = [r for r in ("equity_floor", "kill_drawdown", "manual_kill") if r in reasons_now]
+        if allow_actions and closing and not self._kill_close_tried:
+            if self.ex.get_account().position(inst.id) is not None:
+                if not needs_close:
+                    self.alert("kill close retry", f"{closing[0]} is active and the position is still open; "
+                               f"retrying the reduce-only close")
+                self._kill_close_tried = True
+                self.close_position(reason="manual_kill" if closing == ["manual_kill"] else "kill_switch")
         eq["kill"] = status
         eq["peak"] = dd.peak
         return eq
@@ -570,8 +693,14 @@ class Engine:
             acct = self.ex.get_account()
             pos = acct.position(inst.id)
             if pos is None:
-                closed = True
-                break
+                self.sync_fills()
+                flat, _why = self.confirm_flat(inst, trade)       # review C5
+                if flat:
+                    closed = True
+                    break
+                pos = self.ex.get_account().position(inst.id)
+                if pos is None:
+                    continue
             self.rec.set_state(position_state="pending_exit", note=f"closing: {reason}")
             side = "SELL" if pos.direction > 0 else "BUY"
             qty = quantize_qty(abs(pos.size), inst.quantity_decimals)
@@ -595,9 +724,9 @@ class Engine:
             self.log_order(f"close:{reason}", "response", coid, res.order_id, "accepted" if res.accepted else "rejected",
                            {"error": res.error, "restriction": res.restriction, "outcome_unknown": res.outcome_unknown})
             self.confirm_order(coid, res, f"close:{reason}")
-        acct = self.ex.get_account()
-        if acct.position(inst.id) is None:
-            closed = True
+        if not closed and self.ex.get_account().position(inst.id) is None:
+            self.sync_fills()
+            closed = self.confirm_flat(inst, trade)[0]
         if not closed:
             self.rec.set_state(position_state="open", note=f"close failed: {reason}")
             self.alert("CLOSE FAILURE", f"could not close position ({reason}) after {attempts} attempts. Manual attention needed.")
@@ -773,6 +902,13 @@ class Engine:
                 return False
         acct = self.ex.get_account()
         eq = self.equity(acct)
+        pending = [f for f in self.sync_flows()[1]]
+        if eq["block_entries"] or pending:
+            why = "pending deposit/withdrawal" if pending else (
+                "equity unreadable" if not eq["valid"] else "equity sources disagree")
+            self.rec.intent_event(day, "entry", "blocked", {"reason": why, "equity": eq})
+            self.alert("entry blocked", f"{why}; no new entry", dedupe_key=f"entry_blocked:{day}:{why}")
+            return False
         n_prior = self.rec.live_trades_opened()
         risk_pct, ramp = risk_pct_for_trade(self.cfg.risk, n_prior)
         if n_prior == int(self.cfg.risk.ramp_trades) and int(self.cfg.risk.ramp_trades) > 0:
@@ -853,6 +989,26 @@ class Engine:
             self.rec.intent_event(day, "entry_attempt", "unfilled",
                                   {"attempt": attempt, "status": o.status if o else None, "error": res.error,
                                    "restriction": res.restriction})
+            if attempt < max_attempts:
+                ok_retry, why = self._retry_allowed(inst, day, coid, res, o, attempt_start_ms)
+                if not ok_retry:
+                    # one more read after a pause: a late-visible fill is recorded and protected now
+                    self.sleep(float(self.cfg.polymarket.flat_confirm_delay_seconds))
+                    late = self.ex.get_account().position(inst.id)
+                    if late is not None and late.direction == d:
+                        filled = o if (o is not None and o.status in FILLED_STATUSES) else Order(
+                            id=res.order_id or -1, instrument_id=inst.id, side=side, price=float(limit),
+                            quantity=float(size.qty), tif="fok", reduce_only=False, status="filled",
+                            filled_quantity=abs(late.size), resting_quantity=0.0, client_order_id=coid)
+                        self.rec.intent_event(day, "entry_attempt", "filled",
+                                              {"attempt": attempt, "confirmed_by": "late position read"})
+                        break
+                    # review B1: no second order in this run without proof the first did not fill
+                    self.rec.intent_event(day, "entry", "deferred", {"after_attempt": attempt, "reason": why})
+                    self.rec.set_state(position_state="flat", note="entry retry deferred")
+                    self.alert("entry retry deferred", f"attempt {attempt} not filled but not proven unfilled ({why}); "
+                               f"no retry in this run. The next decide run re-checks the exchange first.")
+                    return False
         if filled is None or res is None or size is None:
             self.rec.intent_event(day, "entry", "failed", {"reason": f"FOK not filled after {max_attempts} attempts"})
             self.rec.set_state(position_state="flat", note="entry failed")
@@ -860,6 +1016,31 @@ class Engine:
             return False
         return self._record_entry(day, plan, inst, filled, res, size, sl_s, tp_s, ref, eq, risk_pct, ramp, atr,
                                   attempt_start_ms)
+
+    def _retry_allowed(self, inst: Instrument, day: str, coid: str, res: PlaceResult, o: Order | None,
+                       since_ms: int) -> tuple[bool, str]:
+        """Review B1: a second FOK in the same run needs positive proof the previous one did not fill."""
+        if res.outcome_unknown:
+            return False, "previous attempt outcome unknown"
+        if not res.accepted:
+            return False, (f"previous attempt rejected ({res.error}); the SDK rejects a whole bracket when one row is "
+                           f"rejected, even if the entry row filled")
+        try:
+            found = [x for x in self.ex.get_orders(client_order_id=coid) if not x.is_trigger]
+        except ExchangeError as e:
+            return False, f"order status unreadable: {e}"
+        st = found[0].status if found else (o.status if o else None)
+        if st not in NOT_FILLED_TERMINAL:
+            return False, f"previous order status {st!r} is not a terminal not-filled status"
+        self.sync_fills()
+        smoke = self.smoketest_coids()
+        if any(f.is_opening and f.ts_ms >= since_ms and f.client_order_id not in smoke for f in self.stored_fills(since_ms)):
+            return False, "an opening fill was seen after the attempt"
+        if self.ex.get_account().position(inst.id) is not None:
+            return False, "a position exists"
+        if self.entered_today(day):
+            return False, "an entry is already recorded today"
+        return True, f"previous attempt {st}"
 
     def _record_entry(self, day: str, plan: dict[str, Any], inst: Instrument, order: Order, res: PlaceResult, size: Any,
                       sl_s: str | None, tp_s: str | None, ref: float, eq: dict[str, Any], risk_pct: float, ramp: bool,
@@ -908,9 +1089,10 @@ class Engine:
         self.alert("open", f"{'LONG' if d > 0 else 'SHORT'} {qty} {inst.symbol} @ {entry_price:.2f} | SL {sl_s} TP {tp_s} | "
                    f"risk {trade['initial_risk_usd']:.2f} ({risk_pct * float(plan.get('enter_fraction') or 0):.3f}% equity)"
                    f"{' [ramp]' if ramp else ''} | score {plan.get('score')}")
-        if pos is not None and not liquidation_ok(entry_price, pos.liquidation_price, sl_dist, float(self.cfg.risk.liq_min_sl_multiple)):
-            self.alert("liquidation check", f"liquidation price {pos.liquidation_price} closer than "
-                       f"{self.cfg.risk.liq_min_sl_multiple}x SL distance; closing")
+        if pos is not None and not liquidation_ok(entry_price, pos.liquidation_price, sl_dist,
+                                                  float(self.cfg.risk.liq_min_sl_multiple), isolated=not pos.cross):
+            self.alert("liquidation check", f"liquidation price {pos.liquidation_price!r} is missing or closer than "
+                       f"{self.cfg.risk.liq_min_sl_multiple}x SL distance {sl_dist:.2f}; closing")
             self.close_position(reason="liq_check")
             return False
         if pos is not None:
@@ -935,7 +1117,8 @@ class Engine:
             log.warning("polymarket funding history failed: %s", e)
             pm_funding = []
         try:
-            geo = self.ex.get_geoblock()
+            raw_geo = self.ex.get_geoblock()
+            geo = {k: raw_geo.get(k) for k in ("blocked", "country", "region")}
         except ExchangeError as e:
             geo = {"error": str(e)}
         return {"daily": daily, "h4": h4, "funding": funding, "ticker": ticker, "book": book, "pm_funding": pm_funding,
@@ -1058,6 +1241,12 @@ class Engine:
                 self.rec.intent_event(day, "close", "done", {"reason": plan["close_reason"]})
                 actions.append(f"closed ({plan['close_reason']})")
                 pos = None
+                # review C6: the close may have realised a loss that trips a kill switch
+                self.kill_switch_check(self.ex.get_account(), allow_actions=True)
+                if self.paused_reason() and int(plan.get("enter_direction") or 0):
+                    self.rec.intent_event(day, "entry", "blocked", {"reason": f"kill switch after close: {self.paused_reason()}"})
+                    actions.append("entry blocked: kill switch after close")
+                    return actions
             else:
                 self.rec.intent_event(day, "close", "skipped", {"note": f"position direction {pos.direction} changed"})
                 actions.append("close skipped: position changed")
@@ -1234,6 +1423,7 @@ class Engine:
 
     def cmd_kill(self, source: str = "cli") -> str:
         self.rec.set_state(add_reason="manual_kill", note=f"kill ({source})")
+        self._kill_close_tried = True
         closed, clean = self.close_position(reason="manual_kill")
         msg = "position closed" if closed else "CLOSE FAILED"
         self.alert("killed", f"kill ({source}): {msg}{'' if clean else ', leftover orders remain'}; bot paused")
@@ -1242,11 +1432,31 @@ class Engine:
     def cmd_resume(self) -> str:
         acct = self.ex.get_account()
         eq = self.equity(acct)
+        if not eq["valid"]:
+            raise EngineError("cannot resume: equity is unreadable")
+        st = self.rec.state()
+        prev = self.store.latest("equity_log")
+        net_funded = (prev["data"] or {}).get("net_funded") if prev and isinstance(prev["data"], dict) else None
+        keep_floor = False
+        floor_reset = False
+        if "equity_floor" in st["pause_reasons"]:
+            trig = self.store.latest("alerts", "kind = ?", ["KILL SWITCH: equity floor"])
+            if trig is None or trig["config_version"] == self.cfg.config_version:
+                keep_floor = True
+            else:
+                floor_reset = True
+                net_funded = eq["equity"]        # new config version accepted the loss: new funded baseline
         self.rec.set_state(clear_reasons=True, note="resume (user confirmed): pause, kill switches cleared; peak reset")
+        if keep_floor:
+            self.rec.set_state(add_reason="equity_floor", note="equity floor stays: needs a new config version")
         self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"], peak=eq["equity"],
-                          drawdown_pct=0.0, data={**eq, "peak_reset": True})
-        self.alert("resumed", f"pause cleared; drawdown peak reset to {eq['equity']:.2f}; losing-streak count restarted")
-        return "resumed"
+                          drawdown_pct=0.0, data={**eq, "peak_reset": True, "net_funded": net_funded,
+                                                  "floor_reset": floor_reset})
+        msg = f"pause cleared; drawdown peak reset to {eq['equity']:.2f}; losing-streak count restarted"
+        if keep_floor:
+            msg += ". EQUITY FLOOR STOP REMAINS: it can only be cleared by a new config version"
+        self.alert("resumed" if not keep_floor else "resume: equity floor still active", msg)
+        return "resumed" if not keep_floor else "equity floor still active"
 
     # ================================================================ text
     def decision_text(self, p: dict[str, Any]) -> str:

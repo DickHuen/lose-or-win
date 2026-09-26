@@ -65,12 +65,15 @@ class MockExchange(Exchange):
         self.cancel_only = False
         self.position_tpsl_fails = False
         self.bracket_without_sl = False              # accept bracket but drop the SL leg
+        self.reject_sl_row = False                   # SL row rejected (whole command reported rejected), entry fills
         self.reduce_only_fails = False
         self.update_leverage_fails = False
         self.place_timeout_after_exec = False        # order executes but the client sees a transport error
         self.liq_price_override: float | None = None
         self.raise_on: dict[str, Exception] = {}
         self.hide_orders_from_status = False         # /v1/account/orders does not show our order
+        self.lag_position_reads = 0                  # next N get_account calls hide the position (stale read)
+        self.position_tpsl_unknown = False           # position TP/SL is placed but the client sees outcome unknown
         self.hide_fills = False                      # fills endpoint lags
         self.proxy_info = ProxyKeyInfo("0xOWNER", "0xPROXY", None)
         self.geoblock = {"blocked": False, "country": "HK", "region": "HK"}
@@ -222,6 +225,9 @@ class MockExchange(Exchange):
         self._check_raise("get_account")
         positions = []
         upnl = 0.0
+        if self.lag_position_reads > 0 and self.pos_size != 0:
+            self.lag_position_reads -= 1
+            return AccountSnapshot([Balance("USDC", self.cash, self.cash)], [], self.cash, self.cash, False, self._now_ms())
         if self.pos_size != 0:
             upnl = (self.mark - self.pos_entry) * self.pos_size
             lev = self.leverage_cfg[self.inst.id]
@@ -324,6 +330,7 @@ class MockExchange(Exchange):
             else:
                 order.status = "open"
                 order.resting_quantity = qty
+        row_rejected = None
         if tp_trigger or sl_trigger:
             exit_side = "SELL" if side == "BUY" else "BUY"
             parent_ok = order.status == "filled"
@@ -331,6 +338,11 @@ class MockExchange(Exchange):
                 if trig is None:
                     continue
                 if kind == "sl" and self.bracket_without_sl:
+                    continue
+                long_entry = side == "BUY"
+                wrong_side = (float(trig) >= self.mark) if (kind == "sl") == long_entry else (float(trig) <= self.mark)
+                if wrong_side or (kind == "sl" and self.reject_sl_row):
+                    row_rejected = f"{kind} row rejected" + (": trigger on the wrong side of mark" if wrong_side else "")
                     continue
                 t = Order(self._oid(), instrument_id, exit_side, 0.0, qty, "ioc", True,
                           "armed" if parent_ok else "parent_cancelled", 0.0, 0.0, None, kind, "order", float(trig),
@@ -343,6 +355,9 @@ class MockExchange(Exchange):
         if self.place_timeout_after_exec:
             self.place_timeout_after_exec = False
             return PlaceResult(False, client_order_id=client_order_id, outcome_unknown=True, error="transport error")
+        if row_rejected:
+            # like SDK 0.11.0: any rejected row raises for the whole command, even if the entry row filled
+            return PlaceResult(False, client_order_id=client_order_id, error=row_rejected)
         return PlaceResult(True, order.id, client_order_id, tp_id, sl_id, replace(order))
 
     def place_position_tpsl(self, *, instrument_id: int, tp_trigger: str | None, sl_trigger: str | None) -> PlaceResult:
@@ -370,6 +385,8 @@ class MockExchange(Exchange):
                       None, kind, "position", tr, None, self._now_ms(), self._now_ms())
             self.orders[o.id] = o
             ids[kind] = o.id
+        if self.position_tpsl_unknown:
+            return PlaceResult(False, outcome_unknown=True, error="transport error after send")
         return PlaceResult(True, tp_order_id=ids.get("tp"), sl_order_id=ids.get("sl"))
 
     def cancel_orders(self, order_ids: list[int]) -> list[CancelResult]:

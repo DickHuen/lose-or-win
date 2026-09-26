@@ -14,7 +14,7 @@ DEV = Path(__file__).resolve().parent.parent
 SRC = DEV / "btcperp"
 DIST = DEV / "dist"
 TOP_FILES = ["run.py", "install.py", "requirements.txt", "VERSION", "README.md", "START_HERE.md", "API_NOTES.md",
-             "CHANGELOG.md", ".env.example", "config/config.yaml", "config/calendar.yaml"]
+             "CHANGELOG.md", "REVIEW_v1.1.0.md", ".env.example", "config/config.yaml", "config/calendar.yaml"]
 CODE_DIRS = ["perpbot", "tests"]
 FORBIDDEN_PARTS = {".env", "data", "logs", "venv", "__pycache__", ".git", ".pytest_cache"}
 FIXED_TIME = (2026, 9, 26, 0, 0, 0)

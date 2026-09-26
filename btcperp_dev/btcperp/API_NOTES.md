@@ -1,6 +1,6 @@
 # API_NOTES - Polymarket Perps (BTC-PERP)
 
-Written 2026-09-26 for btcperp v1.0.0. **Every answer below is `untested`** until `smoketest`
+Written 2026-09-26 for btcperp v1.0.0; updated for v1.1.0 after the independent review. **Every answer below is `untested`** until `smoketest`
 confirms it live on the Grok Bot computer (the smoketest prints a live answer for (a)-(e)).
 
 ## Sources and how they were read
@@ -106,9 +106,10 @@ no entry that day after the retry; if an SL cannot be re-placed it tries to clos
 
 ## Other assumptions the bot depends on (all `untested`; verified by smoketest)
 
-- **(f) Equity:** mark-to-market equity = wallet + unrealized PnL. It is unknown whether `balances[].value`
-  still includes margin locked in an isolated position. Default `risk.equity_source: auto` uses wallet + uPnL
-  but switches to the exchange's `margin.total_account_value` (and alerts) when they differ by more than 0.5%.
+- **(f) Equity:** it is unknown whether `balances[].value` still includes margin locked in an isolated
+  position. v1.1.0 uses ONE fixed source for both the peak and the current equity:
+  `margin.total_account_value` (the exchange's own account value). wallet + uPnL is a cross-check only; a
+  disagreement > 0.5% blocks new entries and alerts; an unreadable value skips the kill switches for that run.
   Smoketest reports `balance_excludes_isolated_margin`.
 - **(g) Funding sign:** assumed `funding > 0` = credit to us (`risk.funding_payment_sign: 1`). Check the first
   funding payments against the balance.
@@ -124,12 +125,30 @@ no entry that day after the retry; if an SL cannot be re-placed it tries to clos
 - **(l) `price_bounds`:** meaning not documented; the bot logs it and does not enforce it (the exchange will).
 - **(m) Proxy key lifetime:** the SDK default is 7 days; whether the server accepts a 30-day expiry is not
   documented. The bot reads the real expiry from `/v1/account/credentials` and alerts 5 days before.
-- **(n) Region:** the Perps FAQ (via search) says Perps have no geographic restriction on order placement;
-  you require non-US only. The bot calls `polymarket.com/api/geoblock` at every `decide` and in `smoketest`,
-  blocks new entries if `blocked: true`, and never uses a VPN or proxy.
+- **(n) Region:** Polymarket's Geographic Restrictions page applies: orders from restricted regions are
+  rejected (per the review: the United States, Canada and others), with "blocked" and "close-only" categories.
+  The bot calls `GET https://polymarket.com/api/geoblock` at every `decide` and in `smoketest` (full response
+  recorded), blocks new entries if `blocked: true`, and never uses a VPN or network proxy.
 - **(o) Timestamps:** signed requests need a fresh `ts` and `salt`; the computer's clock must be NTP-synced.
   Smoketest reads `/v1/info/time` and reports the skew.
 - **(p) Rate limits:** 1,000 weighted tokens per IP per minute (docs); the bot makes a few dozen calls per run.
+- **(q) Partial bracket rejection:** the official SDK (0.11.0 `trading.py`, `_expect_ok_ack` over all acks)
+  raises for the whole command if ANY row of a bracket is rejected, even if the entry row filled. The bot
+  therefore never retries a rejected or unknown FOK in the same run, confirms fills from the position, and
+  re-places a position SL if the bracket SL is missing. Smoketest step `g1_bracket_partial_reject` measures it.
+- **(r) Maintenance margin (pre-trade estimate only):** 0.5 / instrument max leverage, as cited by the review
+  (not verified by the developer; the docs were not reachable). The post-fill check uses the exchange's
+  `liquidation_price`; a missing / zero value on an isolated position fails the check and the position is closed.
+
+## What the smoketest must record (review G)
+
+1. whether the entry row fills when a bracket row is rejected (`g1_bracket_partial_reject`)
+2. whether a position SL and a bracket SL can coexist (`b_position_sl_with_bracket`)
+3. how long the account read takes to show flat after a close (`close.g3_account_read_after_close`)
+4. the raw geoblock response (`region`)
+5. whether balances include isolated margin (`equity_formula`)
+6. the raw `liquidation_price` (`open_bracket.liquidation_price_raw`)
+7. deposit/withdrawal timing: `python3 run.py flowwatch --minutes 30` while the owner makes a small deposit
 
 ## Binance (indicator data)
 
