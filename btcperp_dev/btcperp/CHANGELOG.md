@@ -3,6 +3,65 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.4.0 - 2026-09-27 (config 1.4.0) - committee review of v1.3.0
+
+All items the developer agreed with, as the owner decided ("change what you agree with; decide the rest").
+REVIEW_v1.3.0.md has the item-by-item record, including the three items done differently (C0 gap tolerance,
+BT3 funding, P7 revoke). Strategy scoring, gates and tiers are unchanged. Bankroll stays at a fixed 1.5% risk.
+No Telegram. **Do not type CONFIRM until the committee has reviewed criteria draft-2 and this release.**
+
+- **Calendar:** the committee verified all 193 historical dates; `calendar_history.yaml` is marked verified.
+- **Criteria draft-2** (`config/backtest_criteria.yaml`): C0 data completeness (C0a missing ≤ 0.1%; C0b/C0c
+  gaps while holding ≤ 3 h each, ≤ 6 h per run), C1a–d (every offset ≥ +0.05 R, stress twin > 0, ≥ 2 of 3
+  segments, t ≥ 2.0), C2a/b, C3 hourly drawdown ≤ 20%, C4, C5 ≥ 60 trades, C6 full-period drawdown ≤ 25%,
+  C7 drawdown kills ≤ 3; I1–I7 (I3b without kill switches, I5 long/short split, I6 rolling p5, I7 Polymarket replay).
+- **Backtest:**
+  - BT1: a gap through the stop fills at the open; BT6: the loss is capped at the margin;
+  - BT2: hourly mark-to-market equity and drawdown;
+  - BT3: `_stress` twins (fees ×2, 30 bps exit slippage, paid funding ×2); the fee is never below the smoketest's real taker fee;
+  - S5: pre-registered rule for replacing A_live (in `select_variant` and BACKTEST.md);
+  - S6: windows at full risk from trade 1; only the full-period run ramps;
+  - R1: `confirm` locks criteria, config, calendars, code, `VERSION`, data end date, data hash and fee; `run`
+    refuses any change and numbers the runs (the committee uses run #1);
+  - R2: data SHA-256, missing candles, funding gaps and gaps while holding in the report;
+  - BT4: `A_live_nokill`; I7: optional Polymarket 1h candles (`polymarket_1h.csv`) for the replay.
+- **Live risk:**
+  - F1: permanent floor at 50% of all capital ever funded (**owner to confirm**). Never re-based; below it the
+    bot closes and stops for good. Only a dated config restarts it; a config that lowers the % is refused.
+  - F2: the equity-floor baseline is tied to the trigger date (`risk.equity_floor_reset_for`), used once, and
+    must be ≤ the equity at that time.
+  - S9: live review line. After 30 live trades, a rolling 30-trade expectancy below
+    `risk.live_review_expectancy_floor_r` pauses new entries. It is set from I6 after the backtest; `null` for now.
+- **Heartbeat (V4):** separate decide and manage checks (`HEALTHCHECK_DECIDE_URL`, `HEALTHCHECK_MANAGE_URL`;
+  `HEALTHCHECK_PING_URL` is the fallback). Each run pings `/start` first. At the end it pings `/fail` on an error,
+  while a critical alert is unread, or while a hard stop is active.
+- **Upgrade:**
+  - U1: an unreadable Task Scheduler stops the upgrade before any change;
+  - U2: backup to `data/upgrade_backup_<version>_<time>/` and automatic restore on any failure;
+  - U3: an older or equal zip is refused, and the zip's SHA-256 is shown;
+  - new Upgrade.bat choice `TEST-RESTORE` (`install.py --test-restore`) for the go-live check B3: it installs
+    the zip, simulates a failure and must restore the installed version. Without internet, the restore accepts
+    packages that are already installed.
+- **Proxy key (P1–P8):**
+  - option N needs typing HARDWARE;
+  - the signer builds the one CreateProxy message itself (fixed domain, chain 137, 4 fields, ≤ 30 days);
+  - option O carries only `sign_fields.txt` to the other computer, which uses its own verified release:
+    `perpbot/offline_sign.py` or the new `offline_sign/offline_sign.html`;
+  - the main wallet is fixed at `new`, and `finish` accepts only its signature;
+  - `--days` is at most 30, and an unfinished request is deleted after 1 hour;
+  - registration and the .env write run under the bot lock;
+  - `status` lists all registered proxy keys;
+  - the signing page accepts one submission only and escapes its data.
+- **Other:**
+  - L1: late-decision comparison test;
+  - V16: the wrong-folder message shows the right Kill path;
+  - V17: the monthly report gives all months and complete months only;
+  - R3: the Polymarket mark vs Binance basis is logged every manage run and reported (p50/p99);
+  - the smoketest records the taker fee and the basis.
+- **Tests:** 251 (+36).
+- **From v1.3.0:** use `windows\Upgrade.bat` with this zip. If nothing is installed yet, install v1.4.0 fresh
+  (START_HERE.md). A proxy-key request started with v1.3.0 is discarded: run Proxy_Key.bat again.
+
 ## 1.3.0 - 2026-09-26 (config 1.3.0) - committee review of v1.2.0
 
 All items the developer agreed with, as decided by the owner. REVIEW_v1.2.0.md has the item-by-item

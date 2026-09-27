@@ -137,6 +137,9 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("risk.equity_source", str, lambda v: v in ("wallet_plus_upnl", "total_account_value")),
     ("risk.equity_floor_pct_of_net_funded", _NUM, lambda v: 0 < v < 100),
     ("risk.losing_streak_tie_pct", _NUM, lambda v: 0 <= v < 5),
+    ("risk.permanent_floor_pct_of_cumulative_funded", _NUM, lambda v: 0 < v < 100),
+    ("risk.live_review_min_trades", int, lambda v: v >= 1),
+    ("risk.live_review_window_trades", int, lambda v: v >= 5),
     ("schedule.max_clock_skew_seconds", _NUM, lambda v: 0 < v <= 300),
     ("polymarket.flat_confirm_delay_seconds", _NUM, lambda v: v >= 0),
     ("smoketest.bracket_reject_test", bool, None),
@@ -160,6 +163,11 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("backtest.quantity_decimals", int, lambda v: 0 <= v <= 8),
     ("backtest.calendar_history_file", str, None),
     ("backtest.criteria_file", str, None),
+    ("backtest.stress_exit_slippage_bps", _NUM, lambda v: 0 <= v <= 1000),
+    ("backtest.segments", list, lambda v: len(v) >= 1 and all(isinstance(x, list) and len(x) == 2 for x in v)),
+    ("backtest.rolling_trades", int, lambda v: 5 <= v <= 500),
+    ("backtest.polymarket_start", str, None),
+    ("backtest.pm_replay_min_days", int, lambda v: v >= 1),
     ("reports.max_missed_decision_days", int, lambda v: v >= 0),
     ("smoketest.resting_order_offset_pct", _NUM, lambda v: 0 < v < 50),
     ("smoketest.probe_proxy_withdrawal", bool, None),
@@ -204,6 +212,22 @@ def validate(data: dict[str, Any]) -> None:
             errors.append("config key risk.equity_floor_reset_baseline_usd: must be null or a positive number")
     except (KeyError, TypeError):
         errors.append("missing config key: risk.equity_floor_reset_baseline_usd")
+    for key in ("equity_floor_reset_for", "permanent_floor_reset_for"):
+        v = (data.get("risk") or {}).get(key, "missing")
+        if v == "missing":
+            errors.append(f"missing config key: risk.{key}")
+        elif v is not None:
+            try:
+                from datetime import date as _d
+
+                _d.fromisoformat(str(v))
+            except ValueError:
+                errors.append(f"config key risk.{key}: must be null or a date YYYY-MM-DD")
+    lr = (data.get("risk") or {}).get("live_review_expectancy_floor_r", "missing")
+    if lr == "missing":
+        errors.append("missing config key: risk.live_review_expectancy_floor_r")
+    elif lr is not None and (isinstance(lr, bool) or not isinstance(lr, (int, float))):
+        errors.append("config key risk.live_review_expectancy_floor_r: must be null or a number")
     try:
         s = data["strategy"]
         if not s["tier_low_max"] < s["tier_mid_max"]:

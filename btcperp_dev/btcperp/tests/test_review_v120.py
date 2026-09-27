@@ -286,7 +286,8 @@ def test_item5_heartbeat_after_decide_and_manage_only(tmp_root):
     assert main(["pause"], paths=paths, clock=clock, factories=f) == 0
     ex.raise_on["get_instruments"] = RuntimeError("down")
     assert main(["manage"], paths=paths, clock=clock, factories=f) == 1
-    assert [ok for _, ok in pings] == [True, False]         # pause: no ping; failed manage: /fail
+    kinds = [k for _, k in pings]
+    assert kinds.count("start") == 2 and [k for k in kinds if k != "start"] == ["success", "fail"]
     log_text = "".join(p.read_text() for p in (tmp_root / "logs").glob("*.log"))
     assert "11111111-2222-3333-4444-555555555555" not in log_text
 
@@ -301,8 +302,8 @@ def test_item5_heartbeat_url_must_be_https(tmp_root):
 def test_heartbeat_never_raises():
     from perpbot.cli import send_heartbeat
 
-    assert send_heartbeat("", True) is False
-    assert send_heartbeat("https://127.0.0.1:1/nothing", True, timeout=0.5) is False
+    assert send_heartbeat("", "success") is False
+    assert send_heartbeat("https://127.0.0.1:1/nothing", "fail", timeout=0.5) is False
 
 
 def test_item7_cli_resume_exit_code_needs_confirmation(tmp_root, capsys):

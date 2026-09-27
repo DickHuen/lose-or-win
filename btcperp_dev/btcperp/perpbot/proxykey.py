@@ -1,21 +1,23 @@
 """Create a Polymarket Perps proxy key WITHOUT the main wallet key ever touching this computer
-(review v1.2.0 item 11).
+(review v1.2.0 item 11; hardened per review v1.3.0 P1-P8).
 
 How Polymarket's proxy keys work (official SDK polymarket-client 0.11.0, credentials.create_credentials):
-the proxy private key is generated locally; the MAIN wallet only signs an EIP-712 message
-CreateProxy{addr: proxy address, exp, salt, ts} (domain Polymarket / 1 / chainId 137); that signature is
-sent to POST /v1/account/proxy, which returns the proxy secret. This module splits those steps:
+the proxy private key is generated locally; the MAIN wallet only signs the EIP-712 message
+CreateProxy{addr, exp, salt, ts} with domain {name: Polymarket, version: 1, chainId: 137}; that signature
+goes to POST /v1/account/proxy, which returns the proxy secret.
 
-  1. `proxykey new`     generate the proxy key HERE (saved only in .proxykey_pending.json next to .env)
-                        and serve a one-off signing page on http://127.0.0.1:<port>/<token>/ . The page asks
-                        your browser wallet (MetaMask, ideally with a hardware wallet) to sign the message,
-                        sends the signature back to this program, which registers the proxy and writes .env.
-     `proxykey new --offline`  only write data/proxykey/sign_request.json + sign.html, to sign on ANOTHER
-                        computer (browser wallet, or offline_sign.py with a key that never comes here).
-  2. `proxykey finish --signature 0x...`  register a signature made elsewhere and write .env.
-  3. `proxykey status`  show the pending request and the current .env proxy.
+  `proxykey new --owner 0xMAIN [--days N<=30]`            N: sign in this PC's browser wallet - ONLY with a
+        hardware wallet (P1). A one-off page on http://127.0.0.1:<port>/<token>/ builds the message itself
+        from the four fields with the fixed domain (P2), the wallet signs, the bot registers and writes .env.
+  `proxykey new --owner 0xMAIN --offline`                 O: sign on ANOTHER computer (P5). This PC only writes
+        data/proxykey/sign_fields.txt (four plain fields). The other computer uses ITS OWN verified copy of the
+        release (offline_sign/offline_sign.html or perpbot/offline_sign.py), which rebuilds the message.
+  `proxykey finish --signature 0x...`                      register that signature; the signer must be the
+        wallet given at `new` (P6).
+  `proxykey status`                                        pending request, .env proxy, registered proxies.
 
-Nothing secret is ever printed or logged: the proxy key and secret go straight into .env.
+The proxy private key lives only in .proxykey_pending.json (deleted after 1 hour unused, P4) and then in .env,
+written under the bot's lock (P7). Nothing secret is ever printed or logged.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets as _secrets
 import stat
 import threading
@@ -33,7 +36,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from perpbot.dashboard import CSP, DashServer
 from perpbot.paths import Paths
@@ -41,11 +44,36 @@ from perpbot.paths import Paths
 log = logging.getLogger("perpbot.proxykey")
 
 PENDING_NAME = ".proxykey_pending.json"
-ENV_KEYS = ("PM_PROXY_PRIVATE_KEY", "PM_PROXY_SECRET", "PM_WALLET_ADDRESS", "PM_PROXY_EXPIRES_AT")
+PENDING_MAX_AGE_S = 3600                  # P4
+MAX_DAYS = 30                             # P3
+CHAIN_ID = 137
+DOMAIN = {"name": "Polymarket", "version": "1", "chainId": CHAIN_ID}
+TYPES = {
+    "EIP712Domain": [{"name": "name", "type": "string"}, {"name": "version", "type": "string"},
+                     {"name": "chainId", "type": "uint256"}],
+    "CreateProxy": [{"name": "addr", "type": "address"}, {"name": "exp", "type": "uint64"},
+                    {"name": "salt", "type": "uint64"}, {"name": "ts", "type": "uint64"}],
+}
+_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 class ProxyKeyError(Exception):
     pass
+
+
+def build_typed(addr: str, exp: int, salt: int, ts: int) -> dict[str, Any]:
+    """The ONLY message this tool ever asks a wallet to sign (P2): fixed type, domain and fields."""
+    return {"types": TYPES, "primaryType": "CreateProxy", "domain": dict(DOMAIN),
+            "message": {"addr": addr, "exp": int(exp), "salt": int(salt), "ts": int(ts)}}
+
+
+def check_fields(addr: str, exp: int, salt: int, ts: int) -> None:
+    if not _ADDR.match(str(addr)):
+        raise ProxyKeyError("proxy address must be 0x + 40 hex characters")
+    if not (0 <= int(salt) < 2 ** 32) or int(ts) <= 1_600_000_000_000 or int(exp) <= int(ts):
+        raise ProxyKeyError("salt / ts / exp out of range")
+    if int(exp) - int(ts) > MAX_DAYS * 86_400_000:
+        raise ProxyKeyError(f"expiry more than {MAX_DAYS} days after ts")
 
 
 @dataclass
@@ -58,20 +86,22 @@ class Pending:
     chain_id: int
     label: str
     created_utc: str
+    owner: str
+    method: str                                  # browser (hardware wallet) | offline
 
     def typed_data(self) -> dict[str, Any]:
-        from polymarket._internal.actions.perps.signing import build_perps_create_proxy_typed_data
+        return build_typed(self.proxy, self.exp_ms, self.salt, self.ts_ms)
 
-        return build_perps_create_proxy_typed_data(chain_id=self.chain_id, proxy=self.proxy, expires_at_ms=self.exp_ms,
-                                                   salt=self.salt, timestamp_ms=self.ts_ms)
-
-    def public(self) -> dict[str, Any]:
-        return {"proxy": self.proxy, "expires_utc": _utc(self.exp_ms), "created_utc": self.created_utc,
-                "chain_id": self.chain_id, "label": self.label}
+    def fields(self) -> dict[str, Any]:
+        return {"addr": self.proxy, "exp": self.exp_ms, "salt": self.salt, "ts": self.ts_ms}
 
 
 def _utc(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _hkt(ms: int) -> str:
+    return (datetime.fromtimestamp(ms / 1000, tz=timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M HKT")
 
 
 def _pending_path(paths: Paths) -> Path:
@@ -86,29 +116,61 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def new_request(paths: Paths, cfg: Any, *, days: int, label: str, now_ms: int | None = None) -> Pending:
+def expire_pending(paths: Paths, now_s: float | None = None) -> bool:
+    """P4: an unfinished request older than an hour is deleted (it holds a plain proxy private key)."""
+    path = _pending_path(paths)
+    if not path.exists():
+        return False
+    if (now_s if now_s is not None else time.time()) - path.stat().st_mtime > PENDING_MAX_AGE_S:
+        path.unlink()
+        log.info("expired proxy key request deleted")
+        return True
+    return False
+
+
+def new_request(paths: Paths, cfg: Any, *, days: int, label: str, owner: str, method: str,
+                expected_owner: str = "", now_ms: int | None = None) -> Pending:
     from eth_account import Account
 
-    if not 1 <= days <= 365:
-        raise ProxyKeyError("--days must be between 1 and 365")
+    if not 1 <= days <= MAX_DAYS:
+        raise ProxyKeyError(f"--days must be between 1 and {MAX_DAYS}")
+    if not _ADDR.match(owner or ""):
+        raise ProxyKeyError("give your MAIN wallet address (0x + 40 hex) with --owner")
+    if expected_owner and owner.lower() != expected_owner.lower():
+        raise ProxyKeyError(f"{owner} differs from PM_WALLET_ADDRESS in .env ({expected_owner}): ask Claude before "
+                            f"changing the main wallet")
+    if int(cfg.polymarket.chain_id) != CHAIN_ID:
+        raise ProxyKeyError(f"unexpected chain id {cfg.polymarket.chain_id}")
+    if method not in ("browser", "offline"):
+        raise ProxyKeyError("method must be browser or offline")
     pk = "0x" + _secrets.token_bytes(32).hex()
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     p = Pending(private_key=pk, proxy=Account.from_key(pk).address, exp_ms=ts + days * 86_400_000,
-                salt=_secrets.randbits(32), ts_ms=ts, chain_id=int(cfg.polymarket.chain_id), label=label,
-                created_utc=_utc(ts))
+                salt=_secrets.randbits(32), ts_ms=ts, chain_id=CHAIN_ID, label=label, created_utc=_utc(ts),
+                owner=owner, method=method)
     _write_private(_pending_path(paths), json.dumps(asdict(p)))
     out = paths.data_dir / "proxykey"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "sign_request.json").write_text(json.dumps(p.typed_data(), indent=2), encoding="utf-8")
-    (out / "sign.html").write_text(sign_page(p.typed_data(), token="", post_back=False), encoding="utf-8")
+    for old in ("sign_request.json", "sign.html", "sign_fields.txt"):   # stale / v1.3.0 files never travel
+        if (out / old).exists():
+            (out / old).unlink()
+    if method == "offline":
+        (out / "sign_fields.txt").write_text(
+            f"# btcperp proxy key request - plain fields only, nothing secret. Expires {_hkt(p.exp_ms)}.\n"
+            f"addr={p.proxy}\nexp={p.exp_ms}\nsalt={p.salt}\nts={p.ts_ms}\nowner={owner}\n", encoding="utf-8")
     return p
 
 
 def load_pending(paths: Paths) -> Pending | None:
+    expire_pending(paths)
     path = _pending_path(paths)
     if not path.exists():
         return None
-    return Pending(**json.loads(path.read_text(encoding="utf-8")))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if "owner" not in data:                                    # a v1.3.0 request: start again
+        path.unlink()
+        return None
+    return Pending(**data)
 
 
 def recover_signer(p: Pending, signature: str) -> str:
@@ -116,7 +178,7 @@ def recover_signer(p: Pending, signature: str) -> str:
     from eth_account.messages import encode_typed_data
 
     sig = signature.strip()
-    if not sig.startswith("0x") or len(sig) != 132:
+    if not re.fullmatch(r"0x[0-9a-fA-F]{130}", sig):
         raise ProxyKeyError("the signature must be 0x followed by 130 hex characters")
     try:
         return Account.recover_message(encode_typed_data(full_message=p.typed_data()), signature=sig)
@@ -164,51 +226,100 @@ def write_env(env_path: Path, values: dict[str, str]) -> None:
     _write_private(env_path, "\n".join(out) + "\n")
 
 
-def finish(paths: Paths, cfg: Any, signature: str, *, expected_owner: str = "", transport: Any = None) -> dict[str, Any]:
+def finish(paths: Paths, cfg: Any, signature: str, *, transport: Any = None,
+           with_lock: Callable[[Callable[[], Any]], Any] | None = None) -> dict[str, Any]:
     p = load_pending(paths)
     if p is None:
-        raise ProxyKeyError("no pending proxy key request: run `proxykey new` first")
+        raise ProxyKeyError("no pending proxy key request (none, or older than 1 hour): run Proxy_Key.bat again")
     owner = recover_signer(p, signature)
-    if expected_owner and owner.lower() != expected_owner.lower():
-        raise ProxyKeyError(f"signed by {owner}, but PM_WALLET_ADDRESS in .env is {expected_owner}; "
-                            f"sign with your main wallet (or clear PM_WALLET_ADDRESS if you changed wallets)")
-    try:
-        creds = asyncio.run(_register(p, signature.strip(), owner, str(cfg.polymarket.rest_url), transport))
-    except ProxyKeyError:
-        raise
-    except Exception as e:  # noqa: BLE001 - SDK errors never contain the key
-        raise ProxyKeyError(f"the exchange rejected the request: {type(e).__name__}: {e}. If it mentions time or "
-                            f"timestamp, sign faster (run the tool again); if it mentions expiry, use fewer --days") from e
-    expires = creds.expires_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    write_env(paths.env_file, {"PM_PROXY_PRIVATE_KEY": p.private_key, "PM_PROXY_SECRET": creds.secret,
-                               "PM_WALLET_ADDRESS": owner, "PM_PROXY_EXPIRES_AT": expires})
-    _pending_path(paths).unlink()
-    return {"proxy": p.proxy, "owner": owner, "expires_utc": expires}
+    if owner.lower() != p.owner.lower():                     # P6
+        raise ProxyKeyError(f"signed by {owner}, not by the main wallet {p.owner} given for this request")
+
+    def register_and_write() -> str:
+        """P7: registration and the .env write happen together, never while a bot command runs."""
+        if not _pending_path(paths).exists():
+            raise ProxyKeyError("this request was already finished or expired")
+        try:
+            creds = asyncio.run(_register(p, signature.strip(), p.owner, str(cfg.polymarket.rest_url), transport))
+        except ProxyKeyError:
+            raise
+        except Exception as e:  # noqa: BLE001 - SDK errors never contain the key
+            raise ProxyKeyError(f"the exchange rejected the request: {type(e).__name__}: {e}. If it mentions time or "
+                                f"timestamp, sign faster (run the tool again); if it mentions expiry, use fewer "
+                                f"--days") from e
+        expires = creds.expires_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_env(paths.env_file, {"PM_PROXY_PRIVATE_KEY": p.private_key, "PM_PROXY_SECRET": creds.secret,
+                                   "PM_WALLET_ADDRESS": p.owner, "PM_PROXY_EXPIRES_AT": expires})
+        _pending_path(paths).unlink()
+        return expires
+
+    expires = (with_lock or (lambda fn: fn()))(register_and_write)
+    hist = paths.data_dir / "proxykey" / "history.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    with hist.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"registered_utc": _utc(int(time.time() * 1000)), "proxy": p.proxy, "owner": p.owner,
+                             "expires_utc": expires, "method": p.method}) + "\n")
+    return {"proxy": p.proxy, "owner": p.owner, "expires_utc": expires, "method": p.method}
 
 
-def status_lines(paths: Paths, secrets: Any) -> list[str]:
-    p = load_pending(paths)
+def registered_proxies(cfg: Any, secrets: Any, transport: Any = None) -> list[dict[str, Any]]:
+    """All proxies registered for the owner (P7: the old one stays valid until it expires; revoking it needs a
+    main-wallet signature, which never happens on this computer)."""
+    from polymarket._internal.actions.perps.credentials import credential_headers
+    from polymarket.clients._transport import AsyncTransport
+    from polymarket.models.perps.account import PerpsCredentialsInfo
+    from polymarket.models.perps.credentials import PerpsCredentials
+
+    async def go() -> list[dict[str, Any]]:
+        t = transport or AsyncTransport(base_url=str(cfg.polymarket.rest_url))
+        try:
+            creds = PerpsCredentials(proxy=secrets.proxy_address, private_key=secrets.proxy_private_key,
+                                     secret=secrets.proxy_secret,
+                                     expires_at=secrets.proxy_expires_at or datetime(2100, 1, 1, tzinfo=timezone.utc))
+            info = PerpsCredentialsInfo.parse_response(await t.get_json("/v1/account/credentials",
+                                                                        headers=credential_headers(creds)))
+            return [{"proxy": k.proxy, "label": k.label, "expires_utc": k.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "in_env": k.proxy.lower() == secrets.proxy_address.lower()} for k in info.keys]
+        finally:
+            if transport is None:
+                await t.close()
+
+    return asyncio.run(go())
+
+
+def status_lines(paths: Paths, cfg: Any, secrets: Any, transport: Any = None) -> list[str]:
     lines = []
+    if expire_pending(paths):
+        lines.append("an unfinished request older than 1 hour was deleted")
+    p = load_pending(paths)
     if p:
-        lines.append(f"pending request: proxy {p.proxy}, expires {_utc(p.exp_ms)}, created {p.created_utc} "
-                     f"(signature not registered yet)")
+        age = (time.time() * 1000 - p.ts_ms) / 60_000
+        lines.append(f"pending request ({p.method}): proxy {p.proxy} for wallet {p.owner}, expires {_hkt(p.exp_ms)}, "
+                     f"created {age:.0f} min ago (deleted after 60 min)")
     else:
         lines.append("no pending request")
     if secrets.proxy_address:
         exp = secrets.proxy_expires_at.isoformat() if secrets.proxy_expires_at else "unknown"
         lines.append(f".env proxy: {secrets.proxy_address}, owner {secrets.wallet_address or '?'}, expires {exp}")
+        try:
+            for k in registered_proxies(cfg, secrets, transport):
+                lines.append(f"  registered: {k['proxy']} expires {k['expires_utc']}{'  (in .env)' if k['in_env'] else ''}")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"  registered proxies: unavailable ({type(e).__name__})")
     else:
         lines.append(".env has no proxy key yet")
     return lines
 
 
-# ---------------------------------------------------------------- one-off local signing page
+# ---------------------------------------------------------------- one-off local signing page (option N)
 
-def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser: bool, expected_owner: str = "",
-                  timeout_s: float = 900.0, transport: Any = None, token: str | None = None) -> dict[str, Any]:
+def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser: bool, timeout_s: float = 900.0,
+                  transport: Any = None, token: str | None = None,
+                  with_lock: Callable[[Callable[[], Any]], Any] | None = None) -> dict[str, Any]:
     token = token or _secrets.token_hex(16)
     result: dict[str, Any] = {}
     done = threading.Event()
+    gate = threading.Lock()                                   # P8: only one POST can ever call finish()
     allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     class Handler(BaseHTTPRequestHandler):
@@ -227,16 +338,19 @@ def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser
         def do_GET(self) -> None:  # noqa: N802
             if self.headers.get("Host", "") not in allowed or self.path != f"/{token}/":
                 return self._send(404, b"not found", "text/plain")
-            self._send(200, sign_page(p.typed_data(), token=token, post_back=True).encode("utf-8"), "text/html; charset=utf-8")
+            self._send(200, sign_page(p.fields(), p.owner, token=token, post_back=True).encode("utf-8"),
+                       "text/html; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
             if (self.headers.get("Host", "") not in allowed or self.path != f"/{token}/sign"
-                    or self.headers.get("X-Token") != token or done.is_set()):
+                    or self.headers.get("X-Token") != token):
                 return self._send(403, b"forbidden", "text/plain")
+            if not gate.acquire(blocking=False):
+                return self._send(409, b'{"ok":false,"error":"already submitted"}', "application/json")
             try:
                 n = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 sig = json.loads(self.rfile.read(n) or b"{}").get("signature", "")
-                res = finish(paths, cfg, sig, expected_owner=expected_owner, transport=transport)
+                res = finish(paths, cfg, sig, transport=transport, with_lock=with_lock)
                 result.update(res, ok=True)
             except Exception as e:  # noqa: BLE001
                 result.update(ok=False, error=str(e))
@@ -262,14 +376,16 @@ def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser
     return result
 
 
-def sign_page(typed: dict[str, Any], *, token: str, post_back: bool) -> str:
-    msg = typed["message"]
-    exp = datetime.fromtimestamp(int(msg["exp"]) / 1000, tz=timezone.utc) + timedelta(hours=8)
-    info = {"proxy": msg["addr"], "expires_hkt": exp.strftime("%Y-%m-%d %H:%M HKT"), "chain": typed["domain"]["chainId"]}
-    return (_PAGE.replace("__TYPED__", json.dumps(typed)).replace("__TOKEN__", token)
-            .replace("__POST__", "true" if post_back else "false").replace("__INFO__", json.dumps(info)))
+def _js_json(x: Any) -> str:
+    return json.dumps(x).replace("</", "<\\/")                    # P8: never close the script tag
 
 
+def sign_page(fields: dict[str, Any], owner: str, *, token: str, post_back: bool) -> str:
+    return (_PAGE.replace("__FIELDS__", _js_json(fields)).replace("__OWNER__", _js_json(owner))
+            .replace("__TOKEN__", _js_json(token)).replace("__POST__", "true" if post_back else "false"))
+
+
+# The page builds the message ITSELF from the four fields with the fixed domain and types (P2).
 _PAGE = r"""<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>btcperp proxy key</title><link rel="icon" href="data:,">
@@ -282,25 +398,31 @@ h1{font-size:20px;margin:0 0 6px}.mut{color:var(--mut)}code{word-break:break-all
 #out{white-space:pre-wrap;word-break:break-all}.ok{color:var(--ok)}.bad{color:var(--bad)}
 </style></head><body><main>
 <div class="card"><h1>btcperp：授權 proxy key</h1>
-<div class="mut">用你嘅<b>主錢包</b>簽一個訊息，授權下面呢個 proxy 地址代你落單。主錢包私鑰唔會離開你個錢包／硬件錢包。</div></div>
-<div class="card"><div>Proxy 地址：<code id="proxy"></code></div><div>到期：<span id="exp"></span></div>
-<div class="mut">網絡：Polygon（chain <span id="chain"></span>）。錢包會顯示 CreateProxy 訊息：addr 要同上面 proxy 地址一樣。</div></div>
+<div class="mut">用你嘅<b>主錢包（硬件錢包）</b>簽一個訊息，授權下面呢個 proxy 地址代你落單。主錢包私鑰唔會離開硬件錢包。</div></div>
+<div class="card"><div>主錢包：<code id="owner"></code></div><div>Proxy 地址：<code id="proxy"></code></div><div>到期：<span id="exp"></span></div>
+<div class="mut">網絡：Polygon（chain 137）。錢包會顯示 CreateProxy：addr 要同上面 proxy 地址一樣，否則唔好簽。</div></div>
 <div class="card"><button id="go">用錢包簽名</button><p id="out" class="mut"></p></div>
 </main><script>
-const TYPED=__TYPED__, TOKEN="__TOKEN__", POST=__POST__, INFO=__INFO__;
+const F=__FIELDS__, OWNER=__OWNER__, TOKEN=__TOKEN__, POST=__POST__;
+const TYPES={EIP712Domain:[{name:"name",type:"string"},{name:"version",type:"string"},{name:"chainId",type:"uint256"}],
+ CreateProxy:[{name:"addr",type:"address"},{name:"exp",type:"uint64"},{name:"salt",type:"uint64"},{name:"ts",type:"uint64"}]};
+const TYPED={types:TYPES,primaryType:"CreateProxy",domain:{name:"Polymarket",version:"1",chainId:137},
+ message:{addr:F.addr,exp:Number(F.exp),salt:Number(F.salt),ts:Number(F.ts)}};
 const $=id=>document.getElementById(id), show=(t,c)=>{$("out").textContent=t;$("out").className=c||"mut"};
-$("proxy").textContent=INFO.proxy;$("exp").textContent=INFO.expires_hkt;$("chain").textContent=INFO.chain;
+const hkt=ms=>new Date(Number(ms)+8*3600e3).toISOString().slice(0,16).replace("T"," ")+" HKT";
+$("owner").textContent=OWNER;$("proxy").textContent=F.addr;$("exp").textContent=hkt(F.exp);
 $("go").onclick=async()=>{
  try{
-  if(!window.ethereum){show("搵唔到瀏覽器錢包（例如 MetaMask）。請用有主錢包嘅瀏覽器開呢頁。","bad");return}
+  if(!/^0x[0-9a-fA-F]{40}$/.test(F.addr)||Number(F.exp)-Number(F.ts)>30*86400e3){show("請求內容唔正常，唔好簽。","bad");return}
+  if(!window.ethereum){show("搵唔到瀏覽器錢包（例如 MetaMask）。","bad");return}
   const [acct]=await ethereum.request({method:"eth_requestAccounts"});
-  const want="0x"+Number(TYPED.domain.chainId).toString(16);
-  if((await ethereum.request({method:"eth_chainId"})).toLowerCase()!==want){
-   try{await ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:want}]})}
+  if(acct.toLowerCase()!==OWNER.toLowerCase()){show("錢包帳戶 "+acct+" 唔係主錢包 "+OWNER+"：請喺錢包切換帳戶。","bad");return}
+  if((await ethereum.request({method:"eth_chainId"})).toLowerCase()!=="0x89"){
+   try{await ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x89"}]})}
    catch(e){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}
-  show("請喺錢包確認簽名…");
+  show("請喺錢包（硬件錢包）確認簽名…");
   const sig=await ethereum.request({method:"eth_signTypedData_v4",params:[acct,JSON.stringify(TYPED)]});
-  if(!POST){show("簽名（複製返去 bot 電腦，喺 Proxy_Key.bat 揀 F 貼上）：\n"+sig,"ok");return}
+  if(!POST){show("簽名（抄返去 bot 電腦，喺 Proxy_Key.bat 揀 F 貼上）：\n"+sig,"ok");return}
   show("已簽名，正在向交易所登記…");
   const r=await fetch("sign",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({signature:sig})});
   const j=await r.json();

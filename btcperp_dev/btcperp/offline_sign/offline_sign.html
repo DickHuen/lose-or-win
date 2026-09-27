@@ -1,0 +1,86 @@
+<!doctype html>
+<!--
+  btcperp offline proxy-key signer (option O). Use it on ANOTHER computer, from YOUR OWN copy of the release zip
+  (check the zip's SHA-256 first). Never open a copy of this page that came from the bot computer.
+
+  Browser wallets do not work on file:// pages, so serve this folder locally on that computer:
+      python -m http.server 8000 --bind 127.0.0.1
+  then open  http://127.0.0.1:8000/offline_sign.html
+
+  Paste the contents of sign_fields.txt (addr, exp, salt, ts, owner). The page builds the ONE message it can sign
+  itself - CreateProxy{addr, exp, salt, ts} with domain {name: Polymarket, version: 1, chainId: 137} - and asks
+  your browser wallet to sign it. It sends nothing anywhere; copy the signature back to the bot computer
+  (Proxy_Key.bat, option F).
+-->
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>btcperp offline signer</title><link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7385;--line:#e3e6ec;--ok:#12805c;--bad:#c2352b;--acc:#2f5bd3}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#171b23;--fg:#e6e9ef;--mut:#98a1b3;--line:#2a303c;--ok:#3fbf8f;--bad:#ef6b61;--acc:#7aa0ff}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,"Segoe UI","Microsoft JhengHei",sans-serif}
+main{max-width:640px;margin:32px auto;padding:0 16px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:14px}
+h1{font-size:20px;margin:0 0 6px}.mut{color:var(--mut)}code{word-break:break-all}
+textarea{width:100%;box-sizing:border-box;min-height:120px;font:13px ui-monospace,Consolas,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+button{font:inherit;padding:10px 18px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;margin-top:8px}
+button:disabled{opacity:.5;cursor:default}#out{white-space:pre-wrap;word-break:break-all}.ok{color:var(--ok)}.bad{color:var(--bad)}
+</style></head><body><main>
+<div class="card"><h1>btcperp：離線簽 proxy key</h1>
+<div class="mut">喺<b>另一部電腦</b>用你自己下載同核對過 SHA-256 嘅 release 開呢頁。只貼 sign_fields.txt 嘅內容（五行純文字，冇任何秘密）。</div></div>
+<div class="card"><textarea id="src" placeholder="addr=0x...&#10;exp=...&#10;salt=...&#10;ts=...&#10;owner=0x..."></textarea>
+<button id="check">檢查</button></div>
+<div class="card" id="info" hidden><div>主錢包：<code id="owner"></code></div><div>Proxy 地址：<code id="proxy"></code></div><div>到期：<span id="exp"></span></div>
+<div class="mut">訊息：CreateProxy，Polymarket，Polygon（chain 137）。呢頁只可以簽呢一種訊息。Proxy 地址要同 bot 電腦顯示嘅一樣。</div>
+<button id="go">用瀏覽器錢包簽名</button></div>
+<div class="card"><p id="out" class="mut">等緊你貼內容。</p></div>
+</main><script>
+"use strict";
+const TYPES={EIP712Domain:[{name:"name",type:"string"},{name:"version",type:"string"},{name:"chainId",type:"uint256"}],
+ CreateProxy:[{name:"addr",type:"address"},{name:"exp",type:"uint64"},{name:"salt",type:"uint64"},{name:"ts",type:"uint64"}]};
+const DOMAIN={name:"Polymarket",version:"1",chainId:137}, MAX_MS=30*86400e3, ADDR=/^0x[0-9a-fA-F]{40}$/;
+const $=id=>document.getElementById(id), show=(t,c)=>{$("out").textContent=t;$("out").className=c||"mut"};
+const hkt=ms=>new Date(Number(ms)+8*3600e3).toISOString().slice(0,16).replace("T"," ")+" HKT";
+let TYPED=null, OWNER="";
+function parse(text){
+ const f={};
+ for(const raw of text.split(/\r?\n/)){
+  const line=raw.trim(); if(!line||line.startsWith("#"))continue;
+  const i=line.indexOf("="); if(i<0)throw new Error("讀唔到呢行："+line);
+  const k=line.slice(0,i).trim(), v=line.slice(i+1).trim();
+  if(!["addr","exp","salt","ts","owner"].includes(k))throw new Error("唔認識嘅欄位 "+k+"：拒絕");
+  f[k]=v;
+ }
+ for(const k of ["addr","exp","salt","ts"])if(!(k in f))throw new Error("缺少 "+k);
+ if(!ADDR.test(f.addr))throw new Error("addr 唔係有效地址");
+ if(f.owner!==undefined&&!ADDR.test(f.owner))throw new Error("owner 唔係有效地址");
+ for(const k of ["exp","salt","ts"])if(!/^[0-9]{1,16}$/.test(f[k]))throw new Error(k+" 要係整數");
+ const exp=Number(f.exp), salt=Number(f.salt), ts=Number(f.ts);
+ if(salt>=2**32||ts<=1.6e12||exp<=ts)throw new Error("salt / ts / exp 唔合理");
+ if(exp-ts>MAX_MS)throw new Error("到期日超過 30 日：拒絕");
+ if(exp<=Date.now())throw new Error("呢個請求已經過期：喺 bot 電腦重新整一個");
+ return {typed:{types:TYPES,primaryType:"CreateProxy",domain:DOMAIN,message:{addr:f.addr,exp:exp,salt:salt,ts:ts}},owner:f.owner||""};
+}
+$("check").onclick=()=>{
+ TYPED=null; $("info").hidden=true;
+ try{
+  const r=parse($("src").value); TYPED=r.typed; OWNER=r.owner;
+  $("owner").textContent=OWNER||"（冇提供）"; $("proxy").textContent=TYPED.message.addr; $("exp").textContent=hkt(TYPED.message.exp);
+  $("info").hidden=false;
+  show(Date.now()-TYPED.message.ts>3600e3?"注意：呢個請求超過 1 小時；bot 電腦會刪除 1 小時未完成嘅請求，如果之後失敗就重新整一個。":"內容正常。核對 proxy 地址後撳「用瀏覽器錢包簽名」。");
+ }catch(e){show("拒絕："+e.message,"bad")}
+};
+$("go").onclick=async()=>{
+ if(!TYPED){show("先撳「檢查」。","bad");return}
+ try{
+  if(!window.ethereum){show("搵唔到瀏覽器錢包。記住要用 http://127.0.0.1:8000/ 開呢頁，唔好直接開檔案。","bad");return}
+  const [acct]=await ethereum.request({method:"eth_requestAccounts"});
+  if(OWNER&&acct.toLowerCase()!==OWNER.toLowerCase()){show("錢包帳戶 "+acct+" 唔係主錢包 "+OWNER+"：請喺錢包切換帳戶。","bad");return}
+  if((await ethereum.request({method:"eth_chainId"})).toLowerCase()!=="0x89"){
+   try{await ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x89"}]})}
+   catch(e){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}
+  show("請喺錢包確認簽名…");
+  const sig=await ethereum.request({method:"eth_signTypedData_v4",params:[acct,JSON.stringify(TYPED)]});
+  show("簽名者："+acct+"\n簽名（抄返去 bot 電腦，喺 Proxy_Key.bat 揀 F 貼上）：\n"+sig,"ok");
+ }catch(e){show("錢包錯誤："+(e&&e.message?e.message:e),"bad")}
+};
+</script></body></html>

@@ -35,7 +35,8 @@ ZH = {
     "a_proxy_withdraw": "(a) 代理金鑰能否提款", "e_cancel_only": "(e) 只可撤單模式下的下單回應",
     "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知（已停用）", "server_time": "伺服器時間同步",
     "short_and_flip": "最細倉做空及反手測試", "g1_bracket_partial_reject": "括號單部分被拒時入場是否成交",
-    "fok_unfilled_status": "FOK 未成交時交易所回傳嘅狀態",
+    "fok_unfilled_status": "FOK 未成交時交易所回傳嘅狀態", "fees": "真實 taker 手續費率",
+    "basis": "Binance 現貨同 Polymarket mark 價差",
 }
 
 
@@ -108,6 +109,24 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         return ok, {"raw": raw, "local_ms": local, "skew_ms": skew,
                     "note": "request signatures use this computer's clock; keep it NTP-synced"}
     step("server_time", s_time)
+
+    def s_fees() -> Any:
+        """Review v1.3.0 BT3: the real taker fee; the backtest never uses a lower one."""
+        sched = ex.get_fee_schedule()
+        row = next((e for e in sched if e.get("category") == cfg.market.category), None)
+        taker = float(row["taker_fee_rate"]) if row and row.get("taker_fee_rate") is not None else None
+        return taker is not None, {"taker_fee_rate": taker, "category": cfg.market.category, "raw": sched,
+                                   "config_estimate": float(cfg.shadow.fee_rate_estimate)}
+    step("fees", s_fees)
+
+    def s_basis() -> Any:
+        """Review v1.3.0 R3: Binance spot vs Polymarket mark, in basis points (logged every run afterwards)."""
+        inst = ctx.get("inst") or engine.instrument()
+        mark = ex.get_ticker(inst.id).mark
+        bnp = engine.bn.price()
+        return True, {"polymarket_mark": mark, "binance_price": bnp,
+                      "basis_bps": (mark / bnp - 1) * 1e4 if bnp else None}
+    step("basis", s_basis)
 
     def s_region() -> Any:
         g = ex.get_geoblock()

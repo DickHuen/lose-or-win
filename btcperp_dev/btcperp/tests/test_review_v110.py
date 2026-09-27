@@ -307,23 +307,31 @@ def test_e_equity_floor_hard_stop_needs_new_config_version(world, cfg_dict, tmp_
     w.at(hkt(2026, 10, 5, 12, 30)).manage()
     st = w.state()
     assert w.pos() == 0 and "equity_floor" in st["pause_reasons"]
-    assert w.engine().cmd_resume(reset_peak=True) == "equity floor still active"
+    assert w.engine().cmd_resume(reset_peak=True) == "equity_floor still active"
     assert w.state()["pause_reasons"] == ["equity_floor"]
     from perpbot.config import config_from_dict
 
     cfg_dict["config_version"] = "1.1.1-test"
     w.cfg = config_from_dict(cfg_dict)
     w.store.config_version = "1.1.1-test"
-    assert w.engine().cmd_resume(reset_peak=True) == "equity floor still active"      # v1.3.0: new version alone is not enough
+    assert w.engine().cmd_resume(reset_peak=True) == "equity_floor still active"      # v1.3.0: new version alone is not enough
     assert w.state()["pause_reasons"] == ["equity_floor"]
     cfg_dict["config_version"] = "1.1.2-test"
-    cfg_dict["risk"]["equity_floor_reset_baseline_usd"] = 7_400        # owner states the new funded baseline
+    cfg_dict["risk"]["equity_floor_reset_baseline_usd"] = 7_400        # owner states the new funded baseline ...
     w.cfg = config_from_dict(cfg_dict)
     w.store.config_version = "1.1.2-test"
+    assert w.engine().cmd_resume(reset_peak=True) == "equity_floor still active"   # ... but not the trigger date
+    cfg_dict["risk"]["equity_floor_reset_baseline_usd"] = 50_000        # above current equity: refused
+    cfg_dict["risk"]["equity_floor_reset_for"] = "2026-10-05"
+    w.cfg = config_from_dict(cfg_dict)
+    assert w.engine().cmd_resume(reset_peak=True) == "equity_floor still active"
+    cfg_dict["risk"]["equity_floor_reset_baseline_usd"] = 7_000
+    w.cfg = config_from_dict(cfg_dict)
     assert w.engine().cmd_resume(reset_peak=True) == "resumed"
     assert not w.state()["paused"]
     eq = w.store.latest("equity_log")
-    assert eq["data"]["net_funded"] == 7_400 and eq["data"]["floor_reset"] is True
+    assert eq["data"]["net_funded"] == 7_000 and eq["data"]["floor_reset"] is True
+    assert eq["data"]["floor_reset_for"] == "2026-10-05" and eq["data"]["cum_funded"] == pytest.approx(10_000, rel=0.01)
     w.at(hkt(2026, 10, 5, 16, 30)).manage()
     assert not w.state()["paused"]                        # new funded baseline, no immediate re-trigger
 

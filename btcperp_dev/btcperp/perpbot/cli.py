@@ -4,7 +4,7 @@
   pause | unpause | kill | resume [--reset-peak] | alerts | selftest | smoketest [--no-trade] [--probe-withdrawal]
   flowwatch | version | snapshot (read-only exchange read for the dashboard)
   dashboard [--port N] [--no-browser] | schedule install|remove|list|show [--dry-run] [--no-dashboard] [--upgrade]
-  proxykey new [--days N] [--offline] | proxykey finish [--signature 0x..] | proxykey status
+  proxykey new --owner 0x.. [--days N<=30] [--offline] | proxykey finish [--signature 0x..] | proxykey status
   backtest download | criteria | confirm | run   (offline from downloaded Binance data; see BACKTEST.md)
 
 Every bot command: exclusive file lock, full logging, non-zero exit code on error.
@@ -103,9 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="re-register tasks that already run from this folder (used by the upgrade)")
     pk = sub.add_parser("proxykey", help="create a proxy key; the main wallet only signs, elsewhere")
     pk.add_argument("action", choices=["new", "finish", "status"])
-    pk.add_argument("--days", type=int, default=30, help="proxy key lifetime in days (default 30)")
+    pk.add_argument("--days", type=int, default=30, help="proxy key lifetime in days (1-30, default 30)")
+    pk.add_argument("--owner", default=None, help="new: your MAIN wallet address (asked for if not given)")
     pk.add_argument("--label", default="btcperp")
-    pk.add_argument("--offline", action="store_true", help="new: only write the files to sign on another computer")
+    pk.add_argument("--offline", action="store_true", help="new: only write sign_fields.txt to sign on another computer")
     pk.add_argument("--port", type=int, default=8766, help="new: local signing page port (default 8766)")
     pk.add_argument("--no-browser", action="store_true")
     pk.add_argument("--signature", default=None, help="finish: the signature (asked for if not given)")
@@ -140,15 +141,15 @@ def _wait_notifier(notifier: Any) -> None:
             log.debug("notification wait failed", exc_info=True)
 
 
-def send_heartbeat(url: str, ok: bool, timeout: float = 5.0) -> bool:
-    """Dead-man's switch (review v1.2.0 item 5): a bare GET, no data. `<url>/fail` reports a failed run.
-    Never raises; the URL itself is never logged."""
+def send_heartbeat(url: str, kind: str, timeout: float = 5.0) -> bool:
+    """Dead-man's switch (review v1.2.0 item 5, v1.3.0 V4): a bare GET, no data. kind: start | success | fail
+    (`<url>/start`, `<url>`, `<url>/fail`). Never raises; the URL itself is never logged."""
     if not url:
         return False
     try:
         import httpx
 
-        r = httpx.get(url.rstrip("/") + ("" if ok else "/fail"), timeout=timeout)
+        r = httpx.get(url.rstrip("/") + {"start": "/start", "success": "", "fail": "/fail"}[kind], timeout=timeout)
         return r.status_code == 200
     except Exception as e:  # noqa: BLE001
         log.warning("heartbeat ping failed (%s)", type(e).__name__)
@@ -198,6 +199,16 @@ def smoketest_gate(paths: Paths, secrets: Any) -> tuple[bool, str]:
     return False, "no full smoketest has passed yet: run 2_Smoketest.bat (type YES) first"
 
 
+def _expire_proxykey_request(paths: Paths) -> None:
+    """Review v1.3.0 P4: every bot run deletes an unfinished proxy key request older than an hour."""
+    try:
+        from perpbot.proxykey import expire_pending
+
+        expire_pending(paths)
+    except Exception:  # noqa: BLE001
+        log.warning("could not check the pending proxy key request", exc_info=True)
+
+
 def run_selftest(paths: Paths) -> int:
     cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(paths.root / "tests")]
     print("Running unit tests:", " ".join(cmd[2:]))
@@ -218,6 +229,7 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
     if command == "version":
         print(code_version())
         return EXIT_OK
+    _expire_proxykey_request(paths)
 
     # --- config / secrets
     try:
@@ -236,7 +248,8 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
         other = _other_install(paths, factories)
         if other is not None:
             print(f"WRONG FOLDER: the scheduled bot runs in {other}, not in {paths.root}.\n"
-                  f"Use the .bat files in {other}\\windows. (This copy has its own data and .env.)", file=sys.stderr)
+                  f"Use the .bat files in {other}\\windows, for example "
+                  f"{other}\\windows\\Kill_Close_Position.bat. (This copy has its own data and .env.)", file=sys.stderr)
             return EXIT_CONFIG
     if command in NO_LOCK:
         return _run_unlocked(command, args, paths, cfg, calendar, clock, secrets, factories)
@@ -266,6 +279,14 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
                  status="running", lateness_min=lateness, data={"argv": argv or sys.argv[1:], "pid_run": store.run_id})
     log.info("=== %s start (code %s, config %s) scheduled %s lateness %s min", command, code_version(),
              cfg.config_version, fmt_hkt(slot) if slot else "-", f"{lateness:.1f}" if lateness is not None else "-")
+    hb_url = secrets.heartbeat_url(command) if command in HEARTBEAT else ""
+    hb = factories.heartbeat or send_heartbeat
+    hb_start = None
+    if hb_url:                                        # /start in the background: a slow ping never delays trading
+        import threading
+
+        hb_start = threading.Thread(target=hb, args=(hb_url, "start"), daemon=True)
+        hb_start.start()
     exchange = binance = None
     engine: Any = None
     rc = EXIT_OK
@@ -331,6 +352,9 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
                     print(f"NEW ALERTS FOR OWNER: {n} (see the dashboard, or run: python run.py alerts)")
             except Exception:  # noqa: BLE001
                 log.debug("pending alert count failed", exc_info=True)
+        hb_kind = "success"
+        if hb_url:
+            hb_kind = "fail" if status == "error" else _heartbeat_state(store)
         store.close()
         lock.release()
         # --- after the lock: nothing below can delay a trading run (review v1.2.0 item 6)
@@ -342,10 +366,29 @@ def main(argv: list[str] | None = None, *, paths: Paths | None = None, clock: Cl
             except Exception:  # noqa: BLE001
                 log.debug("telegram send failed", exc_info=True)
             _notify(notifier, kind, short)
-        if command in HEARTBEAT and secrets.healthcheck_url:
-            (factories.heartbeat or send_heartbeat)(secrets.healthcheck_url, status == "ok")
+        if hb_url:
+            if hb_start is not None:
+                hb_start.join(timeout=10)                  # the end ping must never overtake /start
+            hb(hb_url, hb_kind)
         _wait_notifier(notifier)
     return rc
+
+
+def _heartbeat_state(store: Store) -> str:
+    """Review v1.3.0 V4: `fail` while a critical alert is unread (not yet marked read in the dashboard or
+    Alerts.bat) or a hard stop is active, so the phone keeps showing the problem."""
+    from perpbot.engine import CRITICAL_ALERT_KINDS, HARD_STOP_REASONS
+    from perpbot.records import Records
+
+    try:
+        kinds = sorted(CRITICAL_ALERT_KINDS)
+        marks = ",".join("?" for _ in kinds)
+        unread = store.count("alerts", f"kind IN ({marks}) AND id NOT IN (SELECT alert_id FROM alert_deliveries)", kinds)
+        hard = [r for r in Records(store).state()["pause_reasons"] if r in HARD_STOP_REASONS]
+        return "fail" if (unread or hard) else "success"
+    except Exception:  # noqa: BLE001
+        log.warning("heartbeat state failed", exc_info=True)
+        return "fail"
 
 
 def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock, secrets: Any,
@@ -360,7 +403,7 @@ def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any
         if command == "proxykey":
             return _run_proxykey(args, paths, cfg, secrets)
         if command == "backtest":
-            return _run_backtest(args, paths, cfg, calendar, clock, factories)
+            return _run_backtest(args, paths, cfg, calendar, clock, factories, secrets)
         from perpbot import winsched
 
         if args.action == "show":
@@ -406,79 +449,158 @@ def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any
 def _run_proxykey(args: Any, paths: Paths, cfg: Any, secrets: Any) -> int:
     from perpbot import proxykey as pkm
 
+    def with_lock(fn: Callable[[], Any]) -> Any:
+        """P7: the key is registered and .env written only while no bot command runs."""
+        lock = FileLock(paths.lock_file)
+        lock.acquire(float(cfg.lock.wait_seconds))
+        try:
+            return fn()
+        finally:
+            lock.release()
+
     try:
         if args.action == "status":
-            for line in pkm.status_lines(paths, secrets):
+            for line in pkm.status_lines(paths, cfg, secrets):
                 print(line)
             return EXIT_OK
         if args.action == "new":
-            p = pkm.new_request(paths, cfg, days=int(args.days), label=str(args.label))
-            print(f"New proxy key generated on this computer: {p.proxy} (expires {p.public()['expires_utc']}).")
-            print("The proxy PRIVATE key is saved only next to .env and goes into .env when registered.")
+            owner = (args.owner or "").strip()
+            if not owner:
+                hint = f" [{secrets.wallet_address}]" if secrets.wallet_address else ""
+                owner = input(f"Your MAIN wallet address (0x...){hint}: ").strip() or secrets.wallet_address
+            method = "offline" if args.offline else "browser"
+            p = pkm.new_request(paths, cfg, days=int(args.days), label=str(args.label), owner=owner, method=method,
+                                expected_owner=secrets.wallet_address)
+            print(f"New proxy key made on this computer: {p.proxy}")
+            print(f"  for main wallet {p.owner}, expires {pkm._hkt(p.exp_ms)} ({int(args.days)} days).")
+            print("The proxy PRIVATE key stays on this computer (deleted after 1 hour if not finished).")
             if args.offline:
-                print(f"To sign on another computer, copy these two files there:\n  {paths.data_dir / 'proxykey' / 'sign.html'}"
-                      f"\n  {paths.data_dir / 'proxykey' / 'sign_request.json'}\nthen come back and run: proxykey finish")
+                print(f"\nCopy ONLY this file to the other computer (plain fields, nothing secret):\n"
+                      f"  {paths.data_dir / 'proxykey' / 'sign_fields.txt'}\n"
+                      f"There, use YOUR OWN copy of the release zip (check its SHA-256), not files from this PC:\n"
+                      f"  python perpbot\\offline_sign.py sign_fields.txt      (or offline_sign\\offline_sign.html)\n"
+                      f"Then come back within 1 hour: Proxy_Key.bat, option F.")
                 return EXIT_OK
-            print("Your browser opens a signing page. Sign with your MAIN wallet (MetaMask; a hardware wallet is best).")
+            print("Your browser opens a signing page. Sign with the HARDWARE wallet connected to MetaMask/Rabby.")
             res = pkm.serve_signing(paths, cfg, p, port=int(args.port), open_browser=not args.no_browser,
-                                    expected_owner=secrets.wallet_address)
+                                    with_lock=with_lock)
         else:
             sig = args.signature or input("Paste the signature (0x...): ").strip()
-            res = dict(pkm.finish(paths, cfg, sig, expected_owner=secrets.wallet_address), ok=True)
+            res = dict(pkm.finish(paths, cfg, sig, with_lock=with_lock), ok=True)
         if not res.get("ok"):
             print(f"FAILED: {res.get('error')}")
             return EXIT_ERROR
         print(f"DONE: proxy {res['proxy']} registered for wallet {res['owner']}, expires {res['expires_utc']}.")
         print(".env updated. Next: windows\\2_Smoketest.bat")
         return EXIT_OK
+    except LockTimeout as e:
+        print(f"FAILED: a bot command is running ({e}); .env was not changed. Try again in a minute.")
+        return EXIT_ERROR
     except pkm.ProxyKeyError as e:
         print(f"FAILED: {e}")
         return EXIT_ERROR
 
 
-def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock, factories: Factories) -> int:
-    """Backtest (review B3): no lock (it never trades and must not delay a scheduled run)."""
+def real_fee_rate(paths: Paths) -> float | None:
+    """Taker fee rate recorded by the latest smoketest (review BT3: the backtest never uses less)."""
+    for f in sorted(paths.smoketest_dir.glob("smoketest_*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for r in data.get("results", []):
+            if r.get("step") == "fees" and isinstance(r.get("detail"), dict) and r["detail"].get("taker_fee_rate") is not None:
+                return float(r["detail"]["taker_fee_rate"])
+    return None
+
+
+def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock, factories: Factories,
+                  secrets: Any) -> int:
+    """Backtest (review B3 / R1): no lock (it never trades and must not delay a scheduled run)."""
     from perpbot import backtest as btm
     from perpbot.timeutil import to_ms
 
     crit = paths.root / cfg.backtest.criteria_file
     data_dir = paths.data_dir / "backtest"
     store = Store(paths.db_file, clock, cfg.config_version, code_version())
+    real = real_fee_rate(paths)
+    fee = max(float(cfg.shadow.fee_rate_estimate), real or 0.0)
     try:
-        digest = btm.criteria_hash(crit)
-        confirmed = store.latest("backtest_log", "event='criteria_confirmed' AND data LIKE ?", [f'%"{digest}"%'])
+        confirmed = store.latest("backtest_log", "event='criteria_confirmed'")
         if args.action == "criteria":
             print(crit.read_text(encoding="utf-8"))
-            print(f"criteria file sha256 {digest}: " + (f"CONFIRMED by the owner at {confirmed['ts_hkt']}"
-                                                         if confirmed else "NOT confirmed yet"))
-            return EXIT_OK
-        if args.action == "confirm":
-            import yaml
-
-            ver = (yaml.safe_load(crit.read_text(encoding="utf-8")) or {}).get("criteria_version")
-            store.insert("backtest_log", event="criteria_confirmed", data={"sha256": digest, "criteria_version": ver})
-            print(f"criteria {ver} (sha256 {digest}) confirmed. They cannot change for this confirmation.")
+            print(f"fee rate used: {fee} (config {cfg.shadow.fee_rate_estimate}, smoketest {real})")
+            if confirmed:
+                print(f"last confirmation: {confirmed['ts_hkt']}, manifest {confirmed['data']['manifest']['sha256'][:12]}, "
+                      f"data to {confirmed['data']['manifest']['parts']['data_end_utc']}")
+            else:
+                print("NOT confirmed yet")
             return EXIT_OK
         if args.action == "download":
             from datetime import date as _date
 
             bn = (factories.binance or _default_binance)(cfg)
+            pm = None
             try:
-                counts = btm.download(bn, data_dir, _date.fromisoformat(str(cfg.backtest.data_start)), to_ms(clock.now()))
+                pm = (factories.exchange or _default_exchange)(cfg, secrets)
+            except Exception as e:  # noqa: BLE001 - Polymarket candles are optional (I7)
+                log.warning("polymarket client unavailable: %s", e)
+            try:
+                counts = btm.download(bn, data_dir, _date.fromisoformat(str(cfg.backtest.data_start)), to_ms(clock.now()),
+                                      pm=pm, cfg=cfg)
+            except Exception as e:  # noqa: BLE001
+                if pm is None or "polymarket" not in str(e).lower():
+                    raise
+                counts = {"polymarket_error": str(e)}
             finally:
                 bn.close()
+                if pm is not None:
+                    pm.close()
             print(f"downloaded into {data_dir}: {counts}")
             store.insert("backtest_log", event="download", data=counts)
             return EXIT_OK
+        if args.action == "confirm":
+            import yaml
+
+            ds, cal, end, dq = btm.prepare(cfg, paths.root, data_dir, calendar)
+            man = btm.manifest(cfg, paths.root, dq, end, fee)
+            ver = (yaml.safe_load(crit.read_text(encoding="utf-8")) or {}).get("criteria_version")
+            n_conf = store.count("backtest_log", "event='criteria_confirmed'") + 1
+            store.insert("backtest_log", event="criteria_confirmed", data={"criteria_version": ver, "manifest": man})
+            print(f"CONFIRMED (confirmation #{n_conf}): criteria {ver}, data to {end.isoformat()} (fixed), fee {fee}, "
+                  f"manifest {man['sha256'][:12]}. Nothing that decides the result can change under this confirmation.")
+            return EXIT_OK
         if confirmed is None:
-            print("NEEDS CONFIRMATION: the pass/fail criteria (config/backtest_criteria.yaml) must be confirmed by the "
-                  "owner BEFORE the backtest runs. Read them (`backtest criteria`), then `backtest confirm`.")
+            print("NEEDS CONFIRMATION: the pass/fail criteria must be confirmed by the owner BEFORE the backtest runs "
+                  "(after the committee has reviewed them). Read them (`backtest criteria`), then `backtest confirm`.")
             return EXIT_CONFIRM
+        man0 = confirmed["data"]["manifest"]
+        from datetime import date as _date
+
+        end = _date.fromisoformat(man0["parts"]["data_end_utc"])
+        ds, cal, end, dq = btm.prepare(cfg, paths.root, data_dir, calendar, end)
+        man = btm.manifest(cfg, paths.root, dq, end, fee)
+        if man["sha256"] != man0["sha256"]:
+            print(f"NEEDS CONFIRMATION: changed since the confirmation: {', '.join(btm.manifest_diff(man0, man))}. "
+                  f"A new confirmation is a new pre-registration: the committee must see why.")
+            return EXIT_CONFIRM
+        prior = [r for r in store.query("SELECT data FROM backtest_log WHERE event='run'")
+                 if isinstance(r["data"], dict) and r["data"].get("manifest_sha256") == man["sha256"]]
+        n_run = len(prior) + 1
         out = paths.data_dir / "backtest" / f"results_{clock.now().strftime('%Y%m%d_%H%M%S')}"
-        rep = btm.run_backtest(cfg, paths.root, data_dir, out, calendar, float(cfg.shadow.fee_rate_estimate))
+        rep = btm.run_backtest(cfg, paths.root, data_dir, out, calendar, fee, data_end=end, run_number=n_run,
+                               manifest_sha=man["sha256"])
+        rep_hist = {"confirmations_total": store.count("backtest_log", "event='criteria_confirmed'"),
+                    "runs_total": store.count("backtest_log", "event='run'") + 1}
         store.insert("backtest_log", event="run", data={"verdict": rep["verdict"], "result_sha256": rep["result_sha256"],
-                                                         "criteria_sha256": rep["criteria_sha256"], "dir": str(out)})
-        print((out / "summary.md").read_text(encoding="utf-8"))
+                                                         "manifest_sha256": man["sha256"], "run_number": n_run,
+                                                         "dir": str(out), **rep_hist})
+        text = (out / "summary.md").read_text(encoding="utf-8")
+        text = text.replace("(the committee uses run #1).",
+                            f"(the committee uses run #1). History: {rep_hist['confirmations_total']} confirmation(s), "
+                            f"{rep_hist['runs_total']} run(s) in total.")
+        (out / "summary.md").write_text(text, encoding="utf-8")
+        print(text)
         print(f"results: {out}\nSend summary.md and summary.json (never .env) for review.")
         return EXIT_OK
     except btm.BacktestError as e:

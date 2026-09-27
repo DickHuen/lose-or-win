@@ -84,7 +84,17 @@ REASON_HELP = {
     "kill_losing_streak": "losing-streak kill switch (Resume.bat + RESET-PEAK)",
     "equity_floor": "equity floor hard stop (needs a new config version with the new baseline)",
     "adopted_over_budget": "an adopted position was over the risk budget (Resume.bat clears it)",
+    "permanent_floor": "permanent floor on all capital ever funded (only a new config version with "
+                       "risk.permanent_floor_reset_for = the trigger date can restart it)",
+    "live_review": "live expectancy below the backtest's review line (committee review, then Resume.bat)",
 }
+# pause reasons that keep the heartbeat failing while active (review v1.3.0 V4)
+HARD_STOP_REASONS = ("kill_drawdown", "kill_losing_streak", "equity_floor", "permanent_floor", "live_review")
+CRITICAL_ALERT_KINDS = frozenset({
+    "ERROR", "SL re-place FAILED", "CLOSE FAILURE", "KILL SWITCH: drawdown", "KILL SWITCH: losing streak",
+    "KILL SWITCH: equity floor", "KILL SWITCH: permanent floor", "kill close retry", "calendar expired", "clock skew",
+    "late decision failed", "equity unreadable", "liquidation check", "wallet mismatch",
+    "adopted position over risk budget", "deposit/withdrawal while holding", "live review", "proxy key expiry"})
 
 
 def describe_reasons(reasons: list[str]) -> str:
@@ -581,11 +591,23 @@ class Engine:
         return actions
 
     # ================================================================ kill switches
+    def check_permanent_floor_config(self, prev_data: dict[str, Any]) -> float:
+        """Review v1.3.0 F1: a new config may never lower the permanent floor."""
+        pct = float(self.cfg.risk.permanent_floor_pct_of_cumulative_funded)
+        seen = prev_data.get("permanent_floor_pct_max")
+        if seen is not None and pct < float(seen):
+            self.alert("KILL SWITCH: permanent floor", f"config {self.cfg.config_version} lowers the permanent floor from "
+                       f"{seen}% to {pct}%: refused, the bot does not trade with this config",
+                       dedupe_key=f"perm_floor_lowered:{self.cfg.config_version}")
+            raise EngineError(f"config lowers risk.permanent_floor_pct_of_cumulative_funded from {seen} to {pct}")
+        return max(pct, float(seen)) if seen is not None else pct
+
     def kill_switch_check(self, acct: AccountSnapshot, *, allow_actions: bool) -> dict[str, Any]:
         inst = self.instrument()
         eq = self.equity(acct)
         prev = self.store.latest("equity_log")
         prev_data = prev["data"] if prev and isinstance(prev["data"], dict) else {}
+        perm_pct_max = self.check_permanent_floor_config(prev_data)
         flow_adj, pending, new_flows = self.sync_flows()
         pos = acct.position(inst.id)
         if pos is not None:
@@ -602,15 +624,22 @@ class Engine:
         prev_peak = (float(prev["peak"]) + flow_adj) if (prev and prev["peak"] is not None) else None
         nf_prev = prev_data.get("net_funded")
         net_funded = (float(nf_prev) + flow_adj) if nf_prev is not None else None
+        cf_prev = prev_data.get("cum_funded")
+        cum_funded = (float(cf_prev) + flow_adj) if cf_prev is not None else None     # never re-based (F1)
         evaluate = bool(eq["valid"]) and not pending          # review C8 / C9
         limit = float(self.cfg.risk.kill_drawdown_pct)
         if evaluate:
             dd = drawdown(eq["equity"], prev_peak, limit)
             if net_funded is None:
                 net_funded = eq["equity"]                        # first valid equity = funded capital baseline
+            if cum_funded is None:
+                cum_funded = net_funded
             floor = net_funded * float(self.cfg.risk.equity_floor_pct_of_net_funded) / 100.0
             floor_hit = eq["equity"] < floor
+            perm_floor = cum_funded * float(self.cfg.risk.permanent_floor_pct_of_cumulative_funded) / 100.0
+            perm_hit = eq["equity"] < perm_floor
         else:
+            perm_floor, perm_hit = None, False
             peak = prev_peak if prev_peak is not None else 0.0
             dd = DrawdownState(eq["equity"] or 0.0, peak, float(prev["drawdown_pct"] or 0.0) if prev else 0.0, False)
             floor, floor_hit = None, False
@@ -620,15 +649,39 @@ class Engine:
                                float(self.cfg.risk.losing_streak_tie_pct))
         all_trades = self.rec.closed_trades()
         exp, n_exp = size_weighted_expectancy(all_trades, int(self.cfg.risk.expectancy_window_trades))
+        # review v1.3.0 S9: live review line from the backtest (rolling expectancy below its 5th percentile)
+        rv_floor = self.cfg.risk.live_review_expectancy_floor_r
+        rv_n = int(self.cfg.risk.live_review_window_trades)
+        rv_checked = int(prev_data.get("live_review_checked_n") or 0)
+        rv_exp, _ = size_weighted_expectancy(all_trades, rv_n)
+        rv_hit = (rv_floor is not None and len(all_trades) >= int(self.cfg.risk.live_review_min_trades)
+                  and len(all_trades) > rv_checked and rv_exp is not None and rv_exp < float(rv_floor))
         status = {"evaluated": evaluate, "drawdown_pct": dd.drawdown_pct, "drawdown_triggered": dd.triggered,
                   "equity_floor": floor, "equity_floor_hit": floor_hit, "net_funded": net_funded,
                   "losing_streak_trades": streak.losing_trades, "losing_streak_pct": streak.loss_pct,
                   "losing_streak_triggered": streak.triggered, "expectancy_r": exp, "expectancy_n": n_exp,
-                  "pending_flows": len(pending), "paused": st["paused"], "pause_reasons": st["pause_reasons"]}
+                  "pending_flows": len(pending), "paused": st["paused"], "pause_reasons": st["pause_reasons"],
+                  "cum_funded": cum_funded, "permanent_floor": perm_floor, "permanent_floor_hit": perm_hit,
+                  "live_review_expectancy_r": rv_exp, "live_review_floor_r": rv_floor}
         self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"],
                           peak=dd.peak if (evaluate or prev_peak is not None) else None, drawdown_pct=dd.drawdown_pct,
-                          data={**eq, "flow_adjustment": flow_adj, "net_funded": net_funded, "kill": status})
+                          data={**eq, "flow_adjustment": flow_adj, "net_funded": net_funded, "kill": status,
+                                "cum_funded": cum_funded, "permanent_floor_pct_max": perm_pct_max,
+                                "live_review_checked_n": len(all_trades)})
         needs_close = False
+        if perm_hit and "permanent_floor" not in st["pause_reasons"]:
+            self.rec.set_state(add_reason="permanent_floor", note="permanent floor hard stop")
+            self.alert("KILL SWITCH: permanent floor",
+                       f"equity {eq['equity']:.2f} is below {self.cfg.risk.permanent_floor_pct_of_cumulative_funded}% of all "
+                       f"capital ever funded ({cum_funded:.2f}; cumulative result {eq['equity'] - cum_funded:+.2f}). Closing "
+                       f"and stopping for good: only you can restart it, in a new config version that sets "
+                       f"risk.permanent_floor_reset_for to today's date.")
+            needs_close = True
+        if rv_hit and "live_review" not in st["pause_reasons"]:
+            self.rec.set_state(add_reason="live_review", note="live review line")
+            self.alert("live review", f"rolling {rv_n}-trade expectancy {rv_exp:.3f} R is below the backtest's 5th "
+                       f"percentile {rv_floor} R after {len(all_trades)} live trades: new entries paused; position and "
+                       f"SL/TP kept. The committee reviews before Resume.bat.")
         if floor_hit and "equity_floor" not in st["pause_reasons"]:
             self.rec.set_state(add_reason="equity_floor", note="equity floor hard stop")
             self.alert("KILL SWITCH: equity floor",
@@ -653,7 +706,7 @@ class Engine:
                        dedupe_key=f"expectancy:{len(all_trades)}")
         # review B2: while a closing kill is active and a position is still open, retry the close every run
         reasons_now = self.rec.state()["pause_reasons"]
-        closing = [r for r in ("equity_floor", "kill_drawdown", "manual_kill") if r in reasons_now]
+        closing = [r for r in ("permanent_floor", "equity_floor", "kill_drawdown", "manual_kill") if r in reasons_now]
         if allow_actions and closing and not self._kill_close_tried:
             if self.ex.get_account().position(inst.id) is not None:
                 if not needs_close:
@@ -1387,6 +1440,8 @@ class Engine:
                     "depth_bid_qty": depth_bid, "depth_ask_qty": depth_ask, "book": {"bids": b.bids, "asks": b.asks}}
             try:
                 snap["binance_price"] = self.bn.price()
+                if snap["binance_price"] and t.mark:        # review v1.3.0 R3: Polymarket mark vs Binance spot
+                    snap["basis_bps"] = (t.mark / snap["binance_price"] - 1) * 1e4
             except Exception as e:  # noqa: BLE001
                 snap["binance_price_error"] = str(e)
             self.store.insert("market_snapshots", data=snap)
@@ -1542,10 +1597,24 @@ class Engine:
         self.alert("unpaused" if not rest else "unpause: still paused", msg)
         return msg
 
+    def _reset_allowed(self, alert_kind: str, cfg_date: Any, used_key: str) -> str | None:
+        """Review v1.3.0 F2: a floor reset in config is bound to ONE trigger date, from a newer config version,
+        and can be used once. Returns the trigger's HKT date when allowed."""
+        trig = self.store.latest("alerts", "kind = ?", [alert_kind])
+        if trig is None or trig["config_version"] == self.cfg.config_version or cfg_date is None:
+            return None
+        day = str(trig["ts_hkt"])[:10]
+        if str(cfg_date) != day:
+            return None
+        if self.store.count("equity_log", "data LIKE ?", [f'%"{used_key}": "{day}"%']):
+            return None
+        return day
+
     def cmd_resume(self, reset_peak: bool = False) -> str:
-        """Clear pauses. A kill switch (drawdown / losing streak) is cleared only with reset_peak: the
-        drawdown peak is reset to the current equity and the losing-streak count restarts. The equity floor
-        needs a new config version that states `risk.equity_floor_reset_baseline_usd`."""
+        """Clear pauses. A kill switch (drawdown / losing streak) is cleared only with reset_peak. The equity floor
+        needs a newer config version with `risk.equity_floor_reset_baseline_usd` (<= current equity) and
+        `risk.equity_floor_reset_for` = the trigger's date (single use). The permanent floor needs a newer config
+        version with `risk.permanent_floor_reset_for` = the trigger's date (single use)."""
         st = self.rec.state()
         reasons = list(st["pause_reasons"])
         kill = [r for r in reasons if r in KILL_SWITCH_REASONS]
@@ -1554,44 +1623,68 @@ class Engine:
                 f"kill switch active ({', '.join(kill)}). Resuming it resets the drawdown peak to today's equity and "
                 f"restarts the losing-streak count. Confirm with RESET-PEAK (resume --reset-peak).")
         prev = self.store.latest("equity_log")
-        net_funded = (prev["data"] or {}).get("net_funded") if prev and isinstance(prev["data"], dict) else None
-        keep_floor = False
-        floor_reset = False
-        base = self.cfg.risk.equity_floor_reset_baseline_usd
+        prev_data = prev["data"] if prev and isinstance(prev["data"], dict) else {}
+        perm_pct_max = self.check_permanent_floor_config(prev_data)
+        net_funded = prev_data.get("net_funded")
+        cum_funded = prev_data.get("cum_funded")
+        rk = self.cfg.risk
+        keep: list[str] = []
+        notes: list[str] = []
+        floor_day = perm_day = None
         if "equity_floor" in reasons:
-            trig = self.store.latest("alerts", "kind = ?", ["KILL SWITCH: equity floor"])
-            if trig is None or trig["config_version"] == self.cfg.config_version or base is None:
-                keep_floor = True
-            else:
-                floor_reset = True
-                net_funded = float(base)       # the new config states the new funded baseline explicitly
+            floor_day = self._reset_allowed("KILL SWITCH: equity floor", rk.equity_floor_reset_for, "floor_reset_for") \
+                if rk.equity_floor_reset_baseline_usd is not None else None
+            if floor_day is None:
+                keep.append("equity_floor")
+        if "permanent_floor" in reasons:
+            perm_day = self._reset_allowed("KILL SWITCH: permanent floor", rk.permanent_floor_reset_for, "perm_reset_for")
+            if perm_day is None:
+                keep.append("permanent_floor")
         eq = None
-        if reset_peak or floor_reset:
+        if reset_peak or floor_day or perm_day:
             eq = self.equity(self.ex.get_account())
             if not eq["valid"]:
                 raise EngineError("cannot resume: equity is unreadable")
+        if floor_day and float(rk.equity_floor_reset_baseline_usd) > float(eq["equity"]):
+            notes.append(f"equity_floor_reset_baseline_usd {rk.equity_floor_reset_baseline_usd} is above the current "
+                         f"equity {eq['equity']:.2f}: refused")
+            keep.append("equity_floor")
+            floor_day = None
+        cum_before = cum_funded
+        if floor_day:
+            net_funded = float(rk.equity_floor_reset_baseline_usd)
+        if perm_day:
+            cum_funded = float(eq["equity"])                 # the owner accepted the loss in a dated config
         if reset_peak:
             note = "resume (user confirmed RESET-PEAK): pauses and kill switches cleared; peak reset; streak restarted"
         else:
             note = "clear pauses (no kill switch active): peak and losing-streak count unchanged"
         self.rec.set_state(clear_reasons=True, note=note)
-        if keep_floor:
-            self.rec.set_state(add_reason="equity_floor", note="equity floor stays: needs a new config version with "
-                                                              "risk.equity_floor_reset_baseline_usd")
+        for r in keep:
+            self.rec.set_state(add_reason=r, note=f"{r} stays: {REASON_HELP.get(r, '')}")
         if eq is not None:
             peak = eq["equity"] if reset_peak else (float(prev["peak"]) if prev and prev["peak"] is not None else eq["equity"])
             self.store.insert("equity_log", equity=eq["equity"], wallet=eq["wallet"], upnl=eq["upnl"], peak=peak,
                               drawdown_pct=0.0 if reset_peak else (prev["drawdown_pct"] if prev else 0.0),
-                              data={**eq, "peak_reset": reset_peak, "net_funded": net_funded, "floor_reset": floor_reset})
+                              data={**eq, "peak_reset": reset_peak, "net_funded": net_funded, "floor_reset": bool(floor_day),
+                                    "floor_reset_for": floor_day, "perm_reset_for": perm_day, "cum_funded": cum_funded,
+                                    "cum_funded_before_reset": cum_before, "permanent_floor_pct_max": perm_pct_max,
+                                    "live_review_checked_n": prev_data.get("live_review_checked_n")})
         msg = "pauses cleared"
         if reset_peak:
             msg += f"; drawdown peak reset to {eq['equity']:.2f}; losing-streak count restarted"
-        if floor_reset:
-            msg += f"; equity floor re-based on the configured funded capital {net_funded:.2f}"
-        if keep_floor:
-            msg += ". EQUITY FLOOR STOP REMAINS: it needs a new config version that states the new baseline"
-        self.alert("resumed" if not keep_floor else "resume: equity floor still active", msg)
-        return "resumed" if not keep_floor else "equity floor still active"
+        if floor_day:
+            msg += f"; equity floor re-based on the configured funded capital {net_funded:.2f} (trigger {floor_day})"
+        if perm_day:
+            msg += f"; permanent floor restarted by config (trigger {perm_day})"
+        cur = float(eq["equity"]) if eq is not None else (float(prev["equity"]) if prev and prev["equity"] else None)
+        if cum_before is not None and cur is not None:
+            msg += f". Cumulative result since the first funding: {cur - float(cum_before):+.2f} on {float(cum_before):.2f}"
+        msg += "".join(f". {n}" for n in notes)
+        if keep:
+            msg += f". STILL STOPPED: {', '.join(keep)} ({describe_reasons(keep)})"
+        self.alert("resumed" if not keep else "resume: stop still active", msg)
+        return "resumed" if not keep else f"{', '.join(keep)} still active"
 
     def pause_reasons_text(self) -> str:
         st = self.rec.state()

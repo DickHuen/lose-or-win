@@ -28,11 +28,19 @@ if not defined ZIP (
   exit /b 1
 )
 echo Newest zip found: %ZIP%
+echo Its SHA-256 (compare it with the value sent with the release; stop if it differs):
+certutil -hashfile "%ZIP%" SHA256 | findstr /v /c:"hash" /c:"CertUtil"
 echo Installed version:
 type VERSION
 echo.
+echo An older or equal version is refused. If anything fails, the installed version is restored.
+echo.
+echo   UPGRADE      = install this zip
+echo   TEST-RESTORE = go-live check: install this zip (the same version is allowed), act as if it
+echo                  failed, and put the installed version back. Ends with RESTORE TEST PASSED.
 set "ANS="
-set /p "ANS=Type UPGRADE and press Enter to install it: "
+set /p "ANS=Type UPGRADE or TEST-RESTORE and press Enter: "
+if /i "%ANS%"=="TEST-RESTORE" (%PY% install.py --from-zip "%ZIP%" --test-restore & echo. & pause & exit /b)
 if /i not "%ANS%"=="UPGRADE" (
   echo Cancelled. Nothing was changed.
   pause

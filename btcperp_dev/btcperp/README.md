@@ -10,8 +10,8 @@ desktop notifications. It runs on the owner's Windows PC from Windows Task Sched
 | Shortcut | What it does |
 |---|---|
 | `1_Install.bat` | First install |
-| `Upgrade.bat` | Upgrade from the newest zip in Downloads (asks for `UPGRADE`) |
-| `Proxy_Key.bat` | Proxy key; the main wallet only signs |
+| `Upgrade.bat` | Upgrade from the newest zip in Downloads (asks for `UPGRADE`; `TEST-RESTORE` checks the automatic restore) |
+| `Proxy_Key.bat` | Proxy key; the main wallet only signs (N: hardware wallet only, asks for `HARDWARE`; O: another computer) |
 | `Edit_Secrets.bat` | Open .env in Notepad |
 | `2_Smoketest.bat` | Smoketest: YES / W (+ withdrawal probe) / R |
 | `Backtest.bat` | Backtest (asks for `CONFIRM` on the criteria the first time) |
@@ -41,14 +41,14 @@ other copy of the folder.
 | `snapshot` | Read-only exchange read for the dashboard (position, SL/TP, mark, equity). No orders, no state changes, no kill checks. Waits at most 5 s for the lock (skips if a run is busy); failures are logged, never alerted. |
 | `dashboard [--port N] [--no-browser]` | Local web dashboard on `http://127.0.0.1:8765` (loopback only). No lock, no exchange access; reads the database. Its "refresh" button runs `snapshot`. |
 | `schedule install\|remove\|list\|show [--dry-run] [--no-dashboard] [--upgrade]` | Windows Task Scheduler tasks under `\btcperp\`. Daily tasks are pinned to HKT (`+08:00`). `install` needs a passing full smoketest of this version with this proxy key; `--upgrade` re-registers tasks that already run from this folder. `show`/`list` also print the sleep and wake-timer settings. No lock. |
-| `proxykey new [--days N] [--offline] \| finish [--signature] \| status` | Create a proxy key here; the main wallet only signs the EIP-712 CreateProxy message, in a browser wallet (one-off page on 127.0.0.1:8766) or on another computer. Writes .env. |
-| `backtest download \| criteria \| confirm \| run` | See BACKTEST.md. `run` refuses until the owner has confirmed the current criteria file (SHA-256 recorded). Never trades; no lock. |
+| `proxykey new --owner 0x.. [--days N<=30] [--offline] \| finish [--signature] \| status` | Create a proxy key here; the main wallet (fixed at `new`) only signs the one EIP-712 CreateProxy message (Polymarket, chain 137), which the signer builds itself: in a hardware wallet through a one-off page on 127.0.0.1:8766, or on another computer from `sign_fields.txt` with its own copy of `perpbot/offline_sign.py` or `offline_sign/offline_sign.html`. Registration and the .env write run under the bot lock. An unfinished request is deleted after 1 hour. `status` lists every registered proxy key. |
+| `backtest download \| criteria \| confirm \| run` | See BACKTEST.md. `confirm` locks criteria, config, calendars, code, data end date, data hash and fee rate; `run` refuses any change and numbers the runs under a confirmation. Never trades; no lock. |
 | `backup` | SQLite backup (+config) into `data/backups/` (last 14 + first of each month kept). |
 | `status` | State, position, SL/TP, equity, drawdown, kill switches, last decision. |
 | `pause` / `unpause` | Stop new entries (position and SL/TP kept) / remove only that manual pause. |
 | `reasons` | Print the active pause reasons and what clears each one. |
 | `kill` | Close the position with a reduce-only order, cancel its TP/SL by id, and pause. |
-| `resume [--reset-peak]` | Clear pauses (only when the owner asks). A drawdown / losing-streak kill needs `--reset-peak` (exit code 6 without it): the peak is reset and the streak restarts. The equity floor needs a new config version stating `risk.equity_floor_reset_baseline_usd`. |
+| `resume [--reset-peak]` | Clear pauses (only when the owner asks). A drawdown / losing-streak kill needs `--reset-peak` (exit code 6 without it): the peak is reset and the streak restarts. The equity floor needs a new config version stating `risk.equity_floor_reset_baseline_usd` (≤ current equity) and `risk.equity_floor_reset_for` = the trigger date; the permanent floor needs one with `risk.permanent_floor_reset_for` = the trigger date. Each is single use. |
 | `selftest` | Run the unit tests (mocked exchange, no network). |
 | `smoketest [--no-trade] [--probe-withdrawal]` | Live minimum-size test (START_HERE.md section 4). Records the exchange's status for an unfillable FOK. The withdrawal probe runs only with the flag. |
 | `flowwatch [--minutes N]` | Record balances / deposit-withdrawal statuses while the owner makes a small deposit (only when flat). |
@@ -59,8 +59,10 @@ alert with the last log lines. Every alert is shown on the dashboard.
 
 After the run, once the lock is released, Windows toasts are sent (at most 5 per run), so a slow
 notification can never delay a trading action. Toasts use `notifications.windows_toast` (PowerShell WinRT,
-text passed by environment variables). `decide` / `manage` also ping the optional heartbeat URL
-(`HEALTHCHECK_PING_URL`), or `<url>/fail` on an error. Telegram is optional and off (`telegram.enabled`).
+text passed by environment variables). `decide` / `manage` also ping their optional heartbeat check
+(`HEALTHCHECK_DECIDE_URL` / `HEALTHCHECK_MANAGE_URL`, fallback `HEALTHCHECK_PING_URL`): `<url>/start` when the run
+starts, then `<url>` or `<url>/fail`. `/fail` is sent on an error, while a critical alert is unread, or while a
+hard stop is active. Telegram is optional and off (`telegram.enabled`).
 Exit codes: 0 ok, 1 error, 3 config / secrets / wrong folder, 4 lock busy, 5 selftest, 6 needs a typed
 confirmation.
 
@@ -101,7 +103,10 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
    deposits/withdrawals adjust the peak) -> close and pause; losing streak with cumulative loss of 8% of equity
    (a trade within +/-0.1% of equity at entry is a tie: it neither ends nor extends the streak, review D11)
    -> pause, keep SL/TP; equity below 75% of net funded capital -> close and hard stop (`resume` cannot clear
-   it; only a new config version that states the new baseline); a failed kill close is retried every run; pending deposits/withdrawals skip
+   it; only a new config version that states the new baseline and the trigger date); equity below 50% of all
+   capital ever funded (never re-based; review F1) -> close and stop for good (a config may never lower the %);
+   after 30 live trades, a rolling 30-trade expectancy below the backtest's review line (S9) -> pause new entries;
+   a failed kill close is retried every run; pending deposits/withdrawals skip
    the drawdown/floor checks and block entries; 25-trade size-weighted expectancy < 0 -> warning.
    Proxy key expiry alert 5 days ahead. (8%, 75% and the 30% notional cap are pending the owner's decision.)
 7. A missing position on one read is not trusted: closes are booked and leftover orders cancelled only with

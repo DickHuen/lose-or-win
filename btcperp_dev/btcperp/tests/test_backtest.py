@@ -114,9 +114,11 @@ def test_run_backtest_is_deterministic_and_writes_results(tmp_path, bt_cfg):
     assert set(r1["summaries"]) == set(bt.VARIANTS) and r1["verdict"] in ("PASS", "FAIL")
     assert len(r1["windows"]) == 2 and r1["summaries"]["A_live"]["full_trades_median"] > 5
     ids = [c["id"] for c in r1["criteria"]]
-    assert ids[:5] == ["C1", "C2", "C3", "C4", "C5"]
+    assert ids[:14] == ["C0a", "C0b", "C0c", "C1a", "C1b", "C1c", "C1d", "C2a", "C2b", "C3", "C4", "C5", "C6", "C7"]
     runs = (tmp_path / "out1" / "runs.csv").read_text().splitlines()
     assert len(runs) == 1 + len(bt.VARIANTS) * (2 * 2 + 2)
+    assert r1["selection"]["note"] and r1["data_quality"]["h1"]["missing"] == 0
+    assert set(r1["data_quality"]["slice_sha256"]) == {"1d", "4h", "1h", "funding"}
     assert (tmp_path / "out1" / "trades_A_live.csv").exists()
 
 
@@ -136,9 +138,8 @@ def _flat_hours(start: date, days: int, price: float) -> list[Candle]:
             for i in range(days * 24)]
 
 
-def _sim(cfg, h1, feats):
-    ds = bt.Dataset([], [], h1, [(day_start_ms(date(2021, 1, 1)), 0.0, 0.0)])
-    return bt.Simulator(cfg, ds, feats, 0.0005)
+def _sim(cfg, h1, feats, funding=None):
+    return bt.Simulator(cfg, h1, funding or [(day_start_ms(date(2021, 1, 1)), 0.0, 0.0)], feats, 0.0005)
 
 
 def test_sl_counts_first_when_one_candle_touches_both(bt_cfg):
@@ -151,6 +152,7 @@ def test_sl_counts_first_when_one_candle_touches_both(bt_cfg):
     t = res.trades[0]
     assert t.exit_reason == "SL" and t.exit_price < t.sl                      # stop hit first, minus exit slippage
     assert t.entry_price > 100.0                                              # entry slippage applied
+    assert not t.gap_fill
 
 
 def test_costs_follow_shadow_r(bt_cfg):
@@ -185,7 +187,7 @@ def test_drawdown_kill_pauses_then_resumes_after_pause_days(cfg_dict):
         k = day * 24 + 5
         h1[k] = Candle(h1[k].open_ms, 100.0, 100.0, 96.0, 100.0, 1.0, h1[k].close_ms)
     feats = {d0 + timedelta(days=i): _features(d0 + timedelta(days=i), 1, 60.0, 2.0, 100.0) for i in range(40)}
-    res = _sim(cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=35), 0, 10_000.0)
+    res = _sim(cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=35), 0, 10_000.0, ramp=True)
     assert res.kills["drawdown"] >= 1 and res.kill_log[0][1] == "drawdown"
     kill_day = date.fromisoformat(res.kill_log[0][0])
     pause = int(cfg.backtest.kill_pause_days)
@@ -225,6 +227,12 @@ def test_windows_and_criteria_evaluation(bt_cfg):
          "informational": True}]}
     res = bt.evaluate(crit, {"A_live": {"m": 1.0}, "C": {"m": 2.0}})
     assert res[0]["pass"] is True and res[1]["pass"] is False and res[1]["value"] == -1.0
+    rep = bt.evaluate({"rules": [{"id": "R", "text": "r", "metric": "m", "op": "report"},
+                                 {"id": "D", "text": "d", "scope": "data", "metric": "x", "op": "<=", "value": 1},
+                                 {"id": "T", "text": "t", "use_twin": True, "metric": "m", "op": ">", "value": 0}]},
+                      {"A_live": {"m": 1.0}, "A_live_stress": {"m": -1.0}}, {"x": 0.5})
+    assert rep[0]["informational"] and not rep[0]["pass"] and rep[0]["value"] == 1.0
+    assert rep[1]["pass"] is True and rep[2]["pass"] is False and rep[2]["value"] == -1.0
 
 
 def test_historical_calendar_loads_and_merges(cfg):
@@ -240,11 +248,14 @@ def test_historical_calendar_loads_and_merges(cfg):
     assert len(cpi_2023) == 12
 
 
-def test_cli_backtest_needs_confirmed_criteria(tmp_root, capsys):
+def test_cli_backtest_confirm_locks_everything_and_numbers_runs(tmp_root, capsys):
     import shutil
+
+    import yaml
 
     from perpbot.cli import EXIT_CONFIRM, Factories, main
     from perpbot.paths import Paths
+    from perpbot.storage import Store
     from perpbot.timeutil import FixedClock
 
     from conftest import make_env
@@ -252,8 +263,9 @@ def test_cli_backtest_needs_confirmed_criteria(tmp_root, capsys):
     root = Path(__file__).resolve().parent.parent
     for f in ("calendar_history.yaml", "backtest_criteria.yaml"):
         shutil.copy2(root / "config" / f, tmp_root / "config" / f)
-    import yaml
-
+    (tmp_root / "perpbot").mkdir()
+    for n in bt.MANIFEST_CODE:
+        shutil.copy2(root / "perpbot" / n, tmp_root / "perpbot" / n)
     cfgp = tmp_root / "config" / "config.yaml"
     data = yaml.safe_load(cfgp.read_text())
     data["backtest"].update({"first_window_start": "2021-01-10", "window_months": 3, "start_offsets_days": [0]})
@@ -261,25 +273,49 @@ def test_cli_backtest_needs_confirmed_criteria(tmp_root, capsys):
     make_env(tmp_root)
     paths = Paths(tmp_root)
     paths.ensure()
-    write_dataset(synthetic_dataset(date(2020, 1, 1), 480), paths.data_dir / "backtest")
+    more = synthetic_dataset(date(2020, 1, 1), 520)
+    cut = day_start_ms(date(2020, 1, 1) + timedelta(days=480))
+    first = bt.Dataset([c for c in more.daily if c.open_ms < cut], [c for c in more.h4 if c.open_ms < cut],
+                       [c for c in more.h1 if c.open_ms < cut], [x for x in more.funding if x[0] < cut])
+    write_dataset(first, paths.data_dir / "backtest")
     f = Factories(registered_root=lambda: None)
     clock = FixedClock(datetime(2021, 6, 1, tzinfo=UTC))
     assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == EXIT_CONFIRM
-    assert "NOT confirmed" in (main(["backtest", "criteria"], paths=paths, clock=clock, factories=f) == 0
-                               and capsys.readouterr().out)
     assert main(["backtest", "confirm"], paths=paths, clock=clock, factories=f) == 0
-    capsys.readouterr()
+    assert "CONFIRMED" in capsys.readouterr().out
     assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == 0
-    out = capsys.readouterr().out
-    assert "verdict" in out and "results:" in out
-    crit = tmp_root / "config" / "backtest_criteria.yaml"
-    crit.write_text(crit.read_text().replace("value: 30", "value: 3"))    # rules changed after confirmation
+    out1 = capsys.readouterr().out
+    assert "Run #1 under this confirmation" in out1
+    # more data downloaded later (appended): the fixed data end keeps the same slice -> allowed, numbered #2
+    write_dataset(more, paths.data_dir / "backtest")
+    assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == 0
+    assert "Run #2 under this confirmation" in capsys.readouterr().out
+    # any change to config, criteria or code is refused
+    data["backtest"]["start_offsets_days"] = [0, 7]
+    cfgp.write_text(yaml.safe_dump(data))
     assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == EXIT_CONFIRM
-    from perpbot.storage import Store
-
+    assert "config" in capsys.readouterr().out
+    data["backtest"]["start_offsets_days"] = [0]
+    cfgp.write_text(yaml.safe_dump(data))
+    crit = tmp_root / "config" / "backtest_criteria.yaml"
+    crit.write_text(crit.read_text().replace("value: 60", "value: 6"))
+    assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == EXIT_CONFIRM
+    assert "criteria" in capsys.readouterr().out
     s = Store(paths.db_file, clock, "x", "x")
-    assert [r["event"] for r in s.query("SELECT event FROM backtest_log ORDER BY id")] == ["criteria_confirmed", "run"]
+    assert [r["event"] for r in s.query("SELECT event FROM backtest_log ORDER BY id")] == ["criteria_confirmed", "run", "run"]
     s.close()
+
+
+def test_cli_backtest_fee_never_below_smoketest(tmp_root):
+    from perpbot.cli import real_fee_rate
+    from perpbot.paths import Paths
+
+    paths = Paths(tmp_root)
+    paths.ensure()
+    assert real_fee_rate(paths) is None
+    (paths.smoketest_dir / "smoketest_20261001000000.json").write_text(json.dumps(
+        {"ok": True, "results": [{"step": "fees", "ok": True, "detail": {"taker_fee_rate": 0.0007}}]}))
+    assert real_fee_rate(paths) == 0.0007
 
 
 def test_download_is_incremental(tmp_path, cfg):
@@ -303,3 +339,126 @@ def test_download_is_incremental(tmp_path, cfg):
     starts_1d = [c[1] for c in bn.calls if c[0] == "1d"]
     assert starts_1d[1] == starts_1d[0] + 5 * DAY_MS
     assert json.dumps(c2)
+
+
+# ---------------------------------------------------------------- review v1.3.0 items
+def test_bt1_gap_through_stop_fills_at_the_open(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 5, 100.0)
+    k = 24 + 3
+    h1[k] = Candle(h1[k].open_ms, 95.0, 95.5, 94.0, 95.0, 1.0, h1[k].close_ms)        # opens 5% down, below SL 97
+    feats = {d0: _features(d0, 1, 60.0, 2.0, 100.0)}
+    t = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=4), 0, 10_000.0).trades[0]
+    assert t.gap_fill and t.exit_reason == "SL"
+    assert t.exit_price == pytest.approx(95.0 * (1 - 10 / 1e4))                      # open minus exit slippage
+
+
+def test_bt6_isolated_loss_capped_at_margin(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 5, 100.0)
+    k = 24 + 3
+    h1[k] = Candle(h1[k].open_ms, 40.0, 40.0, 40.0, 40.0, 1.0, h1[k].close_ms)        # -60% gap
+    feats = {d0: _features(d0, 1, 60.0, 2.0, 100.0)}
+    t = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=4), 0, 10_000.0).trades[0]
+    assert t.exit_price == pytest.approx(t.entry_price * (1 - 1 / 3))                 # 3x isolated: -33% max
+
+
+def test_bt2_intraday_drawdown_is_counted(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 5, 100.0)
+    k = 24 + 6
+    h1[k] = Candle(h1[k].open_ms, 100.0, 100.0, 97.2, 100.0, 1.0, h1[k].close_ms)     # dips, recovers, no stop hit
+    feats = {d0: _features(d0, 1, 60.0, 2.0, 100.0)}
+    res = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=4), 0, 10_000.0)
+    t = res.trades[0]
+    dip = t.qty * (t.entry_price - 97.2)
+    assert res.max_dd_pct == pytest.approx(dip / 10_000.0 * 100.0, rel=0.05)
+    assert bt.run_metrics(res, 0.1)["max_drawdown_pct"] == res.max_dd_pct
+
+
+def test_bt3_stress_twin_costs_more_on_every_trade(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 12, 100.0)
+    for day in (2, 5, 8):
+        k = day * 24 + 4
+        h1[k] = Candle(h1[k].open_ms, 100.0, 107.0, 99.9, 106.0, 1.0, h1[k].close_ms)
+    funding = [(day_start_ms(d0) + i * 8 * HOUR_MS, 0.0003 if i % 2 else -0.0001, 0.0) for i in range(40)]
+    feats = {d0 + timedelta(days=i): _features(d0 + timedelta(days=i), 1 if i % 2 == 0 else -1, 60.0, 2.0, 100.0)
+             for i in range(11)}
+    live = _sim(bt_cfg, h1, feats, funding).run("A_live", d0, d0 + timedelta(days=11), 0, 10_000.0)
+    stress = _sim(bt_cfg, h1, feats, funding).run("A_live_stress", d0, d0 + timedelta(days=11), 0, 10_000.0)
+    assert len(live.trades) == len(stress.trades) >= 3
+    for a, b in zip(live.trades, stress.trades):
+        assert b.net_pnl < a.net_pnl
+
+
+def test_s6_windows_full_risk_full_period_ramp(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 5, 100.0)
+    feats = {d0: _features(d0, 1, 60.0, 20.0, 100.0)}                                  # wide stop: cap not binding
+    w = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=3), 0, 10_000.0, ramp=False).trades[0]
+    f = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=3), 0, 10_000.0, ramp=True).trades[0]
+    assert w.risk_usd == pytest.approx(2 * f.risk_usd, rel=0.01)
+
+
+def test_c0_gaps_while_holding_are_recorded(bt_cfg):
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 5, 100.0)
+    del h1[30:32]                                                                     # 2 hours missing on day 2
+    feats = {d0: _features(d0, 1, 60.0, 2.0, 100.0)}
+    res = _sim(bt_cfg, h1, feats).run("A_live", d0, d0 + timedelta(days=4), 0, 10_000.0)
+    assert [h for _, h in res.holding_gaps] == [2.0]
+    ds = bt.Dataset(h1[::24], h1[::4], h1, [(day_start_ms(d0), 0.0, 0.0)])
+    q = bt.data_quality(bt_cfg, ds, d0, d0 + timedelta(days=5))
+    assert q["h1"]["missing"] == 2 and q["h1"]["max_gap_hours"] == 2.0
+
+
+def test_s5_variant_selection_rules():
+    import yaml
+
+    crit = yaml.safe_load((Path(__file__).resolve().parent.parent / "config" / "backtest_criteria.yaml").read_text())
+
+    def summ(r_by, seg, exp=0.3, t=3.0):
+        return {"full_total_r_by_offset": r_by, "full_total_r_min": min(r_by.values()),
+                "segment_expectancy_r_median": seg, "full_expectancy_r_min": exp, "segments_positive": 3,
+                "t_stat_median_offset": t, "window_positive_share_median": 0.8, "window_return_pct_median": 3.0,
+                "window_max_drawdown_pct_max": 8.0, "floor_hits_total": 0, "full_trades_median": 100,
+                "full_max_drawdown_pct_max": 12.0, "drawdown_kills_full_median": 0, "holding_gap_hours_max": 0.0,
+                "holding_gap_hours_total_full_max": 0.0}
+
+    offs = {0: 10.0, 7: 10.0}
+    seg = {"a": 0.2, "b": 0.2, "c": 0.2}
+    better = {0: 20.0, 7: 20.0}
+    segb = {"a": 0.4, "b": 0.4, "c": 0.1}
+    sums = {n: summ(offs, seg) for n in bt.VARIANTS}
+    data = {"h1_missing_share": 0.0}
+    sel = bt.select_variant(crit, sums, data)
+    assert sel["live_variant"] == "A_live" and sel["qualified_replacements"] == []
+    sums["B_breakeven"] = summ(better, segb)
+    sums["B_breakeven_stress"] = summ(better, segb)
+    sel = bt.select_variant(crit, sums, data)
+    assert sel["live_variant"] == "A_live" and sel["qualified_replacements"] == ["B_breakeven"]
+    sums["A_live"] = summ(offs, seg, exp=-0.1)                                       # A_live fails C1a
+    sel = bt.select_variant(crit, sums, data)
+    assert sel["live_variant"] is None and "NOT approved automatically" in sel["note"]
+    sums["B_breakeven_stress"] = summ(offs, seg)                                     # (d) fails: stress not better
+    assert bt.select_variant(crit, sums, data)["qualified_replacements"] == []
+
+
+def test_i7_polymarket_replay_compares_trade_by_trade(bt_cfg):
+    from perpbot.config import config_from_dict
+
+    d0 = date(2021, 1, 1)
+    h1 = _flat_hours(d0, 40, 100.0)
+    ds = bt.Dataset([], [], h1, [(day_start_ms(d0), 0.0, 0.0)], pm_h1=list(h1))
+    feats = {d0 + timedelta(days=i): _features(d0 + timedelta(days=i), 1, 60.0, 2.0, 100.0) for i in range(40)}
+    cfg = config_from_dict({**bt_cfg.to_dict(), "backtest": {**bt_cfg.to_dict()["backtest"], "pm_replay_min_days": 10}})
+    rep = bt.pm_replay(cfg, ds, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0)
+    assert rep["available"] and rep["exit_agreement"] == 1.0
+    ds_short = bt.Dataset([], [], h1, ds.funding, pm_h1=h1[: 24 * 5])
+    assert bt.pm_replay(cfg, ds_short, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0)["available"] is False
+
+
+def test_calendar_history_is_marked_verified():
+    text = (Path(__file__).resolve().parent.parent / "config" / "calendar_history.yaml").read_text()
+    assert "verify:" not in text and "verified" in text

@@ -240,6 +240,13 @@ class Reporter:
         report["runs"] = {"slots": len(aud), "missed": [a for a in aud if a["status"] == "missed"],
                           "late": [a for a in aud if a["status"] == "late"], "errors": errs}
         report["decision_days"] = self._decision_days(start_d, end_d, utc_day(now), f"{y:04d}-{m:02d}")
+        report["cumulative_all_vs_complete_months"] = self._all_vs_complete(end_d, utc_day(now))
+        basis = sorted(abs(float(r["data"]["basis_bps"])) for r in self.store.query(
+            "SELECT data FROM market_snapshots WHERE ts_ms >= ? AND ts_ms < ?", [start_ms, end_ms])
+            if isinstance(r["data"], dict) and r["data"].get("basis_bps") is not None)
+        report["basis_bps"] = {"samples": len(basis), "abs_p50": basis[len(basis) // 2] if basis else None,
+                               "abs_p99": basis[min(len(basis) - 1, int(0.99 * (len(basis) - 1)))] if basis else None,
+                               "note": "Polymarket mark vs Binance spot (review v1.3.0 R3)"}
         eq = self._equity_rows(start_ms, end_ms)
         report["equity"] = {"start": eq[0]["equity"] if eq else None, "end": eq[-1]["equity"] if eq else None,
                             "max_drawdown_pct": max_drawdown([r["equity"] for r in eq])}
@@ -256,7 +263,29 @@ class Reporter:
         self.e.tg.send_document(mpath, caption=f"btcperp monthly report {report['month']}")
         return f"monthly report: {mpath}\njson: {jpath}"
 
-    def _decision_days(self, start_d: date, end_d: date, today: date, month: str) -> dict[str, Any]:
+    def _all_vs_complete(self, end_d: date, today: date) -> dict[str, Any]:
+        """Review v1.3.0 V17: any parameter proposal shows all months and complete months only."""
+        first = self.store.query("SELECT MIN(utc_day) AS d FROM decisions")
+        if not first or not first[0]["d"]:
+            return {"all_months": {"trades": 0}, "complete_months_only": {"trades": 0}, "incomplete_months": []}
+        d0 = date.fromisoformat(first[0]["d"])
+        months, cur = [], date(d0.year, d0.month, 1)
+        while cur < end_d:
+            nxt = date(cur.year + (cur.month == 12), cur.month % 12 + 1, 1)
+            months.append((cur, nxt))
+            cur = nxt
+        incomplete = [f"{a.year:04d}-{a.month:02d}" for a, b in months
+                      if self._decision_days(a, b, today, f"{a.year:04d}-{a.month:02d}", alert=False)["incomplete_month"]]
+        trades = [t for t in self.e.rec.closed_trades() if int(t["closed_ts_ms"]) < day_start_ms(end_d)]
+
+        def month_of(t: dict[str, Any]) -> str:
+            return datetime.fromtimestamp(int(t["closed_ts_ms"]) / 1000, tz=UTC).strftime("%Y-%m")
+
+        return {"all_months": trade_stats(trades),
+                "complete_months_only": trade_stats([t for t in trades if month_of(t) not in incomplete]),
+                "incomplete_months": incomplete}
+
+    def _decision_days(self, start_d: date, end_d: date, today: date, month: str, alert: bool = True) -> dict[str, Any]:
         """Review v1.2.0 item 17: UTC days without an on-time decision (late close-only decisions count as missed)."""
         first = self.store.query("SELECT MIN(utc_day) AS d FROM decisions")
         first_d = date.fromisoformat(first[0]["d"]) if first and first[0]["d"] else today
@@ -268,7 +297,7 @@ class Reporter:
         missed = [d.isoformat() for d in days if d.isoformat() not in on_time]
         limit = int(self.cfg.reports.max_missed_decision_days)
         incomplete = len(missed) > limit
-        if incomplete:
+        if incomplete and alert:
             self.e.alert("incomplete month", f"{month}: no on-time decision on {len(missed)} days ({', '.join(missed)}); "
                          f"the month is marked incomplete - do not judge the strategy on it",
                          dedupe_key=f"incomplete_month:{month}")
@@ -286,7 +315,8 @@ class Reporter:
             L = L[:3] + ["**INCOMPLETE MONTH: no on-time decision on "
                          f"{len(r['decision_days']['missed_days'])} days - do not judge the strategy on this month.**",
                          ""] + L[3:]
-        for sec in ("decision_days", "entry_attempts", "shadow_vs_live", "equity", "runs", "calendar_warnings"):
+        for sec in ("decision_days", "cumulative_all_vs_complete_months", "basis_bps", "entry_attempts", "shadow_vs_live",
+                    "equity", "runs", "calendar_warnings"):
             L += [f"## {sec}", "```", json.dumps(r[sec], indent=2, default=str), "```"]
         L += ["", r["calendar_check_reminder"]]
         return "\n".join(L) + "\n"

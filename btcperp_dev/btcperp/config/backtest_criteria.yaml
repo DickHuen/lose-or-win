@@ -1,60 +1,57 @@
-# Backtest pass/fail rules (review B3 / v1.2.0 item 1). DRAFT written by the developer BEFORE any run.
-# The owner (after the committee has reviewed it) confirms THIS file by typing CONFIRM in
-# windows\Backtest.bat; the file's SHA-256 is recorded and `backtest run` refuses to run on any other
-# version of the file. Changing a rule means a new version of this file and a new confirmation.
-# Metrics are computed by perpbot/backtest.py (aggregate()); all on the primary variant unless stated.
-criteria_version: "draft-1 (2026-09-26)"
+# Backtest pass/fail rules (review B3). draft-2: the committee's v1.3.0 ruling (C0-C7, I1-I7) as adopted by the
+# developer (REVIEW_v1.3.0.md explains the one adjusted rule, C0b/C0c).
+# The owner confirms with `backtest confirm` (windows\Backtest.bat, type CONFIRM) only AFTER the committee has
+# reviewed this file. The confirmation locks this file, the strategy / risk / backtest config, both calendars, the
+# code, the data slice (fixed end date) and the fee rate (review R1); `backtest run` refuses any change and numbers
+# each run under the confirmation - the committee uses run #1.
+# Everything is on the primary variant A_live unless stated; `use_twin` reads its stress twin (A_live_stress).
+criteria_version: "draft-2 (2026-09-27)"
 primary_variant: A_live
 rules:
-  - id: C1
-    text: "Full period (2020-10 onward), EVERY start offset: size-weighted expectancy after all costs > 0 R"
-    metric: full_expectancy_r_min
-    op: ">"
-    value: 0
-  - id: C2
-    text: "6-month windows with a positive net return: median share over the start offsets >= 50%"
-    metric: window_positive_share_median
-    op: ">="
-    value: 0.5
-  - id: C3
-    text: "Worst max drawdown in any 6-month window / start offset <= 20% (kill switch 15% + gap risk)"
-    metric: window_max_drawdown_pct_max
-    op: "<="
-    value: 20
-  - id: C4
-    text: "Equity floor (-25% of starting equity) never hit, in any window or full-period run"
-    metric: floor_hits_total
-    op: "=="
-    value: 0
-  - id: C5
-    text: "Enough trades to judge: full period, median over start offsets >= 30 trades"
-    metric: full_trades_median
-    op: ">="
-    value: 30
-  # ---- informational (reported, not part of the verdict)
-  - id: I1
-    informational: true
-    text: "Hybrid adds value over the control (|score| < 30 = flat): A_live minus C_control, full-period total R (median)"
-    metric: full_total_r_median
-    metric_minus: {variant: C_control, metric: full_total_r_median}
-    op: ">"
-    value: 0
-  - id: I2
-    informational: true
-    text: "Calendar sensitivity: A_live minus A_live_noevents, full-period expectancy R (min over offsets)"
-    metric: full_expectancy_r_min
-    metric_minus: {variant: A_live_noevents, metric: full_expectancy_r_min}
-    op: ">"
-    value: -1000
-  - id: I3
-    informational: true
-    text: "Losing-streak loss, 99th percentile over all runs (% of equity) - for reviewing the 8% kill"
-    metric: streak_loss_pct_p99
-    op: "<="
-    value: 8
-  - id: I4
-    informational: true
-    text: "Share of trades capped by the 30% notional cap (median over offsets) - for reviewing the 30% cap"
-    metric: notional_cap_binding_share_median
-    op: "<="
-    value: 1
+  # ---- C0 data completeness (review R2)
+  - {id: C0a, scope: data, metric: h1_missing_share, op: "<=", value: 0.001,
+     text: "1h candles missing over the test period <= 0.1%"}
+  - {id: C0b, metric: holding_gap_hours_max, op: "<=", value: 3,
+     text: "No gap longer than 3 h in 1h data while a position is open (each gap is filled conservatively: worse of SL and next open)"}
+  - {id: C0c, metric: holding_gap_hours_total_full_max, op: "<=", value: 6,
+     text: "Total missing hours while holding, per full-period run (worst offset) <= 6 h"}
+  # ---- C1 edge (all four)
+  - {id: C1a, metric: full_expectancy_r_min, op: ">=", value: 0.05,
+     text: "Full period, EVERY start offset: size-weighted expectancy after costs >= +0.05 R"}
+  - {id: C1b, use_twin: true, metric: full_expectancy_r_min, op: ">", value: 0,
+     text: "Stress twin (fees x2, 30 bps exit slippage, paid funding x2), EVERY offset: expectancy > 0 R"}
+  - {id: C1c, metric: segments_positive, op: ">=", value: 2,
+     text: "Of the 3 segments (2020-10..2022-09, 2022-10..2024-09, 2024-10..2026-09), >= 2 with offset-median expectancy > 0 R"}
+  - {id: C1d, metric: t_stat_median_offset, op: ">=", value: 2.0,
+     text: "Median-offset full run: t-statistic of per-trade R >= 2.0"}
+  # ---- C2-C7
+  - {id: C2a, metric: window_positive_share_median, op: ">", value: 0.5,
+     text: "6-month windows with a positive return: median share over offsets > 50%"}
+  - {id: C2b, metric: window_return_pct_median, op: ">", value: 0,
+     text: "Median 6-month window return > 0%"}
+  - {id: C3, metric: window_max_drawdown_pct_max, op: "<=", value: 20,
+     text: "Worst intraday (hourly) max drawdown in any window / offset <= 20%"}
+  - {id: C4, metric: floor_hits_total, op: "==", value: 0,
+     text: "Equity floor (-25% of starting equity) never hit"}
+  - {id: C5, metric: full_trades_median, op: ">=", value: 60,
+     text: "Full period: median trades over offsets >= 60"}
+  - {id: C6, metric: full_max_drawdown_pct_max, op: "<=", value: 25,
+     text: "Full period incl. automatic resumes: worst intraday max drawdown over offsets <= 25%"}
+  - {id: C7, metric: drawdown_kills_full_median, op: "<=", value: 3,
+     text: "Drawdown kill-switch triggers per full-period run: median over offsets <= 3"}
+  # ---- informational
+  - {id: I1, informational: true, metric: full_total_r_median, metric_minus: {variant: C_control, metric: full_total_r_median},
+     op: ">", value: 0, text: "Hybrid adds value: A_live minus C_control, full-period total R (median)"}
+  - {id: I2, metric: full_expectancy_r_min, metric_minus: {variant: A_live_noevents, metric: full_expectancy_r_min},
+     op: report, text: "Calendar sensitivity: A_live minus A_live_noevents, expectancy R (min over offsets) - value only"}
+  - {id: I3a, metric: streak_loss_pct_p99, op: report, text: "Losing-streak loss p99 (% of equity), with kill switches"}
+  - {id: I3b, variant: A_live_nokill, metric: streak_loss_pct_p99, op: report,
+     text: "Losing-streak loss p99 WITHOUT kill switches (BT4: not truncated by the 8% kill)"}
+  - {id: I4, informational: true, metric: notional_cap_binding_share_median, op: "<=", value: 0.5,
+     text: "Share of trades capped by the 30% notional cap (median) <= 0.5 - else review the 30% cap"}
+  - {id: I5, informational: true, metric: short_all_offsets_negative, op: "==", value: false,
+     text: "Short trades: expectancy negative at every offset? (true = committee discussion, no automatic change)"}
+  - {id: I6, metric: rolling_expectancy_r_p5, op: report,
+     text: "Rolling 30-trade expectancy, 5th percentile (R) - becomes the live review line (S9)"}
+  - {id: I7, informational: true, scope: data, metric: pm_exit_agreement, op: ">=", value: 0.9,
+     text: "Polymarket-candle replay vs Binance: same exit reason and day for >= 90% of trades (where data exists)"}

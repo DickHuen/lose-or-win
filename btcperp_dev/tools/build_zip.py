@@ -14,12 +14,13 @@ DEV = Path(__file__).resolve().parent.parent
 SRC = DEV / "btcperp"
 DIST = DEV / "dist"
 TOP_FILES = ["run.py", "install.py", "requirements.txt", "VERSION", "README.md", "START_HERE.md", "API_NOTES.md",
-             "CHANGELOG.md", "REVIEW_v1.1.0.md", "REVIEW_v1.2.0.md", "BACKTEST.md", ".env.example", "config/config.yaml",
+             "CHANGELOG.md", "REVIEW_v1.1.0.md", "REVIEW_v1.2.0.md", "REVIEW_v1.3.0.md", "BACKTEST.md", ".env.example",
+             "offline_sign/offline_sign.html", "config/config.yaml",
              "config/calendar.yaml", "config/calendar_history.yaml", "config/backtest_criteria.yaml"]
 CODE_DIRS = ["perpbot", "tests"]
 BAT_DIR = "windows"                      # Windows shortcuts: packaged with CRLF line endings
 FORBIDDEN_PARTS = {".env", "data", "logs", "venv", "__pycache__", ".git", ".pytest_cache"}
-FIXED_TIME = (2026, 9, 26, 0, 0, 0)
+FIXED_TIME = (2026, 9, 27, 0, 0, 0)
 
 
 def collect() -> list[str]:

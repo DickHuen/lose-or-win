@@ -108,7 +108,8 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
                    if eq else None),
         "limits": {"kill_drawdown_pct": cfg.risk.kill_drawdown_pct, "kill_losing_streak_pct": cfg.risk.kill_losing_streak_pct,
                    "equity_floor_pct": cfg.risk.equity_floor_pct_of_net_funded, "risk_per_trade_pct": cfg.risk.risk_per_trade_pct,
-                   "notional_cap_pct": cfg.risk.notional_cap_pct_equity, "leverage": cfg.risk.leverage},
+                   "notional_cap_pct": cfg.risk.notional_cap_pct_equity, "leverage": cfg.risk.leverage,
+                   "permanent_floor_pct": cfg.risk.permanent_floor_pct_of_cumulative_funded},
         "position": position,
         "open_trade": ({k: open_t.get(k) for k in ("direction", "qty", "entry_price", "entry_utc_day", "sl_price", "tp_price",
                                                   "initial_risk_usd", "score", "effective_fraction", "entry_ts_ms")}
@@ -319,7 +320,7 @@ function render(d){
  $("equity").textContent=e?f(e.equity):"–";$("eqsub").textContent=e?("錢包 "+f(e.wallet)+" ・ 未實現 "+f(e.upnl)+" ・ 高水位 "+f(e.peak)):"未有資料";
  $("dd").textContent=e?f(e.drawdown_pct)+"%":"–";if(e)bar($("ddbar"),e.drawdown_pct||0,L.kill_drawdown_pct);$("ddsub").textContent="殺停線 "+L.kill_drawdown_pct+"%";
  $("streak").textContent=f(k.losing_streak_pct||0)+"%";bar($("stbar"),k.losing_streak_pct||0,L.kill_losing_streak_pct);$("stsub").textContent=(k.losing_streak_trades||0)+" 筆連虧 ・ 停新倉線 "+L.kill_losing_streak_pct+"%";
- $("floor").textContent=k.equity_floor?f(k.equity_floor):"–";$("floorsub").textContent="淨投入本金 "+f(k.net_funded)+" 的 "+L.equity_floor_pct+"% ・ 跌穿即硬停";
+ $("floor").textContent=k.equity_floor?f(k.equity_floor):"–";$("floorsub").textContent="淨投入本金 "+f(k.net_funded)+" 的 "+L.equity_floor_pct+"% ・ 跌穿即硬停"+(k.permanent_floor?" ・ 永久底線 "+f(k.permanent_floor)+"（累計投入 "+f(k.cum_funded)+" 的 "+L.permanent_floor_pct+"%）":"");
  const P=d.position,T=d.open_trade;let h="";
  if(P&&P.position){const p=P.position;h+="<div>方向</div><div>"+dir(p.size>0?1:-1)+"</div><div>數量</div><div>"+f(Math.abs(p.size),4)+" BTC</div>"+
   "<div>入場價</div><div>"+f(p.entry_price)+"</div><div>標記價</div><div>"+f(P.mark)+"</div>"+
