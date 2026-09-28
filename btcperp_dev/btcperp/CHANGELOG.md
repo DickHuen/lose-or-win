@@ -3,6 +3,18 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.4.1 - 2026-09-28 (config 1.4.0) - Windows install fix
+
+- **Fix:** on the owner's Windows PC, `1_Install.bat` stopped with `INSTALL FAIL`. One test,
+  `test_no_cancel_all_or_auto_cancel_used`, read the bot's source files without naming UTF-8. Windows then reads
+  them as cp1252, which cannot decode the Chinese text in the dashboard. The bot's own code already names UTF-8
+  everywhere. All 61 such reads and writes in the tests, and the lock file, now say `encoding="utf-8"`.
+- **New test** `test_every_text_file_access_names_utf8`: fails on any text-file access without an explicit
+  encoding, so this is caught on Linux too.
+- No change to trading logic or config.
+- **Tests:** 252.
+- **From a failed v1.4.0 install:** put this zip in Downloads, run `windows\Upgrade.bat` and type `UPGRADE`.
+
 ## 1.4.0 - 2026-09-27 (config 1.4.0) - committee review of v1.3.0
 
 All items the developer agreed with, as the owner decided ("change what you agree with; decide the rest").

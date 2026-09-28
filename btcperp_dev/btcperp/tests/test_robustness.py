@@ -73,10 +73,46 @@ def test_short_trade_full_cycle(world):
 def test_no_cancel_all_or_auto_cancel_used():
     from pathlib import Path
 
-    src = "".join(p.read_text() for p in (Path(__file__).resolve().parent.parent / "perpbot").rglob("*.py"))
+    src = "".join(p.read_text(encoding="utf-8") for p in (Path(__file__).resolve().parent.parent / "perpbot").rglob("*.py"))
     for forbidden in ("cancel_all_orders(", "arm_auto_cancel(", "disarm_auto_cancel(", "/v1/trade/orders/all",
                       "update_margin("):
         assert forbidden not in src
+
+
+def test_every_text_file_access_names_utf8():
+    """Windows reads and writes text as cp1252 unless told otherwise, and the code contains Chinese text. Every
+    read_text / write_text / open in text mode must say encoding="utf-8" (found on the owner's PC, v1.4.0)."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    files = [*sorted((root / "perpbot").rglob("*.py")), *sorted((root / "tests").rglob("*.py")),
+             root / "install.py", root / "run.py"]
+    modes = set("rwxab+t")
+    bad = []
+    for f in files:
+        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if not isinstance(n, ast.Call):
+                continue
+            kw = {k.arg for k in n.keywords}
+            fn = n.func
+            if "encoding" in kw:
+                continue
+            if isinstance(fn, ast.Attribute) and fn.attr in ("read_text", "write_text"):
+                bad.append(f"{f.name}:{n.lineno} {fn.attr}")
+                continue
+            mode = None
+            if isinstance(fn, ast.Name) and fn.id == "open":
+                mode = n.args[1].value if len(n.args) > 1 and isinstance(n.args[1], ast.Constant) else "r"
+            elif (isinstance(fn, ast.Attribute) and fn.attr == "open" and n.args and isinstance(n.args[0], ast.Constant)
+                  and isinstance(n.args[0].value, str) and set(n.args[0].value) <= modes):
+                mode = n.args[0].value                                  # Path.open("a")
+            for k in n.keywords:
+                if k.arg == "mode" and isinstance(k.value, ast.Constant):
+                    mode = k.value.value
+            if mode is not None and "b" not in mode:
+                bad.append(f"{f.name}:{n.lineno} open({mode!r})")
+    assert bad == [], bad
 
 
 # ------------------------------------------------------------------ SDK wire parsing

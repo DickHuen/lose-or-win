@@ -340,7 +340,7 @@ def test_e_parameters_pending_user_decision(cfg):
     assert cfg.risk.notional_cap_pct_equity == 30
     assert cfg.risk.kill_losing_streak_pct == 8
     assert cfg.risk.equity_floor_pct_of_net_funded == 75
-    text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text()
+    text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(encoding="utf-8")
     assert text.count("PENDING USER DECISION") >= 3
 
 

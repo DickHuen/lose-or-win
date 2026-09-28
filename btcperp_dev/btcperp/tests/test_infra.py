@@ -65,7 +65,7 @@ def test_strategy_code_has_no_hardcoded_strategy_numbers():
     root = Path(__file__).resolve().parent.parent / "perpbot"
     allowed = {0.0, 1.0, 2.0, 4.0, 100.0, 3_600_000.0, 1e-9, 1e-12}
     for name in ("strategy.py", "risk.py"):
-        toks = tokenize.generate_tokens(io.StringIO((root / name).read_text()).readline)
+        toks = tokenize.generate_tokens(io.StringIO((root / name).read_text(encoding="utf-8")).readline)
         nums = {float(t.string.replace("_", "")) for t in toks if t.type == tokenize.NUMBER}
         assert nums <= allowed, f"{name}: unexpected numeric literals {sorted(nums - allowed)}"
 
@@ -82,7 +82,7 @@ def test_logging_redacts_secrets(tmp_path):
         log.exception("failure")
     for h in logging.getLogger().handlers:
         h.flush()
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "super-secret-value" not in text and "ab" * 32 not in text and "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in text
     assert "***" in text
 
@@ -143,9 +143,9 @@ def _factories(ex_holder, tg):
 def _setup_cli(tmp_root):
     make_env(tmp_root)
     cfg_path = tmp_root / "config" / "config.yaml"
-    data = yaml.safe_load(cfg_path.read_text())
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     data["lock"]["wait_seconds"] = 0.3
-    cfg_path.write_text(yaml.safe_dump(data))
+    cfg_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     clock = FixedClock(hkt(2026, 10, 5, 12, 30))
     ex = MockExchange(clock=clock)
     ex.proxy_info = type(ex.proxy_info)("0xOWNER", "0xP", None)
@@ -173,7 +173,7 @@ def test_cli_pause_resume_status_kill(tmp_root, capsys):
     assert all(r["status"] == "ok" for r in ends)
     s.close()
     raw = b"".join(p.read_bytes() for p in (tmp_root / "data").glob("btcperp.sqlite3*"))   # db + WAL
-    for line in (tmp_root / ".env").read_text().splitlines():
+    for line in (tmp_root / ".env").read_text(encoding="utf-8").splitlines():
         key, _, value = line.partition("=")
         if key in ("PM_PROXY_PRIVATE_KEY", "PM_PROXY_SECRET", "TELEGRAM_BOT_TOKEN"):
             assert value.encode() not in raw, key
@@ -201,13 +201,13 @@ def test_cli_lock_prevents_concurrent_runs(tmp_root):
 
 def test_cli_config_error(tmp_root):
     paths, clock, holder, tg = _setup_cli(tmp_root)
-    (tmp_root / "config" / "config.yaml").write_text("config_version: '1'\n")
+    (tmp_root / "config" / "config.yaml").write_text("config_version: '1'\n", encoding="utf-8")
     assert main(["status"], paths=paths, clock=clock, factories=_factories(holder, tg)) == 3
 
 
 def test_cli_missing_secrets_fails_trading_commands(tmp_root):
     paths, clock, holder, tg = _setup_cli(tmp_root)
-    (tmp_root / ".env").write_text("TELEGRAM_CHAT_ID=42\n")
+    (tmp_root / ".env").write_text("TELEGRAM_CHAT_ID=42\n", encoding="utf-8")
     assert main(["manage"], paths=paths, clock=clock, factories=_factories(holder, tg)) == 1
 
 
@@ -220,10 +220,10 @@ def test_cli_smoketest_with_mock(tmp_root):
     # resting order would fill at the mock's bid if marketable; offset keeps it resting
     rc = main(["smoketest"], paths=paths, clock=clock, factories=_factories(holder, tg))
     out = list((tmp_root / "data" / "smoketest").glob("smoketest_*.json"))
-    assert out and rc == 0, out[0].read_text()[:3000] if out else "no smoketest output"
+    assert out and rc == 0, out[0].read_text(encoding="utf-8")[:3000] if out else "no smoketest output"
     import json as _json
 
-    assert _json.loads(out[0].read_text())["ok"] is True
+    assert _json.loads(out[0].read_text(encoding="utf-8"))["ok"] is True
 
 
 def test_monthly_only_first_sunday(tmp_root, capsys):

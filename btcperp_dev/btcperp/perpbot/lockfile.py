@@ -34,7 +34,7 @@ class FileLock:
 
     def acquire(self, wait_seconds: float, poll: float = 1.0) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+")  # noqa: SIM115
+        self._fh = open(self.path, "a+", encoding="utf-8")  # noqa: SIM115
         deadline = time.monotonic() + wait_seconds
         while not self._try():
             if time.monotonic() >= deadline:

@@ -110,12 +110,12 @@ def test_run_backtest_is_deterministic_and_writes_results(tmp_path, bt_cfg):
     r1 = bt.run_backtest(bt_cfg, root, tmp_path / "data", tmp_path / "out1", cal, 0.0005, progress=lambda *a: None)
     r2 = bt.run_backtest(bt_cfg, root, tmp_path / "data", tmp_path / "out2", cal, 0.0005, progress=lambda *a: None)
     assert r1["result_sha256"] == r2["result_sha256"]
-    assert (tmp_path / "out1" / "summary.md").read_text().startswith("# btcperp backtest - verdict:")
+    assert (tmp_path / "out1" / "summary.md").read_text(encoding="utf-8").startswith("# btcperp backtest - verdict:")
     assert set(r1["summaries"]) == set(bt.VARIANTS) and r1["verdict"] in ("PASS", "FAIL")
     assert len(r1["windows"]) == 2 and r1["summaries"]["A_live"]["full_trades_median"] > 5
     ids = [c["id"] for c in r1["criteria"]]
     assert ids[:14] == ["C0a", "C0b", "C0c", "C1a", "C1b", "C1c", "C1d", "C2a", "C2b", "C3", "C4", "C5", "C6", "C7"]
-    runs = (tmp_path / "out1" / "runs.csv").read_text().splitlines()
+    runs = (tmp_path / "out1" / "runs.csv").read_text(encoding="utf-8").splitlines()
     assert len(runs) == 1 + len(bt.VARIANTS) * (2 * 2 + 2)
     assert r1["selection"]["note"] and r1["data_quality"]["h1"]["missing"] == 0
     assert set(r1["data_quality"]["slice_sha256"]) == {"1d", "4h", "1h", "funding"}
@@ -267,9 +267,9 @@ def test_cli_backtest_confirm_locks_everything_and_numbers_runs(tmp_root, capsys
     for n in bt.MANIFEST_CODE:
         shutil.copy2(root / "perpbot" / n, tmp_root / "perpbot" / n)
     cfgp = tmp_root / "config" / "config.yaml"
-    data = yaml.safe_load(cfgp.read_text())
+    data = yaml.safe_load(cfgp.read_text(encoding="utf-8"))
     data["backtest"].update({"first_window_start": "2021-01-10", "window_months": 3, "start_offsets_days": [0]})
-    cfgp.write_text(yaml.safe_dump(data))
+    cfgp.write_text(yaml.safe_dump(data), encoding="utf-8")
     make_env(tmp_root)
     paths = Paths(tmp_root)
     paths.ensure()
@@ -292,13 +292,13 @@ def test_cli_backtest_confirm_locks_everything_and_numbers_runs(tmp_root, capsys
     assert "Run #2 under this confirmation" in capsys.readouterr().out
     # any change to config, criteria or code is refused
     data["backtest"]["start_offsets_days"] = [0, 7]
-    cfgp.write_text(yaml.safe_dump(data))
+    cfgp.write_text(yaml.safe_dump(data), encoding="utf-8")
     assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == EXIT_CONFIRM
     assert "config" in capsys.readouterr().out
     data["backtest"]["start_offsets_days"] = [0]
-    cfgp.write_text(yaml.safe_dump(data))
+    cfgp.write_text(yaml.safe_dump(data), encoding="utf-8")
     crit = tmp_root / "config" / "backtest_criteria.yaml"
-    crit.write_text(crit.read_text().replace("value: 60", "value: 6"))
+    crit.write_text(crit.read_text(encoding="utf-8").replace("value: 60", "value: 6"), encoding="utf-8")
     assert main(["backtest", "run"], paths=paths, clock=clock, factories=f) == EXIT_CONFIRM
     assert "criteria" in capsys.readouterr().out
     s = Store(paths.db_file, clock, "x", "x")
@@ -314,7 +314,7 @@ def test_cli_backtest_fee_never_below_smoketest(tmp_root):
     paths.ensure()
     assert real_fee_rate(paths) is None
     (paths.smoketest_dir / "smoketest_20261001000000.json").write_text(json.dumps(
-        {"ok": True, "results": [{"step": "fees", "ok": True, "detail": {"taker_fee_rate": 0.0007}}]}))
+        {"ok": True, "results": [{"step": "fees", "ok": True, "detail": {"taker_fee_rate": 0.0007}}]}), encoding="utf-8")
     assert real_fee_rate(paths) == 0.0007
 
 
@@ -416,7 +416,7 @@ def test_c0_gaps_while_holding_are_recorded(bt_cfg):
 def test_s5_variant_selection_rules():
     import yaml
 
-    crit = yaml.safe_load((Path(__file__).resolve().parent.parent / "config" / "backtest_criteria.yaml").read_text())
+    crit = yaml.safe_load((Path(__file__).resolve().parent.parent / "config" / "backtest_criteria.yaml").read_text(encoding="utf-8"))
 
     def summ(r_by, seg, exp=0.3, t=3.0):
         return {"full_total_r_by_offset": r_by, "full_total_r_min": min(r_by.values()),
@@ -460,5 +460,5 @@ def test_i7_polymarket_replay_compares_trade_by_trade(bt_cfg):
 
 
 def test_calendar_history_is_marked_verified():
-    text = (Path(__file__).resolve().parent.parent / "config" / "calendar_history.yaml").read_text()
+    text = (Path(__file__).resolve().parent.parent / "config" / "calendar_history.yaml").read_text(encoding="utf-8")
     assert "verify:" not in text and "verified" in text

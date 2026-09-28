@@ -207,7 +207,7 @@ def test_v17_monthly_report_all_vs_complete_months_and_r3_basis(world, tmp_path)
     paths = Paths(tmp_path / "root")
     paths.ensure()
     Reporter(w.engine(), paths).monthly("2026-10")
-    data = json.loads((paths.reports_dir / "monthly" / "monthly_2026-10.json").read_text())
+    data = json.loads((paths.reports_dir / "monthly" / "monthly_2026-10.json").read_text(encoding="utf-8"))
     c = data["cumulative_all_vs_complete_months"]
     assert c["incomplete_months"] == ["2026-10"] and c["all_months"]["trades"] == 1
     assert c["complete_months_only"]["trades"] == 0
@@ -241,12 +241,12 @@ def _install_mod(root):
 
 def _old_install(root):
     (root / "perpbot").mkdir(parents=True)
-    (root / "perpbot" / "old.py").write_text("OLD = 1\n")
+    (root / "perpbot" / "old.py").write_text("OLD = 1\n", encoding="utf-8")
     (root / "config").mkdir()
-    (root / "config" / "config.yaml").write_text("old: 1\n")
-    (root / "VERSION").write_text("1.3.0\n")
-    (root / "requirements.txt").write_text("\n")
-    (root / ".env").write_text("SECRET=keep\n")
+    (root / "config" / "config.yaml").write_text("old: 1\n", encoding="utf-8")
+    (root / "VERSION").write_text("1.3.0\n", encoding="utf-8")
+    (root / "requirements.txt").write_text("\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=keep\n", encoding="utf-8")
     (root / "data").mkdir()
     (root / "data" / "btcperp.sqlite3").write_bytes(b"db")
 
@@ -277,7 +277,7 @@ def test_u1_unreadable_task_scheduler_changes_nothing(tmp_path, monkeypatch):
         mod.existing_tasks()
     monkeypatch.setattr("sys.argv", ["install.py", "--from-zip", str(_zip(tmp_path / "n.zip", "1.4.0"))])
     assert mod.main() == 1
-    assert (root / "VERSION").read_text() == "1.3.0\n" and not (root / "perpbot" / "new.py").exists()
+    assert (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n" and not (root / "perpbot" / "new.py").exists()
 
 
 def test_u3_older_or_equal_zip_is_refused(tmp_path, monkeypatch, capsys):
@@ -289,7 +289,7 @@ def test_u3_older_or_equal_zip_is_refused(tmp_path, monkeypatch, capsys):
         assert mod.main() == 1
     out = capsys.readouterr().out
     assert "not newer" in out and "SHA-256" in out
-    assert (root / "VERSION").read_text() == "1.3.0\n"
+    assert (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n"
     assert mod.version_tuple("1.10.0") > mod.version_tuple("1.9.9")
 
 
@@ -324,9 +324,9 @@ def test_u2_failed_upgrade_restores_old_version_and_tasks(tmp_path, monkeypatch,
         out = capsys.readouterr().out
         assert "restored" in out and "runs as before" in out
         assert not (root / "offline_sign").exists()                  # a folder only the new version had
-        assert (root / "VERSION").read_text() == "1.3.0\n"
+        assert (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n"
         assert (root / "perpbot" / "old.py").exists() and not (root / "perpbot" / "new.py").exists()
-        assert not (root / "NEWDOC.md").exists() and (root / ".env").read_text() == "SECRET=keep\n"
+        assert not (root / "NEWDOC.md").exists() and (root / ".env").read_text(encoding="utf-8") == "SECRET=keep\n"
         assert (root / "data" / "btcperp.sqlite3").read_bytes() == b"db"
         assert calls["enable"][-1] is True                          # tasks re-enabled
     assert len(list((root / "data").glob("upgrade_backup_1.3.0_*"))) >= 1
@@ -395,8 +395,8 @@ def test_u2_restore_test_mode_installs_then_puts_the_old_version_back(tmp_path, 
     assert mod.main() == 0
     out = capsys.readouterr().out
     assert seen["new_installed"] is True and "RESTORE TEST PASSED" in out
-    assert (root / "VERSION").read_text() == "1.3.0\n" and not (root / "perpbot" / "new.py").exists()
-    assert (root / ".env").read_text() == "SECRET=keep\n" and enabled == [False, True]
+    assert (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n" and not (root / "perpbot" / "new.py").exists()
+    assert (root / ".env").read_text(encoding="utf-8") == "SECRET=keep\n" and enabled == [False, True]
     assert any("--no-index" in c for c in pip_calls)
     # an older zip, or no --from-zip, is refused before anything changes
     monkeypatch.setattr("sys.argv", ["install.py", "--from-zip", str(_zip(tmp_path / "old.zip", "1.2.0")),

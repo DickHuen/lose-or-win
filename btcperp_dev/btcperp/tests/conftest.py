@@ -211,7 +211,7 @@ def tmp_root(tmp_path: Path) -> Path:
     shutil.copy2(ROOT / "config" / "config.yaml", root / "config" / "config.yaml")
     shutil.copy2(ROOT / "config" / "calendar.yaml", root / "config" / "calendar.yaml")
     (root / "tests").mkdir()
-    (root / "VERSION").write_text("test\n")
+    (root / "VERSION").write_text("test\n", encoding="utf-8")
     return root
 
 

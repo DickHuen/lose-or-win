@@ -229,7 +229,7 @@ def test_item10_smoketest_records_unfilled_fok_status(world, tmp_path):
     ok, res = run_smoketest(w.engine(), paths)
     step = {r["step"]: r for r in res}["fok_unfilled_status"]
     assert step["ok"] is True and step["detail"]["raw_status"] == "fok_unfilled"
-    data = json.loads(next(paths.smoketest_dir.glob("smoketest_*.json")).read_text())
+    data = json.loads(next(paths.smoketest_dir.glob("smoketest_*.json")).read_text(encoding="utf-8"))
     assert data["allow_trading"] is True and data["code_version"] and "proxy_address" in data
 
 
@@ -288,7 +288,7 @@ def test_item5_heartbeat_after_decide_and_manage_only(tmp_root):
     assert main(["manage"], paths=paths, clock=clock, factories=f) == 1
     kinds = [k for _, k in pings]
     assert kinds.count("start") == 2 and [k for k in kinds if k != "start"] == ["success", "fail"]
-    log_text = "".join(p.read_text() for p in (tmp_root / "logs").glob("*.log"))
+    log_text = "".join(p.read_text(encoding="utf-8") for p in (tmp_root / "logs").glob("*.log"))
     assert "11111111-2222-3333-4444-555555555555" not in log_text
 
 
@@ -419,10 +419,10 @@ def test_item17_monthly_report_marks_incomplete_month(world, tmp_path):
     paths.ensure()
     rep = Reporter(w.engine(), paths)
     rep.monthly("2026-10")
-    data = json.loads((paths.reports_dir / "monthly" / "monthly_2026-10.json").read_text())
+    data = json.loads((paths.reports_dir / "monthly" / "monthly_2026-10.json").read_text(encoding="utf-8"))
     dd = data["decision_days"]
     assert dd["missed_days"] == ["2026-10-03", "2026-10-04", "2026-10-05"] and dd["incomplete_month"] is True
-    assert "INCOMPLETE MONTH" in (paths.reports_dir / "monthly" / "monthly_2026-10.md").read_text()
+    assert "INCOMPLETE MONTH" in (paths.reports_dir / "monthly" / "monthly_2026-10.md").read_text(encoding="utf-8")
     assert w.tg.has("incomplete month")
 
 
@@ -453,10 +453,10 @@ def test_item8_upgrade_zip_is_validated_and_extracted(tmp_path):
             "btcperp/perpbot/x.py": "X = 1\n"}
     version, members = mod.read_zip(_zip(tmp_path / "ok.zip", good))
     assert version == "9.9.9"
-    (tmp_path / "root" / ".env").write_text("SECRET=1\n")
+    (tmp_path / "root" / ".env").write_text("SECRET=1\n", encoding="utf-8")
     mod.extract(members)
-    assert (tmp_path / "root" / "perpbot" / "x.py").read_text() == "X = 1\n"
-    assert (tmp_path / "root" / ".env").read_text() == "SECRET=1\n"             # untouched
+    assert (tmp_path / "root" / "perpbot" / "x.py").read_text(encoding="utf-8") == "X = 1\n"
+    assert (tmp_path / "root" / ".env").read_text(encoding="utf-8") == "SECRET=1\n"             # untouched
     for bad in ({**good, "btcperp/data/btcperp.sqlite3": "x"}, {**good, "btcperp/.env": "K=1"},
                 {k: v for k, v in good.items() if k != "btcperp/VERSION"}, {**good, "other/evil.py": "x"},
                 {**good, "btcperp/../evil.py": "x"}):

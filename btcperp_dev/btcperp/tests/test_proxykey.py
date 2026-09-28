@@ -92,10 +92,10 @@ def _free_port():
 def test_new_request_writes_only_plain_fields(root, cfg):
     p = _new(root, cfg)
     pending = root.root / pkm.PENDING_NAME
-    assert pending.exists() and p.private_key in pending.read_text()
+    assert pending.exists() and p.private_key in pending.read_text(encoding="utf-8")
     if os.name != "nt":
         assert oct(pending.stat().st_mode & 0o777) == "0o600"
-    text = _fields_file(root).read_text()
+    text = _fields_file(root).read_text(encoding="utf-8")
     assert p.private_key[2:] not in text
     lines = dict(line.split("=", 1) for line in text.splitlines() if line and not line.startswith("#"))
     assert lines == {"addr": p.proxy, "exp": str(p.exp_ms), "salt": str(p.salt), "ts": str(p.ts_ms), "owner": MAIN}
@@ -103,7 +103,7 @@ def test_new_request_writes_only_plain_fields(root, cfg):
     out = root.data_dir / "proxykey"
     assert not (out / "sign_request.json").exists() and not (out / "sign.html").exists()
     # a browser (hardware wallet) request writes no file to carry, and removes stale ones
-    (out / "sign_request.json").write_text("{}")
+    (out / "sign_request.json").write_text("{}", encoding="utf-8")
     _new(root, cfg, method="browser")
     assert not _fields_file(root).exists() and not (out / "sign_request.json").exists()
 
@@ -139,7 +139,7 @@ def test_pending_request_expires_after_an_hour(root, cfg):
 
 
 def test_v130_request_is_discarded(root, cfg):
-    (root.root / pkm.PENDING_NAME).write_text(json.dumps({"private_key": "0x" + "33" * 32, "proxy": MAIN}))
+    (root.root / pkm.PENDING_NAME).write_text(json.dumps({"private_key": "0x" + "33" * 32, "proxy": MAIN}), encoding="utf-8")
     assert pkm.load_pending(root) is None and not (root.root / pkm.PENDING_NAME).exists()
 
 
@@ -169,10 +169,10 @@ def test_offline_fields_register_and_write_env(root, cfg):
 
     s = load_secrets(root.env_file)
     assert s.proxy_address == p.proxy and s.proxy_secret == "proxy-secret-abc123" and s.wallet_address == MAIN
-    env = root.env_file.read_text()
+    env = root.env_file.read_text(encoding="utf-8")
     assert "# my comment" in env and "HEALTHCHECK_PING_URL=https://hc-ping.com/keep-me" in env
     assert not (root.root / pkm.PENDING_NAME).exists()
-    hist = [json.loads(x) for x in (root.data_dir / "proxykey" / "history.jsonl").read_text().splitlines()]
+    hist = [json.loads(x) for x in (root.data_dir / "proxykey" / "history.jsonl").read_text(encoding="utf-8").splitlines()]
     assert hist[-1]["proxy"] == p.proxy and hist[-1]["method"] == "offline"
     assert p.private_key[2:] not in json.dumps(hist) and "proxy-secret" not in json.dumps(hist)
 
@@ -197,10 +197,10 @@ def test_exchange_rejection_keeps_env_unchanged(root, cfg):
     fx = FakeExchange(reject="timestamp too old")
     _new(root, cfg)
     _, sig = _sign_from_fields(root)
-    before = root.env_file.read_text()
+    before = root.env_file.read_text(encoding="utf-8")
     with pytest.raises(pkm.ProxyKeyError, match="rejected"):
         pkm.finish(root, cfg, sig, transport=fx.transport())
-    assert root.env_file.read_text() == before and (root.root / pkm.PENDING_NAME).exists()
+    assert root.env_file.read_text(encoding="utf-8") == before and (root.root / pkm.PENDING_NAME).exists()
 
 
 def test_registration_waits_for_the_bot_lock(root, cfg):
@@ -210,7 +210,7 @@ def test_registration_waits_for_the_bot_lock(root, cfg):
     fx = FakeExchange()
     _new(root, cfg)
     _, sig = _sign_from_fields(root)
-    before = root.env_file.read_text()
+    before = root.env_file.read_text(encoding="utf-8")
     held = FileLock(root.lock_file)
     held.acquire(0)
 
@@ -227,7 +227,7 @@ def test_registration_waits_for_the_bot_lock(root, cfg):
             pkm.finish(root, cfg, sig, transport=fx.transport(), with_lock=with_lock)
     finally:
         held.release()
-    assert fx.bodies == [] and root.env_file.read_text() == before
+    assert fx.bodies == [] and root.env_file.read_text(encoding="utf-8") == before
     res = pkm.finish(root, cfg, sig, transport=fx.transport(), with_lock=with_lock)
     assert res["owner"] == MAIN and len(fx.bodies) == 1
 
@@ -256,7 +256,7 @@ def test_offline_builder_matches_the_sdk(root, cfg):
     p = _new(root, cfg, days=7)
     sdk = build_perps_create_proxy_typed_data(chain_id=137, proxy=p.proxy, expires_at_ms=p.exp_ms, salt=p.salt,
                                               timestamp_ms=p.ts_ms)
-    fields = osg.parse_fields(_fields_file(root).read_text())
+    fields = osg.parse_fields(_fields_file(root).read_text(encoding="utf-8"))
     assert osg.build(fields) == sdk == p.typed_data() == pkm.build_typed(p.proxy, p.exp_ms, p.salt, p.ts_ms)
     _, sig = osg.sign(sdk, MAIN_KEY)
     assert sig == sign_owner_typed_data(Account.from_key(MAIN_KEY), sdk, what="t")
@@ -287,7 +287,7 @@ def test_offline_signer_refuses_anything_but_create_proxy(root, cfg):
     with pytest.raises(osg.RequestError, match="refused"):
         osg.parse_fields(json.dumps(permit))
     with pytest.raises(osg.RequestError, match="unknown field"):
-        osg.parse_fields(_fields_file(root).read_text() + "verifyingContract=" + OTHER + "\n")
+        osg.parse_fields(_fields_file(root).read_text(encoding="utf-8") + "verifyingContract=" + OTHER + "\n")
     with pytest.raises(osg.RequestError, match="missing"):
         osg.parse_fields("addr=" + p.proxy + "\n")
     assert osg.parse_fields(json.dumps(good)) == p.fields()        # a genuine full request is accepted
@@ -402,11 +402,11 @@ def test_cli_proxykey_status_offline_and_limits(tmp_root, capsys):
     assert main(["proxykey", "new", "--offline", "--owner", MAIN], paths=paths, clock=clock, factories=f) == 0
     out = capsys.readouterr().out
     assert "sign_fields.txt" in out and "SHA-256" in out and "HKT" in out
-    key = json.loads((tmp_root / pkm.PENDING_NAME).read_text())["private_key"]
+    key = json.loads((tmp_root / pkm.PENDING_NAME).read_text(encoding="utf-8"))["private_key"]
     assert key[2:] not in out
     assert main(["proxykey", "status"], paths=paths, clock=clock, factories=f) == 0
     assert "pending request (offline)" in capsys.readouterr().out
-    log_text = "".join(p.read_text() for p in (tmp_root / "logs").glob("*.log"))
+    log_text = "".join(p.read_text(encoding="utf-8") for p in (tmp_root / "logs").glob("*.log"))
     assert key[2:] not in log_text
     # P4: any bot command deletes a request older than an hour
     old = time.time() - 2 * 3600
@@ -441,9 +441,9 @@ def test_cli_finish_refuses_while_the_bot_runs(tmp_root, capsys, monkeypatch):
     held = FileLock(paths.lock_file)
     held.acquire(0)
     try:
-        before = (tmp_root / ".env").read_text()
+        before = (tmp_root / ".env").read_text(encoding="utf-8")
         assert main(["proxykey", "finish", "--signature", sig], paths=paths, clock=clock, factories=f) == 1
     finally:
         held.release()
     assert "a bot command is running" in capsys.readouterr().out
-    assert registered == [] and (tmp_root / ".env").read_text() == before and (tmp_root / pkm.PENDING_NAME).exists()
+    assert registered == [] and (tmp_root / ".env").read_text(encoding="utf-8") == before and (tmp_root / pkm.PENDING_NAME).exists()

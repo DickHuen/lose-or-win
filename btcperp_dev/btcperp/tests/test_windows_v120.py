@@ -192,9 +192,9 @@ def test_engine_alert_calls_notifier_and_survives_its_failure(world):
 def test_cli_passes_notifier_to_errors(tmp_root):
     make_env(tmp_root)
     cfg_path = tmp_root / "config" / "config.yaml"
-    data = yaml.safe_load(cfg_path.read_text())
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     data["lock"]["wait_seconds"] = 0.3
-    cfg_path.write_text(yaml.safe_dump(data))
+    cfg_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     clock = FixedClock(hkt(2026, 10, 5, 12, 30))
     ex = MockExchange(clock=clock)
     ex.raise_on["get_instruments"] = RuntimeError("exchange exploded")
