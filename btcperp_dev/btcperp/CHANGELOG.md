@@ -3,6 +3,46 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.0 - 2026-09-29 (config 1.5.0) - option B: decide every 4 hours; readable analysis; Preview
+
+The owner chose option B: the same strategy, decided every 4 hours instead of once a day.
+
+- **Rolling 4h cadence** (`strategy.cadence: rolling_4h`, the new default):
+  - a decision 30 minutes after every UTC 4h candle closes: 00:30, 04:30, 08:30, 12:30, 16:30 and 20:30 HKT,
+    each with a retry at :50;
+  - the score uses daily candles that END at the decision time, built from Binance 4h candles. Same score,
+    gates, exits and parameters; only the day's end moves;
+  - one entry per 4-hour period; the entry window is HH:30 to HH+1:30 HKT; after it, the period's close rules
+    still run late (never a late entry);
+  - the 3-day rule is 18 consecutive opposite periods (72 h);
+  - `strategy.flip_confirm_periods` (default 1): 2 makes a flip wait for a second opposite period
+    (backtest variant `R4h_confirm`);
+  - manage runs in between (02:30, 06:30, 10:30, 14:30, 18:30, 22:30 HKT);
+  - `cadence: daily` restores the v1.4 behaviour exactly (the existing tests run it).
+- **Backtest:** new primary variant `R4h_live` with its stress twin, `R4h_confirm`, and the sensitivity variants
+  `R4h_live_noevents` / `R4h_live_nokill`. The daily variants stay for comparison; I1 is now "4h minus daily".
+  Criteria draft-3: the same rules on the new primary. A test checks the rolling backtest equals the live decide
+  on 30 periods.
+- **Scheduler:** `schedule install` registers the 4h schedule and deletes btcperp decide/manage tasks of an older
+  schedule, so the old and the new never both run.
+- **Readable analysis:** every decision stores a Traditional Chinese analysis. It covers:
+  - the score and its three parts, with prices;
+  - each gate;
+  - the position and the action;
+  - entry, stop-loss and take-profit estimates;
+  - the risk budget;
+  - the flip condition and the next decision time.
+
+  It is shown on the dashboard, and a one-line Windows notification is sent (`notifications.analysis_toast`).
+- **Preview:** new `preview` command and `windows\Preview.bat`: what the strategy would decide right now. Public
+  Binance data only; no keys, no orders, nothing written.
+- **Reports:** a month is INCOMPLETE above 12 four-hour periods without an on-time decision (2 days, as before).
+  Shadow variants replay daily decisions only, so they are skipped on the 4h cadence.
+- **Heartbeat:** new cron schedules for the two healthchecks.io checks (START_HERE section 8).
+- **Tests:** 269 (+17).
+- **From v1.4.1:** `windows\Upgrade.bat`. If the backtest was confirmed under v1.4, it needs a new confirmation.
+  The code and criteria changed, so `backtest run` says so.
+
 ## 1.4.1 - 2026-09-28 (config 1.4.0) - Windows install fix
 
 - **Fix:** on the owner's Windows PC, `1_Install.bat` stopped with `INSTALL FAIL`. One test,

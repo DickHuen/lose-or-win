@@ -104,6 +104,11 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("strategy.flip_min_abs_score", _NUM, None),
     ("strategy.opposite_days_rule", int, lambda v: v >= 1),
     ("strategy.tighten_sl_on_same_direction", bool, None),
+    ("strategy.cadence", str, lambda v: v in ("daily", "rolling_4h")),
+    ("notifications.analysis_toast", bool, None),
+    ("strategy.flip_confirm_periods", int, lambda v: 1 <= v <= 6),
+    ("schedule.period_entry_start_minutes", int, lambda v: 0 <= v < 240),
+    ("schedule.period_entry_end_minutes", int, lambda v: 0 < v <= 240),
     ("gates.regime_cap", _NUM, lambda v: 0 < v <= 1),
     ("gates.h4_cap", _NUM, lambda v: 0 < v <= 1),
     ("gates.h4_ema_fast", int, lambda v: v > 1),
@@ -237,6 +242,20 @@ def validate(data: dict[str, Any]) -> None:
             errors.append("gates.h4_ema_fast must be < gates.h4_ema_slow")
         if data["binance"]["daily_candles_to_load"] < s["min_daily_candles"]:
             errors.append("binance.daily_candles_to_load must be >= strategy.min_daily_candles")
+        sc = data["schedule"]
+        if not sc["period_entry_start_minutes"] < sc["period_entry_end_minutes"]:
+            errors.append("schedule.period_entry_start_minutes must be < schedule.period_entry_end_minutes")
+        if s["cadence"] == "rolling_4h":
+            mins = []
+            for x in sc["decide_times_hkt"]:
+                hh, mm = str(x).split(":")
+                mins.append((int(hh) * 60 + int(mm) - 8 * 60) % 1440)      # minutes after 00:00 UTC
+            for h in range(0, 24, 4):
+                lo, hi = h * 60 + sc["period_entry_start_minutes"], h * 60 + sc["period_entry_end_minutes"]
+                if not any(lo <= m <= hi for m in mins):
+                    errors.append(f"schedule.decide_times_hkt: no decide time in the entry window of the "
+                                  f"{h:02d}:00 UTC period (strategy.cadence rolling_4h decides every 4 hours)")
+                    break
     except (KeyError, TypeError):
         pass
     if errors:

@@ -390,7 +390,7 @@ def main() -> int:
             print("  2. windows\\2_Smoketest.bat    - live check at minimum size")
             print("  3. windows\\Backtest.bat       - download history and run the backtest")
             print("  4. windows\\3_Schedule_Install.bat - only when you decide to go live")
-            print("  Dashboard any time: windows\\Dashboard.bat")
+            print("  Dashboard any time: windows\\Dashboard.bat   What the bot would do now: windows\\Preview.bat")
     else:
         print("Next step: fill in .env (proxy key, proxy secret, wallet address),")
         print("then run:  python3 run.py smoketest   and check the result. Do NOT schedule routines before GO.")

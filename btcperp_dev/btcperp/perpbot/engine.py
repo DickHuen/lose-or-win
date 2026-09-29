@@ -14,10 +14,11 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable
 
+from perpbot import analysis
 from perpbot.calendar_events import EventCalendar
 from perpbot.exchange.base import (
     ACTIVE_ORDER_STATUSES,
@@ -55,14 +56,22 @@ from perpbot.strategy import (
     InsufficientData,
     bracket_prices,
     compute_score,
+    H4_MS,
     day_features,
+    key_ms,
+    live_rolling_features,
+    period_key,
+    period_start,
     plan_for,
     restrict_to_close,
+    sc_day,
+    shifted_daily,
 )
 from perpbot.telegram import Telegram, parse_command
 from perpbot.timeutil import (
     DAY_MS,
     HOUR_MS,
+    MINUTE_MS,
     Clock,
     day_start_ms,
     entry_window,
@@ -75,6 +84,7 @@ from perpbot.timeutil import (
 )
 
 log = logging.getLogger("perpbot.engine")
+
 
 KILL_SWITCH_REASONS = ("kill_drawdown", "kill_losing_streak")
 REASON_HELP = {
@@ -157,6 +167,39 @@ class Engine:
     def today(self) -> str:
         return utc_day(self.now()).isoformat()
 
+    # ---------------------------------------------------------------- decision periods (v1.5.0)
+    @property
+    def rolling(self) -> bool:
+        """strategy.cadence rolling_4h: one decision per 4-hour period instead of per UTC day."""
+        return str(self.cfg.strategy.cadence) == "rolling_4h"
+
+    def period(self, now: datetime | None = None) -> tuple[int, str, date]:
+        """The decision period containing `now`: (start T in UTC ms, key, UTC day of T). Daily: T = 00:00 UTC and
+        key 'YYYY-MM-DD'; rolling_4h: T = the 4h boundary and key 'YYYY-MM-DDTHH:00'."""
+        now = now or self.now()
+        if self.rolling:
+            t = period_start(to_ms(now))
+            return t, period_key(t), sc_day(t)
+        d = utc_day(now)
+        return day_start_ms(d), d.isoformat(), d
+
+    def decide_window(self, per: tuple[int, str, date], now: datetime) -> tuple[datetime, datetime]:
+        """Entry window for `decide`. Daily: 08:30-09:30 HKT of now's HKT date (v1.4 behaviour);
+        rolling_4h: T + period_entry_start_minutes .. T + period_entry_end_minutes."""
+        sc = self.cfg.schedule
+        if self.rolling:
+            return (from_ms(per[0] + int(sc.period_entry_start_minutes) * MINUTE_MS),
+                    from_ms(per[0] + int(sc.period_entry_end_minutes) * MINUTE_MS))
+        return entry_window(now, sc.entry_window_start_hkt, sc.entry_window_end_hkt)
+
+    def window_bounds(self, per: tuple[int, str, date]) -> tuple[datetime, datetime]:
+        """Entry window of the period itself (late decisions: events at its start; manage: late after its end)."""
+        sc = self.cfg.schedule
+        if self.rolling:
+            return (from_ms(per[0] + int(sc.period_entry_start_minutes) * MINUTE_MS),
+                    from_ms(per[0] + int(sc.period_entry_end_minutes) * MINUTE_MS))
+        return hkt_at(per[2], sc.entry_window_start_hkt), hkt_at(per[2], sc.entry_window_end_hkt)
+
     def alert(self, kind: str, text: str, dedupe_key: str | None = None) -> None:
         """Store an alert for the owner (shown on the dashboard); the Windows notification (and Telegram,
         only if enabled in config) is sent after the run when `defer_notifications` is set, so a slow
@@ -171,9 +214,17 @@ class Engine:
         else:
             self._deliver(kind, text, msg)
 
+    def notify(self, kind: str, text: str) -> None:
+        """A desktop notification only (no alert row, no Telegram): e.g. the 4-hourly analysis."""
+        if self.defer_notifications:
+            self.outbox.append((kind, text, ""))
+        else:
+            self._deliver(kind, text, "")
+
     def _deliver(self, kind: str, text: str, msg: str, *, desktop: bool = True) -> None:
         try:
-            self.tg.send(msg)
+            if msg:                                           # "" = notify(): desktop only
+                self.tg.send(msg)
         except Exception:  # noqa: BLE001
             log.warning("telegram send failed", exc_info=True)
         if desktop and self.notifier is not None:
@@ -318,12 +369,15 @@ class Engine:
             "SELECT DISTINCT client_order_id FROM orders WHERE purpose='smoketest' AND client_order_id IS NOT NULL")}
 
     def entered_today(self, day: str) -> bool:
-        start = day_start_ms(datetime.fromisoformat(day).date())
+        """An entry already happened in this decision period (`day` = period key: a UTC day, or a 4h period)."""
+        start = key_ms(day) if "T" in day else day_start_ms(datetime.fromisoformat(day).date())
         smoke = self.smoketest_coids()
         if any(f.is_opening and f.client_order_id not in smoke for f in self.stored_fills(start)):
             return True
         for r in self.store.query("SELECT data FROM trades WHERE event='open' AND ts_ms >= ?", [start]):
-            if r["data"].get("entry_utc_day") == day and r["data"].get("live", True):
+            d = r["data"]
+            same = d.get("entry_period") == day or ("T" not in day and d.get("entry_utc_day") == day)
+            if same and d.get("live", True):
                 return True
         return any(e["step"] == "entry" and e["status"] == "done" for e in self.rec.intent_events(day))
 
@@ -452,7 +506,7 @@ class Engine:
         trade = {
             "trade_uid": uuid.uuid4().hex, "direction": pos.direction, "qty": abs(pos.size),
             "entry_price": pos.entry_price, "entry_ts_ms": entry_ts,
-            "entry_utc_day": entry_day, "sl_price": sl, "tp_price": tp,
+            "entry_utc_day": entry_day, "entry_period": self.period(from_ms(entry_ts))[1], "sl_price": sl, "tp_price": tp,
             "sl_order_id": next((o.id for o in orders if o.tpsl_kind == "sl" and o.status in ACTIVE_TRIGGER_STATUSES), None),
             "tp_order_id": next((o.id for o in orders if o.tpsl_kind == "tp" and o.status in ACTIVE_TRIGGER_STATUSES), None),
             "atr": atr, "sl_distance": sl_dist, "initial_risk_usd": sl_dist * abs(pos.size),
@@ -1169,7 +1223,8 @@ class Engine:
         mark = plan.get("mark")
         trade = {
             "trade_uid": uuid.uuid4().hex, "direction": d, "qty": qty, "entry_price": entry_price, "entry_ts_ms": entry_ts,
-            "entry_utc_day": day, "sl_price": sl_price, "tp_price": tp_price, "sl_order_id": sl_id, "tp_order_id": tp_id,
+            "entry_utc_day": day[:10], "entry_period": day, "sl_price": sl_price, "tp_price": tp_price,
+            "sl_order_id": sl_id, "tp_order_id": tp_id,
             "atr": atr, "sl_distance": sl_dist, "initial_risk_usd": sl_dist * qty, "equity_at_entry": eq["equity"],
             "risk_pct_budget": risk_pct, "ramp": ramp, "tier_fraction": plan.get("tier_fraction"),
             "effective_fraction": plan.get("enter_fraction"), "caps": plan.get("caps"), "score": plan.get("score"),
@@ -1202,12 +1257,19 @@ class Engine:
         return True
 
     # ================================================================ decision inputs
-    def gather_inputs(self, day_d: Any) -> dict[str, Any]:
+    def gather_inputs(self, per: tuple[int, str, date]) -> dict[str, Any]:
         cfg = self.cfg
         now_ms = to_ms(self.now())
         inst = self.instrument()
-        daily = self.bn.klines("1d", int(cfg.binance.daily_candles_to_load), now_ms)
-        h4 = self.bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
+        day_d = per[2]
+        if self.rolling:
+            # daily candles ending at T are built from 4h candles: 1,000 days plus the 3-day-rule history
+            days = int(cfg.binance.daily_candles_to_load) + int(cfg.strategy.opposite_days_rule) + 2
+            h4 = self.bn.klines_range("4h", per[0] - days * DAY_MS, now_ms)
+            daily: list[Candle] = []
+        else:
+            daily = self.bn.klines("1d", int(cfg.binance.daily_candles_to_load), now_ms)
+            h4 = self.bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
         fstart = day_start_ms(day_d) - int(cfg.binance.funding_days_to_load) * DAY_MS
         funding = self.bn.funding(fstart, now_ms)
         self.store_binance(daily, h4, funding)
@@ -1264,35 +1326,50 @@ class Engine:
                 err = str(e)
         return None, err
 
-    def make_decision(self, day_d: Any, inputs: dict[str, Any], rr: ReconcileResult, *,
+    def next_decision_hkt(self, per: tuple[int, str, date]) -> str:
+        if self.rolling:
+            return fmt_hkt(from_ms(per[0] + H4_MS + int(self.cfg.schedule.period_entry_start_minutes) * MINUTE_MS))[:16]
+        return fmt_hkt(hkt_at(per[2] + timedelta(days=1), self.cfg.schedule.entry_window_start_hkt))[:16]
+
+    def make_decision(self, per: tuple[int, str, date], inputs: dict[str, Any], rr: ReconcileResult, *,
                       late: bool = False) -> dict[str, Any]:
-        """The daily decision. `late=True` (decide or manage after the entry window, no intent yet):
-        the same rules on the same data (closed at D 00:00 UTC, events at the window start), close part only."""
+        """The period's decision (daily: the UTC day; rolling_4h: the 4h period). `late=True` (decide or manage
+        after the entry window, no intent yet): the same rules on the same data (closed at T, events at the window
+        start), close part only."""
         cfg = self.cfg
         now = self.now()
-        day = day_d.isoformat()
-        at = hkt_at(day_d, cfg.schedule.entry_window_start_hkt) if late else now
+        t_ms, day, day_d = per
+        at = self.window_bounds(per)[0] if late else now
         active = self.calendar.active_windows(at, cfg.gates.event_anchor_hkt, float(cfg.gates.event_post_release_hours))
         ev_list = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(st),
                     "window_end_utc": fmt_utc(en), "note": e.note} for e, st, en in active]
-        f = day_features(cfg, day_d, inputs["daily"], inputs["h4"], [(ts, r) for ts, r, _ in inputs["funding"]], ev_list)
+        funding = [(ts, r) for ts, r, _ in inputs["funding"]]
+        if self.rolling:
+            f = live_rolling_features(cfg, t_ms, inputs["h4"], funding, ev_list)
+        else:
+            f = day_features(cfg, day_d, inputs["daily"], inputs["h4"], funding, ev_list)
         sc, fstat, dirs = f.score, f.funding, f.directions
         e_fast, e_slow, h4_open = f.h4_fast, f.h4_slow, f.h4_open_ms
         trade = rr.trade
         pos_dir = rr.position.direction if rr.position else 0
-        entry_day = datetime.fromisoformat(trade["entry_utc_day"]).date() if (trade and trade.get("entry_utc_day")) else day_d
+        entry_day = datetime.fromisoformat(trade["entry_utc_day"][:10]).date() if (trade and trade.get("entry_utc_day")) else day_d
+        entry_key = (trade.get("entry_period") or trade.get("entry_utc_day")) if trade else day
         paused = self.paused_reason()
         geo = inputs.get("geoblock") or {}
         region_blocked = geo.get("blocked") is True
         entered = self.entered_today(day)
         blocks = [] if late else self.decision_blocks(day_d)
         plan, ctx = plan_for(f, cfg, position_dir=pos_dir, entry_day=entry_day, entered_today=entered,
-                             paused_reason=paused, entry_block="; ".join(blocks) or None)
+                             paused_reason=paused, entry_block="; ".join(blocks) or None, entry_key=entry_key)
         streak = ctx.opposite_streak
         if region_blocked and plan.enter_direction:
             restrict_to_close(plan, f"region blocked by geoblock ({geo.get('country')}/{geo.get('region')})", pos_dir)
         if late:
             restrict_to_close(plan, "late decision after the entry window: close rules only, no late entry", pos_dir)
+        if self.rolling:
+            used = shifted_daily(sorted(inputs["h4"], key=lambda c: c.open_ms), t_ms, 3)
+        else:
+            used = [c for c in inputs["daily"] if c.open_ms <= sc.candle_open_ms]
         g_regime, g_h4, g_fund, g_event = f.g_regime, f.g_h4, f.g_funding, f.g_event
         caps = f.caps
         ticker, book = inputs["ticker"], inputs["book"]
@@ -1304,15 +1381,16 @@ class Engine:
             "tier_fraction": sc.tier_fraction, "caps": caps, "gates_triggered": gates_triggered, "atr": sc.atr,
             "mark": ticker.mark, "decision_ts_ms": to_ms(now), "position_dir_at_decision": pos_dir,
             "funding_percentile": fstat.percentile, "event_active": g_event.triggered, "late": late,
-            "entry_blocks": blocks,
+            "entry_blocks": blocks, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t_ms)),
         })
         spread = book.best_ask - book.best_bid if (book.bids and book.asks) else None
         decision = {
             "utc_day": day, "decision_hkt": fmt_hkt(now), "decision_utc": fmt_utc(now),
             "score": sc.to_dict(),
             "inputs": {
-                "daily_candles_used": [[c.open_ms, c.open, c.high, c.low, c.close] for c in inputs["daily"]
-                                       if c.open_ms <= sc.candle_open_ms],
+                "daily_candles_used": [[c.open_ms, c.open, c.high, c.low, c.close] for c in used],
+                "daily_candles_count": sc.candles_used, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t_ms)),
+                "h4_candles_fetched": len(inputs["h4"]),
                 "C": sc.close, "H": sc.high, "L": sc.low, "prev_H": sc.prev_high, "prev_L": sc.prev_low,
                 "ema50": sc.ema_trend, "ema200": sc.ema_regime, "atr14": sc.atr, "clv": sc.clv,
                 "h4_ema20": e_fast, "h4_ema50": e_slow, "h4_candle_open_ms": h4_open,
@@ -1324,8 +1402,9 @@ class Engine:
                                                    (sum(pm_rates) >= 0) == (fstat.current_rate >= 0)),
                 "mark": ticker.mark, "index": ticker.index, "spread": spread,
                 "book_top10": {"bids": book.bids[:10], "asks": book.asks[:10]},
-                "direction_history": dirs, "opposite_streak": streak, "position_dir": pos_dir,
-                "entry_day": entry_day.isoformat(), "entered_today": entered, "geoblock": geo,
+                "direction_history": dirs, "score_history": f.scores, "opposite_streak": streak,
+                "opposite_rule": ctx.opposite_days_rule, "flip_confirmed": ctx.flip_confirmed, "position_dir": pos_dir,
+                "entry_day": entry_day.isoformat(), "entry_key": entry_key, "entered_today": entered, "geoblock": geo,
             },
             "size_tier": sc.tier_fraction,
             "gates": {g.name: {"triggered": g.triggered, "cap": g.cap, "blocks_entry": g.blocks_entry, "detail": g.detail}
@@ -1334,6 +1413,14 @@ class Engine:
             "plan": plan_d,
         }
         reason = "; ".join(plan.notes + plan.entry_blocked) or plan.action
+        try:                                                  # v1.5.0: readable analysis (dashboard + notification)
+            ramp = self.rec.live_trades_opened() < int(cfg.risk.ramp_trades)
+            decision["analysis"] = analysis.render(decision, cfg, equity=(rr.equity or {}).get("equity"), ramp=ramp,
+                                                   next_hkt=self.next_decision_hkt(per), position=trade)
+            if bool(cfg.notifications.analysis_toast) and not late:
+                self.notify("分析", analysis.short_line(decision))
+        except Exception:  # noqa: BLE001 - the analysis text must never stop a decision
+            log.warning("analysis text failed", exc_info=True)
         self.store.insert("decisions", utc_day=day, score=sc.score, direction=sc.direction, action=plan.action,
                           reason=reason, data=decision)
         return plan_d
@@ -1471,13 +1558,12 @@ class Engine:
 
     # ================================================================ commands
     def cmd_decide(self) -> dict[str, Any]:
-        cfg = self.cfg
         now = self.now()
-        day_d = utc_day(now)
-        day = day_d.isoformat()
+        per = self.period(now)
+        day = per[1]
         rr = self.reconcile()
         self.log_market_data()
-        ws, we = entry_window(now, cfg.schedule.entry_window_start_hkt, cfg.schedule.entry_window_end_hkt)
+        ws, we = self.decide_window(per, now)
         intent = self.rec.intent(day)
         out: dict[str, Any] = {"reconcile": rr.actions}
         if now < ws:
@@ -1488,17 +1574,17 @@ class Engine:
                 self.store.insert("decisions", utc_day=day, score=None, direction=None, action="missed",
                                   reason="decide ran after the entry window", data={"run_hkt": fmt_hkt(now)})
                 self.alert("missed", f"decide ran at {fmt_hkt(now)}, after the entry window "
-                           f"({cfg.schedule.entry_window_end_hkt} HKT); no late entry", dedupe_key=f"missed_window:{day}")
+                           f"(ended {fmt_hkt(we)}); no late entry", dedupe_key=f"missed_window:{day}")
             if intent is None and rr.position is not None:
-                intent = self.late_decision(day_d, rr)          # review v1.2.0 item 2: close rules still apply
+                intent = self.late_decision(per, rr)            # review v1.2.0 item 2: close rules still apply
             if intent is not None:
                 out["actions"] = self.execute_intent(day, intent, allow_entry=False, window_open=False)
             out["result"] = "missed entry window"
             return out
         if intent is None or (intent.get("action") == "paused" and not self.paused_reason()):
-            inputs = self.gather_inputs(day_d)
+            inputs = self.gather_inputs(per)
             try:
-                intent = self.make_decision(day_d, inputs, rr)
+                intent = self.make_decision(per, inputs, rr)
             except InsufficientData as e:
                 self.store.insert("decisions", utc_day=day, score=None, direction=None, action="error",
                                   reason=f"insufficient data: {e}", data={})
@@ -1510,19 +1596,19 @@ class Engine:
         self.update_shadow()
         return out
 
-    def late_decision(self, day_d: Any, rr: ReconcileResult) -> dict[str, Any]:
-        """No decision was made in today's entry window but a position is open: evaluate today's close
-        rules (reverse signal, 3-day rule, crowded funding) on the data closed at D 00:00 UTC. Never enters."""
-        day = day_d.isoformat()
-        inputs = self.gather_inputs(day_d)
+    def late_decision(self, per: tuple[int, str, date], rr: ReconcileResult) -> dict[str, Any]:
+        """No decision was made in this period's entry window but a position is open: evaluate the period's close
+        rules (reverse signal, 3-day rule, crowded funding) on the data closed at its start. Never enters."""
+        day = per[1]
+        inputs = self.gather_inputs(per)
         try:
-            plan = self.make_decision(day_d, inputs, rr, late=True)
+            plan = self.make_decision(per, inputs, rr, late=True)
         except InsufficientData as e:
             self.store.insert("decisions", utc_day=day, score=None, direction=None, action="error",
                               reason=f"insufficient data (late decision): {e}", data={})
             raise EngineError(f"insufficient market data for the late decision: {e}") from e
         self.rec.write_intent(day, plan)
-        self.alert("late decision", f"no decision in today's entry window; evaluated today's close rules late "
+        self.alert("late decision", f"no decision in the entry window of {day}; evaluated its close rules late "
                    f"(no entry): {self.decision_text(plan)}", dedupe_key=f"late_decision:{day}")
         return plan
 
@@ -1532,16 +1618,16 @@ class Engine:
 
     def cmd_manage(self) -> dict[str, Any]:
         now = self.now()
-        day = utc_day(now).isoformat()
+        per = self.period(now)
+        day = per[1]
         rr = self.reconcile()
         self.log_market_data()
         actions = list(rr.actions)
         intent = self.rec.intent(day)
-        day_d = utc_day(now)
         if (intent is None and rr.position is not None
-                and now > hkt_at(day_d, self.cfg.schedule.entry_window_end_hkt)):
+                and now > self.window_bounds(per)[1]):
             try:
-                intent = self.late_decision(day_d, rr)
+                intent = self.late_decision(per, rr)
             except Exception as e:  # noqa: BLE001 - protection below must still run
                 log.error("late decision failed: %s", e)
                 self.alert("late decision failed", f"{e}; today's close rules were not evaluated, only the "
@@ -1567,7 +1653,7 @@ class Engine:
         return data
 
     def _in_window(self, now: datetime) -> bool:
-        ws, we = entry_window(now, self.cfg.schedule.entry_window_start_hkt, self.cfg.schedule.entry_window_end_hkt)
+        ws, we = self.decide_window(self.period(now), now)
         return ws <= now <= we
 
     def cmd_pause(self, source: str = "cli") -> str:
@@ -1761,7 +1847,7 @@ class Engine:
 
     # ================================================================ shadow
     def update_shadow(self) -> None:
-        if not bool(self.cfg.shadow.enabled):
+        if not bool(self.cfg.shadow.enabled) or self.rolling:      # shadow variants replay daily decisions only
             return
         try:
             from perpbot.shadow import update_shadow

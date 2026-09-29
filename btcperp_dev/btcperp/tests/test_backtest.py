@@ -113,13 +113,16 @@ def test_run_backtest_is_deterministic_and_writes_results(tmp_path, bt_cfg):
     assert (tmp_path / "out1" / "summary.md").read_text(encoding="utf-8").startswith("# btcperp backtest - verdict:")
     assert set(r1["summaries"]) == set(bt.VARIANTS) and r1["verdict"] in ("PASS", "FAIL")
     assert len(r1["windows"]) == 2 and r1["summaries"]["A_live"]["full_trades_median"] > 5
+    assert r1["summaries"]["R4h_live"]["full_trades_median"] > 5 and r1["primary_variant"] == "R4h_live"
     ids = [c["id"] for c in r1["criteria"]]
     assert ids[:14] == ["C0a", "C0b", "C0c", "C1a", "C1b", "C1c", "C1d", "C2a", "C2b", "C3", "C4", "C5", "C6", "C7"]
     runs = (tmp_path / "out1" / "runs.csv").read_text(encoding="utf-8").splitlines()
     assert len(runs) == 1 + len(bt.VARIANTS) * (2 * 2 + 2)
     assert r1["selection"]["note"] and r1["data_quality"]["h1"]["missing"] == 0
     assert set(r1["data_quality"]["slice_sha256"]) == {"1d", "4h", "1h", "funding"}
-    assert (tmp_path / "out1" / "trades_A_live.csv").exists()
+    assert (tmp_path / "out1" / "trades_A_live.csv").exists() and (tmp_path / "out1" / "trades_R4h_live.csv").exists()
+    r4 = (tmp_path / "out1" / "trades_R4h_live.csv").read_text(encoding="utf-8").splitlines()
+    assert "T" in r4[1].split(",")[0]                                    # rolling trades carry the 4h period key
 
 
 # ---------------------------------------------------------------- simulator mechanics on hand-made days
@@ -230,7 +233,7 @@ def test_windows_and_criteria_evaluation(bt_cfg):
     rep = bt.evaluate({"rules": [{"id": "R", "text": "r", "metric": "m", "op": "report"},
                                  {"id": "D", "text": "d", "scope": "data", "metric": "x", "op": "<=", "value": 1},
                                  {"id": "T", "text": "t", "use_twin": True, "metric": "m", "op": ">", "value": 0}]},
-                      {"A_live": {"m": 1.0}, "A_live_stress": {"m": -1.0}}, {"x": 0.5})
+                      {bt.PRIMARY: {"m": 1.0}, f"{bt.PRIMARY}_stress": {"m": -1.0}}, {"x": 0.5})
     assert rep[0]["informational"] and not rep[0]["pass"] and rep[0]["value"] == 1.0
     assert rep[1]["pass"] is True and rep[2]["pass"] is False and rep[2]["value"] == -1.0
 
@@ -432,13 +435,15 @@ def test_s5_variant_selection_rules():
     segb = {"a": 0.4, "b": 0.4, "c": 0.1}
     sums = {n: summ(offs, seg) for n in bt.VARIANTS}
     data = {"h1_missing_share": 0.0}
+    prim = crit["primary_variant"]
+    assert prim == bt.PRIMARY == "R4h_live"                                          # v1.5.0: the owner's option B
     sel = bt.select_variant(crit, sums, data)
-    assert sel["live_variant"] == "A_live" and sel["qualified_replacements"] == []
+    assert sel["live_variant"] == prim and sel["qualified_replacements"] == []
     sums["B_breakeven"] = summ(better, segb)
     sums["B_breakeven_stress"] = summ(better, segb)
     sel = bt.select_variant(crit, sums, data)
-    assert sel["live_variant"] == "A_live" and sel["qualified_replacements"] == ["B_breakeven"]
-    sums["A_live"] = summ(offs, seg, exp=-0.1)                                       # A_live fails C1a
+    assert sel["live_variant"] == prim and sel["qualified_replacements"] == ["B_breakeven"]
+    sums[prim] = summ(offs, seg, exp=-0.1)                                           # the primary fails C1a
     sel = bt.select_variant(crit, sums, data)
     assert sel["live_variant"] is None and "NOT approved automatically" in sel["note"]
     sums["B_breakeven_stress"] = summ(offs, seg)                                     # (d) fails: stress not better
@@ -453,10 +458,11 @@ def test_i7_polymarket_replay_compares_trade_by_trade(bt_cfg):
     ds = bt.Dataset([], [], h1, [(day_start_ms(d0), 0.0, 0.0)], pm_h1=list(h1))
     feats = {d0 + timedelta(days=i): _features(d0 + timedelta(days=i), 1, 60.0, 2.0, 100.0) for i in range(40)}
     cfg = config_from_dict({**bt_cfg.to_dict(), "backtest": {**bt_cfg.to_dict()["backtest"], "pm_replay_min_days": 10}})
-    rep = bt.pm_replay(cfg, ds, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0)
+    rep = bt.pm_replay(cfg, ds, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0, variant="A_live")
     assert rep["available"] and rep["exit_agreement"] == 1.0
     ds_short = bt.Dataset([], [], h1, ds.funding, pm_h1=h1[: 24 * 5])
-    assert bt.pm_replay(cfg, ds_short, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0)["available"] is False
+    assert bt.pm_replay(cfg, ds_short, feats, 0.0005, d0, d0 + timedelta(days=38), 10_000.0,
+                        variant="A_live")["available"] is False
 
 
 def test_calendar_history_is_marked_verified():

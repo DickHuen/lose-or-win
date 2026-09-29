@@ -1,10 +1,10 @@
-# Backtest (review B3): pre-registered design, v1.4.0
+# Backtest (review B3): pre-registered design, v1.5.0
 
 中文摘要：
 - 回測喺你部電腦跑。佢會下載 Binance BTCUSDT 由 2017 年開始嘅公開數據，用同實盤一模一樣嘅決策代碼逐日重播。
-- 合格準則喺 `config/backtest_criteria.yaml`（draft-2，C0 至 C7）。**委員會睇過 draft-2 之後**，你先喺 `Backtest.bat` 打 `CONFIRM`。
+- 合格準則喺 `config/backtest_criteria.yaml`（draft-3，C0 至 C7；規則同 draft-2 一樣，主要變體改為你揀嘅方案 B）。準則定好之後，你先喺 `Backtest.bat` 打 `CONFIRM`。
 - 確認會鎖死準則、config、日曆、程式、數據截止日同費率。之後改任何一樣，`run` 都會拒絕。每次運行都有編號，委員會以第 1 次為準。
-- 實盤用 A_live。其他變體要符合 S5 四個條件先可以取代佢，而且要委員會覆核。
+- 實盤用方案 B：`R4h_live`（每 4 個鐘決定）。回測同時跑 v1.4 嘅每日版 `A_live` 做比較（I1）。其他變體要符合 S5 四個條件先可以取代佢，而且要覆核。
 - 回測唔會落單，亦唔會接觸你個戶口。
 
 This file and `config/backtest_criteria.yaml` were written **before any backtest run on real data**. The design
@@ -38,10 +38,16 @@ For UTC day D, the backtest gives `strategy.day_features` + `strategy.plan_for` 
 
 The same functions are used by the live engine, so the rules exist once. The test `test_backtest_decisions_equal_live_decide_on_20_days` checks score, gates, caps and plan field by field on 20+ days.
 
+For the rolling_4h cadence (R4h variants), the backtest gives `strategy.period_features` + `strategy.plan_for`
+what the live `decide` sees at T + 30 min: the daily candles of the last 1,000 days that end at T (built from 4h
+candles), the last 300 4h candles closed at T, funding from 400 days before T's UTC day, and the events active at
+T + 30 min. `test_backtest_rolling_decisions_equal_live_decide` checks score, score history, gates and plan on 30
+periods.
+
 The following are live-only and not simulated: the live operational blocks (clock skew, calendar-expiry fail-safe, region) and the live review line (S9, which is set from this backtest).
 
 ## Execution and costs (conservative)
-- **Fills:** decisions fill at the close of the 00:00–01:00 UTC 1h candle, 30 minutes after the decision. Entries pay `exits.entry_slippage_bps` (10 bps). Every exit (SL, TP, rule close, kill) pays `backtest.exit_slippage_bps` (10 bps).
+- **Fills:** decisions fill at the close of the 1h candle that starts at the decision boundary (00:00–01:00 UTC for daily; T to T+1h for rolling_4h), 30 minutes after the decision. Entries pay `exits.entry_slippage_bps` (10 bps). Every exit (SL, TP, rule close, kill) pays `backtest.exit_slippage_bps` (10 bps).
 - **Stops:** bracket SL/TP at ±1.5 / 3 ATR from the fill, checked on 1h candles from the fill on.
   - A candle that touches both counts as the SL.
   - **Gap (BT1):** when a candle opens beyond the stop, the fill is that open, which is worse than the SL, plus exit slippage.
@@ -68,29 +74,37 @@ The following are live-only and not simulated: the live operational blocks (cloc
   - **BT5:** live checks 7 times a day, the backtest once. A kill switch can therefore fire later in the backtest than live, so its losses are, if anything, larger than live. This is the conservative direction.
   - The committee specified the automatic resume for the backtest; live, only the owner resumes.
 
-## Variants (pre-registered, config 1.4.0 values)
+## Variants (pre-registered, config 1.5.0 values)
+**Cadence.** `R4h_*` variants use strategy.cadence `rolling_4h` (the owner's choice, option B, v1.5.0): a decision at
+every 4h boundary T (00/04/08/12/16/20 UTC), filled at the close of the 1h candle after T, on daily candles that end at
+T (built from 4h candles exactly like live: `strategy.shifted_daily`). Same score, gates and exits; one entry per
+4h period; the 3-day rule counts 18 periods (72 h); kill switches are checked at every period. The other variants
+decide once a day at 00:30 UTC (v1.4). A test checks the rolling backtest decisions equal live `decide` on 30 periods.
+
 | Name | Rules | Role |
 |---|---|---|
-| `A_live` | Live rules: hybrid score, no breakeven move (V0), crowded funding closes the position | **primary: live uses it** |
+| `R4h_live` | Live rules on the 4h cadence (option B) | **primary: live uses it** |
+| `R4h_confirm` | R4h_live, but a flip needs the opposite signal in two consecutive periods | candidate |
+| `A_live` | v1.4 daily: hybrid score, no breakeven move (V0), crowded funding closes the position | candidate; I1 comparison |
 | `B_breakeven` | A plus a one-time SL move to breakeven at +1 ATR (V2) | candidate |
-| `C_control` | A, but \|score\| < 30 means flat (no entry; close an open position) | candidate; I1 baseline |
+| `C_control` | A, but \|score\| < 30 means flat (no entry; close an open position) | candidate |
 | `A_live_fhold`, `B_breakeven_fhold`, `C_control_fhold` | Same as A / B / C, but crowded funding only blocks new entries and never closes | candidates |
 | `<each of the above>_stress` | the variant under stress costs (BT3) | stress twin, used by C1b and S5(d) |
-| `A_live_noevents` | A without the event gate | sensitivity only (I2: how much calendar errors can matter) |
-| `A_live_nokill` | A without kill switches | sensitivity only (BT4 / I3b: losing streaks not cut off by the 8% kill) |
+| `R4h_live_noevents` | R4h_live without the event gate | sensitivity only (I2: how much calendar errors can matter) |
+| `R4h_live_nokill` | R4h_live without kill switches | sensitivity only (BT4 / I3b: losing streaks not cut off by the 8% kill) |
 
 The owner decided on 2026-09-26 not to test dynamic bankroll or position-sizing variants for now.
 
 ## Choosing the live variant (S5, fixed before any result)
-- **Live uses `A_live`.**
+- **Live uses `R4h_live`** (the primary variant in `config/backtest_criteria.yaml`).
 - Another candidate replaces it only if **all four** hold:
   1. it passes C0–C7 itself;
-  2. its full-period total R beats A_live's at **every** start offset;
-  3. it beats A_live in at least **two of the three** segments (offset median);
-  4. its stress twin beats `A_live_stress` at every offset.
-- If more than one qualifies, the one with the highest worst-offset total R is proposed, and the committee reviews it before any switch.
-- If A_live fails and another variant qualifies, **nothing is approved automatically**. That needs a new committee meeting and a shadow forward period.
-- If A_live fails and nothing qualifies: no-go.
+  2. its full-period total R beats the primary's at **every** start offset;
+  3. it beats the primary in at least **two of the three** segments (offset median);
+  4. its stress twin beats `R4h_live_stress` at every offset.
+- If more than one qualifies, the one with the highest worst-offset total R is proposed and reviewed before any switch.
+- If the primary fails and another variant qualifies, **nothing is approved automatically**: a new review and a shadow
+  forward period first. If the primary fails and nothing qualifies: no-go.
 
 `summary.md` prints this decision (`select_variant`), with each candidate's four checks.
 
@@ -100,7 +114,7 @@ The owner decided on 2026-09-26 not to test dynamic bankroll or position-sizing 
 - The full period is split into three segments for C1c: 2020-10..2022-09, 2022-10..2024-09, 2024-10..2026-09.
 - Nothing is fitted: every threshold (funding percentile, EMA, ATR) comes only from data before the decision.
 
-## Pass / fail (`config/backtest_criteria.yaml`, draft-2)
+## Pass / fail (`config/backtest_criteria.yaml`, draft-3)
 - **C0a–c** data completeness. **C1a–d** edge after costs:
   - C1a: every offset ≥ +0.05 R;
   - C1b: the stress twin > 0 R at every offset;
@@ -108,14 +122,14 @@ The owner decided on 2026-09-26 not to test dynamic bankroll or position-sizing 
   - C1d: t ≥ 2.0.
 - **C2a–b** windows. **C3** worst hourly window drawdown ≤ 20%. **C4** floor never hit. **C5** ≥ 60 trades. **C6** full-period drawdown ≤ 25%. **C7** ≤ 3 drawdown kills.
 - Informational rules:
-  - I1: the hybrid score vs the control;
+  - I1: the 4h cadence vs the v1.4 daily cadence (R4h_live minus A_live);
   - I2: calendar sensitivity;
   - I3a/b: losing-streak p99 with and without kills;
   - I4: notional-cap share ≤ 0.5;
   - I5: long vs short per offset and segment (short negative everywhere → committee discussion; no automatic change);
   - I6: rolling 30-trade expectancy, 5th percentile. It becomes the live review line `risk.live_review_expectancy_floor_r` (S9) in a new config version after the backtest;
   - I7: Polymarket-candle replay vs Binance, with exit agreement ≥ 90% where data exists.
-- The verdict is PASS only if every non-informational rule passes, for `A_live`, and `A_live_stress` where a rule says so.
+- The verdict is PASS only if every non-informational rule passes, for `R4h_live`, and `R4h_live_stress` where a rule says so.
 
 ## Lock and run numbering (R1)
 - `backtest confirm` (Backtest.bat, after the owner types CONFIRM) records a manifest. Its SHA-256 goes into the append-only database. It covers:

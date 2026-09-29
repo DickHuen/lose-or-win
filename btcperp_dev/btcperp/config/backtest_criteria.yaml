@@ -1,12 +1,14 @@
-# Backtest pass/fail rules (review B3). draft-2: the committee's v1.3.0 ruling (C0-C7, I1-I7) as adopted by the
-# developer (REVIEW_v1.3.0.md explains the one adjusted rule, C0b/C0c).
+# Backtest pass/fail rules (review B3). draft-3 (v1.5.0): draft-2 (the committee's v1.3.0 ruling C0-C7, I1-I7 as
+# adopted by the developer; REVIEW_v1.3.0.md explains C0b/C0c) applied to the owner's choice, option B: the primary
+# variant is R4h_live (strategy.cadence rolling_4h). The rules themselves are unchanged; I1 now compares the 4h
+# cadence with the v1.4 daily one, I2/I3b use the rolling variants.
 # The owner confirms with `backtest confirm` (windows\Backtest.bat, type CONFIRM) only AFTER the committee has
 # reviewed this file. The confirmation locks this file, the strategy / risk / backtest config, both calendars, the
 # code, the data slice (fixed end date) and the fee rate (review R1); `backtest run` refuses any change and numbers
 # each run under the confirmation - the committee uses run #1.
-# Everything is on the primary variant A_live unless stated; `use_twin` reads its stress twin (A_live_stress).
-criteria_version: "draft-2 (2026-09-27)"
-primary_variant: A_live
+# Everything is on the primary variant R4h_live unless stated; `use_twin` reads its stress twin (R4h_live_stress).
+criteria_version: "draft-3 (2026-09-29)"
+primary_variant: R4h_live
 rules:
   # ---- C0 data completeness (review R2)
   - {id: C0a, scope: data, metric: h1_missing_share, op: "<=", value: 0.001,
@@ -40,12 +42,12 @@ rules:
   - {id: C7, metric: drawdown_kills_full_median, op: "<=", value: 3,
      text: "Drawdown kill-switch triggers per full-period run: median over offsets <= 3"}
   # ---- informational
-  - {id: I1, informational: true, metric: full_total_r_median, metric_minus: {variant: C_control, metric: full_total_r_median},
-     op: ">", value: 0, text: "Hybrid adds value: A_live minus C_control, full-period total R (median)"}
-  - {id: I2, metric: full_expectancy_r_min, metric_minus: {variant: A_live_noevents, metric: full_expectancy_r_min},
-     op: report, text: "Calendar sensitivity: A_live minus A_live_noevents, expectancy R (min over offsets) - value only"}
+  - {id: I1, informational: true, metric: full_total_r_median, metric_minus: {variant: A_live, metric: full_total_r_median},
+     op: ">", value: 0, text: "4h cadence adds value: R4h_live minus A_live (v1.4 daily), full-period total R (median)"}
+  - {id: I2, metric: full_expectancy_r_min, metric_minus: {variant: R4h_live_noevents, metric: full_expectancy_r_min},
+     op: report, text: "Calendar sensitivity: R4h_live minus R4h_live_noevents, expectancy R (min over offsets) - value only"}
   - {id: I3a, metric: streak_loss_pct_p99, op: report, text: "Losing-streak loss p99 (% of equity), with kill switches"}
-  - {id: I3b, variant: A_live_nokill, metric: streak_loss_pct_p99, op: report,
+  - {id: I3b, variant: R4h_live_nokill, metric: streak_loss_pct_p99, op: report,
      text: "Losing-streak loss p99 WITHOUT kill switches (BT4: not truncated by the 8% kill)"}
   - {id: I4, informational: true, metric: notional_cap_binding_share_median, op: "<=", value: 0.5,
      text: "Share of trades capped by the 30% notional cap (median) <= 0.5 - else review the 30% cap"}

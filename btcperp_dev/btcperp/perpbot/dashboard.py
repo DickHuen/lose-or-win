@@ -116,7 +116,7 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
                        if open_t else None),
         "decision": ({"utc_day": dec["utc_day"], "ts_hkt": dec["ts_hkt"], "score": dec["data"].get("score"),
                       "gates": dec["data"].get("gates"), "plan": dec["data"].get("plan"), "action": dec["action"],
-                      "reason": dec["reason"]} if dec else None),
+                      "reason": dec["reason"], "analysis": dec["data"].get("analysis")} if dec else None),
         "last_decision_row": ({"utc_day": last_dec["utc_day"], "action": last_dec["action"], "reason": last_dec["reason"],
                                "ts_hkt": last_dec["ts_hkt"]} if last_dec else None),
         "equity_series": series,
@@ -270,7 +270,7 @@ th{color:var(--mut);font-weight:600}td.num,th.num{text-align:right;font-variant-
 .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;margin:0 4px 4px 0;border:1px solid var(--line)}
 .pill.on{background:rgba(183,121,31,.15);color:var(--warn);border-color:transparent}.scroll{max-height:360px;overflow:auto}
 svg text{fill:var(--mut);font-size:11px}
-</style></head><body>
+pre.ana{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5;margin:10px 0 0;padding:10px;border-radius:8px;background:var(--bg)}</style></head><body>
 <header><h1>btcperp</h1><span id="state" class="badge">…</span><span id="reasons" class="mut"></span>
 <span style="flex:1"></span><span class="down" id="snaperr"></span><span class="mut" id="upd"></span>
 <button id="refresh">從交易所更新</button><button id="readall">標記警報已讀 (<span id="unread">0</span>)</button></header>
@@ -334,11 +334,11 @@ function render(d){
  $("pos").innerHTML=h;
  const D=d.decision;if(D&&D.score){const s=D.score,pl=D.plan||{},gs=D.gates||{};
   const comp=(n,v,m)=>"<div class='kv'><div>"+n+"</div><div>"+f(v)+"</div></div><div class='bar'><i style='width:"+Math.min(100,Math.abs(v)/m*100)+"%;background:"+(v>=0?"var(--up)":"var(--down)")+"'></i></div>";
-  $("dec").innerHTML="<div class='kv'><div>日期 (UTC)</div><div>"+esc(D.utc_day)+" <span class='mut'>"+esc(D.ts_hkt)+"</span></div><div>分數</div><div class='big "+(s.score>0?"up":s.score<0?"down":"")+"'>"+f(s.score)+"</div>"+
+  $("dec").innerHTML="<div class='kv'><div>決定時段 (UTC)</div><div>"+esc(D.utc_day)+" <span class='mut'>"+esc(D.ts_hkt)+"</span></div><div>分數</div><div class='big "+(s.score>0?"up":s.score<0?"down":"")+"'>"+f(s.score)+"</div>"+
    "<div>方向 / 注碼級別</div><div>"+dir(s.direction)+" ・ "+f(s.tier_fraction*100,0)+"%</div><div>行動</div><div><b>"+esc(D.action)+"</b></div></div>"+
    comp("趨勢 Trend",s.trend_component,50)+comp("突破 Breakout",s.breakout_component,25)+comp("收市位置 CLV",s.clv_component,25)+
    "<div>"+Object.entries(gs).map(([n,g])=>"<span class='pill "+(g.triggered?"on":"")+"'>"+esc(n)+(g.triggered?" ✓":"")+"</span>").join("")+"</div>"+
-   "<div class='mut'>"+esc(D.reason)+"</div>";}
+   "<div class='mut'>"+esc(D.reason)+"</div>"+(D.analysis?"<pre class='ana'>"+esc(D.analysis.join("\n"))+"</pre>":"");}
  else $("dec").innerHTML="<div class='mut'>未有決定紀錄"+(d.last_decision_row?(" ・ 最後: "+esc(d.last_decision_row.action)+" "+esc(d.last_decision_row.reason)):"")+"</div>";
  chart(d.equity_series);
  const S=d.stats;$("stats").innerHTML=S&&S.trades?("<div>交易數</div><div>"+S.trades+"</div><div>勝率</div><div>"+f(S.win_rate_pct,1)+"%</div><div>淨盈虧</div><div class='"+(S.net_pnl>=0?"up":"down")+"'>"+f(S.net_pnl)+"</div>"+

@@ -21,7 +21,7 @@ os.environ["BTCPERP_NO_TOAST"] = "1"      # never pop real Windows notifications
 os.environ["BTCPERP_NO_SCHTASKS"] = "1"   # never touch the real Windows scheduled tasks (selftest runs on the bot PC)
 
 from perpbot.calendar_events import parse_calendar  # noqa: E402
-from perpbot.config import config_from_dict, load_config  # noqa: E402
+from perpbot.config import config_from_dict  # noqa: E402
 from perpbot.engine import Engine  # noqa: E402
 from perpbot.exchange.base import AccountConfig  # noqa: E402
 from perpbot.exchange.mock import MockExchange  # noqa: E402
@@ -43,16 +43,38 @@ def hkt(y: int, m: int, d: int, hh: int, mm: int, ss: int = 5) -> datetime:
     return datetime(y, m, d, hh, mm, ss, tzinfo=timezone(timedelta(hours=8))).astimezone(UTC)
 
 
-@pytest.fixture
-def cfg_dict() -> dict[str, Any]:
+DAILY_DECIDE = ["08:30", "08:50"]
+DAILY_MANAGE = ["12:30", "16:30", "20:30", "00:30", "04:30"]
+
+
+def as_daily(d: dict[str, Any]) -> dict[str, Any]:
+    """The v1.4 daily cadence. Most tests exercise the daily rules; the rolling_4h tests (test_rolling.py) use
+    the shipped config (strategy.cadence rolling_4h) through `rolling_cfg_dict`."""
+    d["strategy"]["cadence"] = "daily"
+    d["schedule"]["decide_times_hkt"] = list(DAILY_DECIDE)
+    d["schedule"]["manage_times_hkt"] = list(DAILY_MANAGE)
+    return d
+
+
+def shipped_config() -> dict[str, Any]:
     import yaml
 
     return yaml.safe_load((ROOT / "config" / "config.yaml").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
+def cfg_dict() -> dict[str, Any]:
+    return as_daily(shipped_config())
+
+
+@pytest.fixture
+def rolling_cfg_dict() -> dict[str, Any]:
+    return shipped_config()
+
+
+@pytest.fixture
 def cfg() -> Any:
-    return load_config(ROOT / "config" / "config.yaml")
+    return config_from_dict(as_daily(shipped_config()))
 
 
 class FakeBinance:
@@ -109,6 +131,22 @@ class FakeBinance:
         src = self.daily if interval == "1d" else self.h4
         closed = [c for k, c in sorted(src.items()) if c.close_ms <= now_ms]
         return closed[-limit:]
+
+    def klines_range(self, interval: str, start_ms: int, end_ms: int, max_pages: int = 200) -> list[Candle]:
+        if self.fail:
+            from perpbot.datasources.binance import DataSourceError
+
+            raise DataSourceError("binance down (test)")
+        src = self.daily if interval == "1d" else self.h4
+        return [c for k, c in sorted(src.items()) if start_ms <= c.open_ms and c.close_ms <= end_ms]
+
+    def signal_4h(self, t_ms: int, kind: str) -> None:
+        """rolling_4h: shape the 4h candle that closes at t_ms, so the daily candle ending at t_ms gives the signal."""
+        o = t_ms - 4 * 3_600_000
+        shapes = {"strong_long": (P, P + 3 * A, P - A / 3, P + 3 * A), "strong_short": (P, P + A / 3, P - 3 * A, P - 3 * A),
+                  "flat": (P, P + A / 3, P - A / 3, P)}
+        op, hi, lo, cl = shapes[kind]
+        self.h4[o] = Candle(o, op, hi, lo, cl, 1.0, t_ms)
 
     def funding(self, start_ms: int, end_ms: int) -> list[tuple[int, float, float]]:
         return [(ts, r, P) for ts, r in sorted(self.fund.items()) if start_ms <= ts <= end_ms]
@@ -208,7 +246,15 @@ def world(tmp_path: Path, cfg_dict: dict[str, Any]) -> Any:
 def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "btcperp"
     (root / "config").mkdir(parents=True)
-    shutil.copy2(ROOT / "config" / "config.yaml", root / "config" / "config.yaml")
+    text = (ROOT / "config" / "config.yaml").read_text(encoding="utf-8")
+    for a, b in (('cadence: "rolling_4h"', 'cadence: "daily"'),
+                 ('decide_times_hkt: ["00:30", "00:50", "04:30", "04:50", "08:30", "08:50", "12:30", "12:50", "16:30", '
+                  '"16:50",\n                     "20:30", "20:50"]', 'decide_times_hkt: ["08:30", "08:50"]'),
+                 ('manage_times_hkt: ["02:30", "06:30", "10:30", "14:30", "18:30", "22:30"]',
+                  'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]')):
+        assert a in text, a
+        text = text.replace(a, b)
+    (root / "config" / "config.yaml").write_text(text, encoding="utf-8")     # daily cadence, like cfg_dict
     shutil.copy2(ROOT / "config" / "calendar.yaml", root / "config" / "calendar.yaml")
     (root / "tests").mkdir()
     (root / "VERSION").write_text("test\n", encoding="utf-8")

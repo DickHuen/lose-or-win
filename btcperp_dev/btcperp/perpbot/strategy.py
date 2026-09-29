@@ -1,7 +1,13 @@
-"""Hybrid trend/structure strategy: score, size tiers, gates and the daily plan.
+"""Hybrid trend/structure strategy: score, size tiers, gates and the plan.
 
 Pure functions only: no I/O. The live engine, the shadow simulator and the backtest all use
-`day_features` + `plan_for` (-> `decide_plan`), so the rules are implemented exactly once.
+`day_features` / `period_features` + `plan_for` (-> `decide_plan`), so the rules are implemented exactly once.
+
+Cadence (strategy.cadence):
+- daily: one decision per UTC day D, on Binance daily candles closed at D 00:00 UTC.
+- rolling_4h (v1.5.0, option B): one decision per 4-hour period starting at T (UTC 00/04/08/12/16/20), on daily
+  candles that END at T (built from 4h candles). Same rules and parameters; the "day" simply ends at T instead of
+  at 00:00 UTC. The 3-day rule counts 3 x 6 periods; a flip may need the opposite signal in consecutive periods.
 """
 
 from __future__ import annotations
@@ -10,8 +16,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from typing import Any, Sequence
 
+from bisect import bisect_left, bisect_right
+from datetime import datetime, timezone
+
 from perpbot.indicators import Candle, atr_wilder, clip, clv, ema, last_value, percentile_rank
-from perpbot.timeutil import DAY_MS, MINUTE_MS, day_start_ms
+from perpbot.timeutil import DAY_MS, HOUR_MS, MINUTE_MS, day_start_ms, from_ms, to_ms
+
+H4_MS = 4 * HOUR_MS
+CADENCES = ("daily", "rolling_4h")
 
 
 class InsufficientData(Exception):
@@ -74,14 +86,17 @@ def tier_fraction(abs_score: float, s: Any) -> float:
     return float(s.tier_high_fraction)
 
 
-def compute_score(daily: Sequence[Candle], decision_day: date, s: Any) -> ScoreResult:
-    """Score for UTC day `decision_day` from daily candles closed before its 00:00 UTC."""
-    closed = closed_candles_before(daily, day_start_ms(decision_day))
+def compute_score(daily: Sequence[Candle], decision_day: date, s: Any, *, cutoff_ms: int | None = None,
+                  label: str | None = None) -> ScoreResult:
+    """Score for UTC day `decision_day` from daily candles closed before its 00:00 UTC. With `cutoff_ms` (rolling
+    cadence): from daily candles closed at cutoff_ms, the last one opening exactly one day before it."""
+    cut = day_start_ms(decision_day) if cutoff_ms is None else int(cutoff_ms)
+    closed = closed_candles_before(daily, cut)
     need = max(s.min_daily_candles, s.ema_regime_period, s.atr_period + 1, 2)
     if len(closed) < need:
         raise InsufficientData(f"need {need} closed daily candles, have {len(closed)}")
     last = closed[-1]
-    expected_open = day_start_ms(decision_day) - DAY_MS
+    expected_open = cut - DAY_MS
     if last.open_ms != expected_open:
         raise InsufficientData(
             f"latest closed daily candle opens at {last.open_ms}, expected {expected_open} (data not up to date)")
@@ -110,11 +125,23 @@ def compute_score(daily: Sequence[Candle], decision_day: date, s: Any) -> ScoreR
     a = abs(score)
     frac = tier_fraction(a, s) if d != 0 else 0.0
     return ScoreResult(
-        decision_day=decision_day.isoformat(), candle_open_ms=last.open_ms, close=c, high=h, low=l,
+        decision_day=label or decision_day.isoformat(), candle_open_ms=last.open_ms, close=c, high=h, low=l,
         prev_high=prev.high, prev_low=prev.low, ema_trend=ema_t, ema_regime=ema_r, atr=atr, clv=clv_v,
         trend_component=trend, breakout_component=breakout, clv_component=clv_comp,
         structure_component=structure, score=score, direction=d, abs_score=a, tier_fraction=frac,
         candles_used=len(closed))
+
+
+def score_history(daily: Sequence[Candle], today: date, days: int, s: Any) -> dict[str, float]:
+    """Score for today and the previous days-1 UTC days (daily cadence)."""
+    out: dict[str, float] = {}
+    for i in range(days):
+        d = today - timedelta(days=i)
+        try:
+            out[d.isoformat()] = compute_score(daily, d, s).score
+        except InsufficientData:
+            break
+    return out
 
 
 def direction_history(daily: Sequence[Candle], today: date, days: int, s: Any) -> dict[str, int]:
@@ -171,16 +198,17 @@ def h4_gate(ema_fast: float, ema_slow: float, candle_open_ms: int, direction: in
                       {"trend": trend, "ema_fast": ema_fast, "ema_slow": ema_slow, "candle_open_ms": candle_open_ms})
 
 
-def h4_emas(h4: Sequence[Candle], decision_day: date, fast: int, slow: int) -> tuple[float, float, int]:
-    """EMA fast/slow on 4h closes up to the last 4h candle closed at D 00:00 UTC (20:00-00:00)."""
-    cutoff = day_start_ms(decision_day)
+def h4_emas(h4: Sequence[Candle], decision_day: date, fast: int, slow: int, *,
+            cutoff_ms: int | None = None) -> tuple[float, float, int]:
+    """EMA fast/slow on 4h closes up to the last 4h candle closed at D 00:00 UTC (20:00-00:00), or at cutoff_ms."""
+    cutoff = day_start_ms(decision_day) if cutoff_ms is None else int(cutoff_ms)
     closed = [c for c in h4 if (c.close_ms if c.close_ms else c.open_ms + 4 * 3_600_000) <= cutoff]
     closed.sort(key=lambda c: c.open_ms)
     if len(closed) < slow:
         raise InsufficientData(f"need {slow} closed 4h candles, have {len(closed)}")
     expected_open = cutoff - 4 * 3_600_000
     if closed[-1].open_ms != expected_open:
-        raise InsufficientData("last closed 4h candle is not the 20:00-00:00 UTC candle")
+        raise InsufficientData("last closed 4h candle does not end at the decision time")
     closes = [c.close for c in closed]
     return last_value(ema(closes, fast)), last_value(ema(closes, slow)), closed[-1].open_ms
 
@@ -236,6 +264,8 @@ class DecisionContext:
     event_allows_rule_closes: bool
     entry_block: str | None = None         # blocks NEW positions only (calendar expired, clock skew); closes still run
     funding_rule_closes: bool = True       # backtest variant: False = crowded funding blocks entries but never closes
+    flip_confirmed: bool = True            # rolling_4h with flip_confirm_periods > 1: earlier periods agree
+    period_word: str = "UTC day"           # for messages
 
 
 @dataclass
@@ -264,7 +294,7 @@ def evaluate_entry(ctx: DecisionContext) -> tuple[int, float, list[str]]:
     if ctx.direction == 0:
         return 0, 0.0, ["score is exactly 0 (no signal)"]
     if ctx.entered_today:
-        blocked.append("already entered this UTC day (max one entry per day)")
+        blocked.append(f"already entered this {ctx.period_word} (max one entry per {ctx.period_word})")
     if ctx.entry_block:
         blocked.append(ctx.entry_block)
     if ctx.event_active:
@@ -299,6 +329,8 @@ def decide_plan(ctx: DecisionContext) -> Plan:
                 notes.append("3-day rule suppressed by event window")
             else:
                 close_reason = "three_day_rule"
+        elif ctx.direction == -pos and ctx.abs_score >= ctx.flip_min_abs_score and not ctx.flip_confirmed:
+            notes.append("opposite signal not yet confirmed by the previous period: hold, flip needs confirmation")
         elif ctx.direction == -pos and ctx.abs_score >= ctx.flip_min_abs_score:
             if ctx.event_active:
                 notes.append("event window: flip suppressed, holding")
@@ -363,6 +395,11 @@ class DayFeatures:
     g_funding: GateResult
     g_event: GateResult
     caps: list[tuple[str, float]]
+    cadence: str = "daily"
+    key: str = ""                          # period key: "YYYY-MM-DD" (daily) or "YYYY-MM-DDTHH:00" (rolling_4h)
+    period_ms: int = 0                     # decision time T (UTC ms): D 00:00 or the 4h boundary
+    scores: dict[str, float] = field(default_factory=dict)   # score per period key, newest included (flip confirm)
+    daily_used: list[Candle] = field(default_factory=list)   # rolling_4h: the daily candles ending at T (for logs)
 
     @property
     def gates(self) -> list[GateResult]:
@@ -385,29 +422,187 @@ def day_features(cfg: Any, day_d: date, daily: Sequence[Candle], h4: Sequence[Ca
     e_fast, e_slow, h4_open = h4_emas(h4, day_d, int(g.h4_ema_fast), int(g.h4_ema_slow))
     cutoff = day_start_ms(day_d) + int(float(g.funding_cutoff_tolerance_minutes) * MINUTE_MS)
     fstat = funding_percentile(funding_records, cutoff, int(g.funding_lookback_days))
-    dirs = direction_history(daily, day_d, int(s.opposite_days_rule) + 2, s)
+    scores = score_history(daily, day_d, int(s.opposite_days_rule) + 2, s)
+    dirs = {k: direction_of(v) for k, v in scores.items()}
     g_regime = regime_gate(sc.close, sc.ema_regime, sc.direction, float(g.regime_cap))
     g_h4 = h4_gate(e_fast, e_slow, h4_open, sc.direction, float(g.h4_cap))
     g_fund = funding_gate(fstat.percentile, sc.direction, float(g.funding_high_percentile), float(g.funding_low_percentile))
     caps = [(x.name, float(x.cap)) for x in (g_regime, g_h4) if x.triggered and x.cap is not None]
     return DayFeatures(day_d, sc, e_fast, e_slow, h4_open, fstat, dirs, events, g_regime, g_h4, g_fund,
-                       event_gate(events), caps)
+                       event_gate(events), caps, "daily", day_d.isoformat(), day_start_ms(day_d), scores)
 
 
 def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | None, entered_today: bool,
              paused_reason: str | None, entry_block: str | None = None, ungated: bool = False,
-             funding_rule_closes: bool = True, ignore_events: bool = False) -> tuple[Plan, DecisionContext]:
+             funding_rule_closes: bool = True, ignore_events: bool = False, entry_key: str | None = None,
+             flip_confirm_periods: int | None = None) -> tuple[Plan, DecisionContext]:
+    """`entry_day` (daily) / `entry_key` (rolling_4h: the entry period key) of the open position."""
     s, g = cfg.strategy, cfg.gates
     sc = f.score
+    rolling = f.cadence == "rolling_4h"
+    if rolling:
+        per_day = DAY_MS // H4_MS
+        streak = opposite_streak_keys(position_dir, entry_key, f.directions, f.key)
+        rule = int(s.opposite_days_rule) * per_day
+        k = int(flip_confirm_periods if flip_confirm_periods is not None else s.flip_confirm_periods)
+        confirmed = flip_confirmed(position_dir, f.scores, f.key, k, float(s.flip_min_abs_score))
+    else:
+        streak = opposite_streak(position_dir, entry_day, f.directions, f.day)
+        rule = int(s.opposite_days_rule)
+        confirmed = True
     ctx = DecisionContext(
         direction=sc.direction, abs_score=sc.abs_score, tier_fraction=sc.tier_fraction,
         caps=[] if ungated else list(f.caps),
         funding_pct=None if ungated else f.funding.percentile,
         funding_high=float(g.funding_high_percentile), funding_low=float(g.funding_low_percentile),
         event_active=False if (ungated or ignore_events) else f.event_active, position_dir=position_dir,
-        opposite_streak=opposite_streak(position_dir, entry_day, f.directions, f.day),
+        opposite_streak=streak,
         entered_today=entered_today, paused_reason=paused_reason,
-        flip_min_abs_score=float(s.flip_min_abs_score), opposite_days_rule=int(s.opposite_days_rule),
+        flip_min_abs_score=float(s.flip_min_abs_score), opposite_days_rule=rule,
         event_allows_rule_closes=bool(g.event_allows_rule_closes), entry_block=entry_block,
-        funding_rule_closes=funding_rule_closes)
+        funding_rule_closes=funding_rule_closes, flip_confirmed=confirmed,
+        period_word="4-hour period" if rolling else "UTC day")
     return decide_plan(ctx), ctx
+
+
+# ---------------------------------------------------------------- rolling 4h cadence (v1.5.0, option B)
+
+def period_key(t_ms: int) -> str:
+    """'YYYY-MM-DDTHH:00' (UTC) of a 4h boundary."""
+    return from_ms(int(t_ms)).strftime("%Y-%m-%dT%H:00")
+
+
+def period_start(t_ms: int) -> int:
+    """The 4h boundary (UTC 00/04/08/12/16/20) at or before t_ms."""
+    return int(t_ms) // H4_MS * H4_MS
+
+
+def key_ms(key: str) -> int:
+    """Inverse of period_key (also accepts a plain 'YYYY-MM-DD' = 00:00 UTC)."""
+    k = key if "T" in key else key + "T00:00"
+    return to_ms(datetime.fromisoformat(k).replace(tzinfo=timezone.utc))
+
+
+def shifted_daily(h4: Sequence[Candle], cutoff_ms: int, count: int) -> list[Candle]:
+    """Daily candles that END exactly at cutoff_ms (a 4h boundary): candle k covers
+    [cutoff - (count-k)*1d, cutoff - (count-k-1)*1d), built from the 4h candles inside it (open of the first,
+    highest high, lowest low, close of the last, summed volume). A day without any 4h candle is left out.
+    `h4` must be sorted by open time. At cutoff 00:00 UTC this equals Binance's own daily candles."""
+    start = int(cutoff_ms) - int(count) * DAY_MS
+    opens = [c.open_ms for c in h4]
+    i, j = bisect_left(opens, start), bisect_left(opens, int(cutoff_ms))
+    out: list[Candle] = []
+    cur_k, bucket = None, []  # type: ignore[var-annotated]
+
+    def flush() -> None:
+        if bucket:
+            o = start + cur_k * DAY_MS
+            out.append(Candle(o, bucket[0].open, max(c.high for c in bucket), min(c.low for c in bucket),
+                              bucket[-1].close, sum(c.volume for c in bucket), o + DAY_MS))
+
+    for c in h4[i:j]:
+        if c.open_ms + H4_MS > cutoff_ms:
+            continue
+        k = (c.open_ms - start) // DAY_MS
+        if k != cur_k:
+            flush()
+            cur_k, bucket = k, []
+        bucket.append(c)
+    flush()
+    return out
+
+
+def h4_gate_window(h4_sorted: Sequence[Candle], t_ms: int, n: int, opens: Sequence[int] | None = None) -> list[Candle]:
+    """The last n 4h candles closed at t_ms (what the live decide loads for the h4 gate). `opens`: the open times
+    of h4_sorted, when the caller already has them (backtest)."""
+    op = opens if opens is not None else [c.open_ms for c in h4_sorted]
+    j = bisect_right(op, int(t_ms) - H4_MS)
+    return list(h4_sorted[max(0, j - n):j])
+
+
+def rolling_score(daily_shifted: Sequence[Candle], t_ms: int, s: Any) -> ScoreResult:
+    """The daily-rule score at the 4h boundary t_ms, from daily candles ending at t_ms."""
+    d = from_ms(int(t_ms)).date()
+    return compute_score(daily_shifted, d, s, cutoff_ms=int(t_ms), label=period_key(t_ms))
+
+
+def opposite_streak_keys(position_dir: int, entry_key: str | None, directions: dict[str, int], current_key: str) -> int:
+    """Consecutive periods ending at current_key whose signal is opposite to the position, counting only periods
+    after the entry period. A daily entry key 'YYYY-MM-DD' counts as that day's 00:00 UTC period."""
+    if position_dir == 0:
+        return 0
+    ek = None if entry_key is None else (entry_key if "T" in entry_key else entry_key + "T00:00")
+    n = 0
+    for k in sorted((k for k in directions if k <= current_key), reverse=True):
+        if ek is not None and k <= ek:
+            break
+        if directions[k] != -position_dir:
+            break
+        n += 1
+    return n
+
+
+def flip_confirmed(position_dir: int, scores: dict[str, float], current_key: str, periods: int,
+                   flip_min: float) -> bool:
+    """True when the newest `periods` periods (current included) all have an opposite signal of at least
+    flip_min. periods <= 1: always True (no confirmation needed)."""
+    if periods <= 1 or position_dir == 0:
+        return True
+    recent = sorted((k for k in scores if k <= current_key), reverse=True)[:periods]
+    if len(recent) < periods:
+        return False
+    return all(direction_of(scores[k]) == -position_dir and abs(scores[k]) >= flip_min for k in recent)
+
+
+def period_features(cfg: Any, t_ms: int, score_at: Any, h4: Sequence[Candle],
+                    funding_records: Sequence[tuple[int, float]], events: list[dict[str, Any]]) -> DayFeatures:
+    """Rolling_4h features at the 4h boundary t_ms. `score_at(T)` returns the ScoreResult at boundary T (or raises
+    InsufficientData); live computes it from the fetched 4h candles, the backtest from a cache of the same values.
+    `h4`: the 4h candles available at t_ms (the h4 gate uses the ones closed at t_ms)."""
+    s, g = cfg.strategy, cfg.gates
+    sc = score_at(t_ms)
+    e_fast, e_slow, h4_open = h4_emas(h4, sc_day(t_ms), int(g.h4_ema_fast), int(g.h4_ema_slow), cutoff_ms=t_ms)
+    cutoff = int(t_ms) + int(float(g.funding_cutoff_tolerance_minutes) * MINUTE_MS)
+    fstat = funding_percentile(funding_records, cutoff, int(g.funding_lookback_days))
+    n = int(s.opposite_days_rule) * int(DAY_MS // H4_MS) + 2
+    scores: dict[str, float] = {}
+    for i in range(n):
+        ti = int(t_ms) - i * H4_MS
+        try:
+            scores[period_key(ti)] = (sc if i == 0 else score_at(ti)).score
+        except InsufficientData:
+            break
+    dirs = {k: direction_of(v) for k, v in scores.items()}
+    g_regime = regime_gate(sc.close, sc.ema_regime, sc.direction, float(g.regime_cap))
+    g_h4 = h4_gate(e_fast, e_slow, h4_open, sc.direction, float(g.h4_cap))
+    g_fund = funding_gate(fstat.percentile, sc.direction, float(g.funding_high_percentile), float(g.funding_low_percentile))
+    caps = [(x.name, float(x.cap)) for x in (g_regime, g_h4) if x.triggered and x.cap is not None]
+    return DayFeatures(sc_day(t_ms), sc, e_fast, e_slow, h4_open, fstat, dirs, events, g_regime, g_h4, g_fund,
+                       event_gate(events), caps, "rolling_4h", period_key(t_ms), int(t_ms), scores)
+
+
+def live_rolling_features(cfg: Any, t_ms: int, h4: Sequence[Candle], funding_records: Sequence[tuple[int, float]],
+                          events: list[dict[str, Any]]) -> DayFeatures:
+    """rolling_4h features at T from fetched 4h candles (live decide and preview); the backtest feeds
+    `period_features` from cached scores of the same shifted candles."""
+    h4s = sorted(h4, key=lambda c: c.open_ms)
+    n_days = int(cfg.binance.daily_candles_to_load)
+    cache: dict[int, Any] = {}
+
+    def score_at(ti: int) -> Any:
+        if ti not in cache:
+            try:
+                cache[ti] = rolling_score(shifted_daily(h4s, ti, n_days), ti, cfg.strategy)
+            except InsufficientData as e:
+                cache[ti] = e
+        v = cache[ti]
+        if isinstance(v, InsufficientData):
+            raise v
+        return v
+
+    gate = h4_gate_window(h4s, t_ms, int(cfg.binance.h4_candles_to_load))
+    return period_features(cfg, t_ms, score_at, gate, funding_records, events)
+
+
+def sc_day(t_ms: int) -> date:
+    return from_ms(int(t_ms)).date()

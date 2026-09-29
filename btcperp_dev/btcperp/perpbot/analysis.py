@@ -1,0 +1,160 @@
+"""Readable analysis of a decision, in Traditional Chinese (v1.5.0).
+
+Built only from the decision record the engine stores (or the same fields computed by `preview`), so the text
+always matches what the bot actually decided. No I/O.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+ACTION_ZH = {"enter": "開倉", "hold": "繼續持有", "none": "唔做嘢", "close": "平倉", "flip": "反手",
+             "close_then_enter": "平倉再開倉", "paused": "暫停中（唔做策略動作）"}
+CLOSE_ZH = {"flip": "反方向強訊號（反手）", "three_day_rule": "連續 3 日（72 小時）反方向", "funding_rule": "資金費擠擁",
+            "flat_rule": "訊號太弱（空倉規則）"}
+GATE_ZH = {"ema200_regime": "200 日線", "h4_trend": "4 小時趨勢", "extreme_funding": "資金費", "event_window": "經濟數據"}
+NOTE_ZH = (
+    ("same direction: hold", "同方向：繼續持有"),
+    ("weak opposite signal", "反方向但訊號弱：繼續持有，止損止賺不變"),
+    ("score 0", "分數係 0：不變"),
+    ("event window: flip suppressed", "經濟數據時段：唔反手，繼續持有"),
+    ("opposite signal not yet confirmed", "反方向訊號未確認（要連續兩個時段）：繼續持有"),
+    ("event window (FOMC/CPI/NFP)", "經濟數據時段（FOMC／CPI／非農）：唔開新倉"),
+    ("extreme funding percentile", "資金費極端：唔開擠擁嗰邊"),
+    ("already entered this", "呢個時段已經入過場"),
+    ("late decision after the entry window", "過咗入場時間補做：只執行平倉規則，唔入場"),
+    ("region blocked", "地區限制：唔開新倉"),
+    ("economic calendar coverage ended", "經濟日曆過期：唔開新倉"),
+    ("this computer's clock differs", "電腦時鐘同交易所差太遠：唔開新倉"),
+    ("exchange server time unreadable", "讀唔到交易所時間：唔開新倉"),
+    ("crowded funding: hold", "資金費擠擁：持有（變體）"),
+    ("funding rule suppressed", "經濟數據時段：暫不執行資金費平倉"),
+    ("3-day rule suppressed", "經濟數據時段：暫不執行 3 日規則"),
+    ("paused:", "暫停中：倉位同止損止賺不變"),
+)
+
+
+def zh_note(text: str) -> str:
+    for key, zh in NOTE_ZH:
+        if text.startswith(key) or key in text:
+            return zh
+    return text
+
+
+def _p(x: Any, d: int = 0) -> str:
+    if x is None:
+        return "–"
+    return f"{float(x):,.{d}f}"
+
+
+def _dir(d: int) -> str:
+    return {1: "做多", -1: "做空"}.get(int(d or 0), "冇方向")
+
+
+def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, ramp: bool = False,
+           next_hkt: str | None = None, position: dict[str, Any] | None = None, title: str = "BTC 決定分析") -> list[str]:
+    """Lines of text. `decision`: the stored decision data (score, inputs, gates, plan, decision_hkt)."""
+    sc = decision.get("score") or {}
+    inp = decision.get("inputs") or {}
+    gates = decision.get("gates") or {}
+    plan = decision.get("plan") or {}
+    rolling = plan.get("cadence") == "rolling_4h" or inp.get("cadence") == "rolling_4h"
+    period = str(plan.get("period_utc") or inp.get("period_utc") or decision.get("utc_day") or "")
+    if period.endswith("Z"):                                  # 2026-10-05T04:00:00Z -> 2026-10-05 04:00
+        period = period[:16].replace("T", " ")
+    mark = plan.get("mark") or inp.get("mark")
+    atr = sc.get("atr")
+    close = sc.get("close")
+    out = [f"【{title}】{decision.get('decision_hkt', '')}｜時段 {period} UTC"
+           f"（{'每 4 小時' if rolling else '每日'}）"]
+    out.append(f"價格：Polymarket 標記價 {_p(mark)}" + (f"｜日線收市 {_p(close)}" if close is not None else ""))
+    score = float(sc.get("score") or 0.0)
+    tier = float(sc.get("tier_fraction") or 0.0)
+    out.append(f"分數 {score:+.1f} → {_dir(sc.get('direction'))}，注碼級別 {tier * 100:.0f}%")
+    ema50, ema200 = sc.get("ema_trend"), sc.get("ema_regime")
+    if ema50 is not None and atr:
+        gap = (float(close) - float(ema50)) / float(atr)
+        out.append(f"  趨勢 {float(sc.get('trend_component') or 0):+.1f}：收市{'高' if gap >= 0 else '低'}過 50 日線 "
+                   f"{_p(ema50)}（相差 {abs(gap):.1f} 倍 ATR）")
+    b = float(sc.get("breakout_component") or 0.0)
+    if b > 0:
+        out.append(f"  突破 {b:+.0f}：收市高過前一日最高 {_p(sc.get('prev_high'))}")
+    elif b < 0:
+        out.append(f"  突破 {b:+.0f}：收市低過前一日最低 {_p(sc.get('prev_low'))}")
+    else:
+        out.append(f"  突破 0：收市喺前一日高低位之間（{_p(sc.get('prev_low'))}–{_p(sc.get('prev_high'))}）")
+    if sc.get("clv") is not None:
+        pos_pct = (float(sc["clv"]) + 1.0) / 2.0 * 100.0
+        out.append(f"  收市位置 {float(sc.get('clv_component') or 0):+.1f}：收喺當日高低之間嘅 {pos_pct:.0f}%"
+                   f"（高 {_p(sc.get('high'))}／低 {_p(sc.get('low'))}）")
+    if atr and close:
+        day_word = "截至決定時間嘅 24 小時" if rolling else "UTC 00:00 收市嘅一日"
+        out.append(f"  （日線 = {day_word}；ATR {_p(atr)} ≈ {float(atr) / float(close) * 100:.1f}%）")
+    gl = []
+    for name, g in gates.items():
+        label = GATE_ZH.get(name, name)
+        det = g.get("detail") or {}
+        if name == "ema200_regime":
+            txt = f"{label} {_p(ema200)}：" + ("同方向 ✓" if not g.get("triggered") else "逆方向，注碼最多一半")
+        elif name == "h4_trend":
+            trend = {"up": "向上", "down": "向下", "flat": "持平"}.get(det.get("trend"), det.get("trend"))
+            txt = f"{label}：{trend}" + (" ✓" if not g.get("triggered") else "，同方向唔一致，注碼最多一半")
+        elif name == "extreme_funding":
+            pct = det.get("percentile")
+            txt = f"{label}：過去一年第 {_p(pct)} 百分位" + (" ✓" if not g.get("triggered") else "，極端，唔開擠擁嗰邊")
+        elif name == "event_window":
+            evs = det.get("events") or []
+            txt = f"{label}：" + ("冇 ✓" if not evs else "、".join(f"{e.get('type')} {e.get('release_utc')} UTC" for e in evs)
+                                 + "，時段內唔開新倉")
+        else:
+            txt = f"{label}：{'觸發' if g.get('triggered') else '✓'}"
+        gl.append(f"  {txt}")
+    if gl:
+        out.append("閘門：")
+        out += gl
+    pos_dir = int(plan.get("position_dir_at_decision") or inp.get("position_dir") or 0)
+    if position and position.get("direction"):
+        out.append(f"倉位：持有{_dir(position['direction'])}，入場 {_p(position.get('entry_price'))}｜止損 "
+                   f"{_p(position.get('sl_price'))}｜止賺 {_p(position.get('tp_price'))}")
+    else:
+        out.append("倉位：" + (f"持有{_dir(pos_dir)}" if pos_dir else "空倉"))
+    action = plan.get("action", "none")
+    line = f"行動：{ACTION_ZH.get(action, action)}"
+    if plan.get("close_reason"):
+        line += f"（原因：{CLOSE_ZH.get(plan['close_reason'], plan['close_reason'])}）"
+    out.append(line)
+    enter = int(plan.get("enter_direction") or 0)
+    if enter and mark and atr:
+        sl_m, tp_m = float(cfg.exits.sl_atr_multiple), float(cfg.exits.tp_atr_multiple)
+        sl = float(mark) - enter * sl_m * float(atr)
+        tp = float(mark) + enter * tp_m * float(atr)
+        risk_pct = float(cfg.risk.risk_per_trade_pct) * float(plan.get("enter_fraction") or 0.0)
+        if ramp:
+            risk_pct *= float(cfg.risk.ramp_factor)
+        m = float(mark)
+        out.append(f"  {_dir(enter)}：入場約 {_p(m)}｜止損約 {_p(sl)}（{(sl - m) / m * 100:+.1f}%）"
+                   f"｜止賺約 {_p(tp)}（{(tp - m) / m * 100:+.1f}%）")
+        risk_line = f"  注碼：打中止損最多蝕權益 {risk_pct:.2f}%"
+        if equity:
+            risk_line += f" ≈ ${float(equity) * risk_pct / 100.0:,.2f}"
+        risk_line += f"；倉位最多權益 {float(cfg.risk.notional_cap_pct_equity):.0f}%" + ("（頭 10 筆減半）" if ramp else "")
+        out.append(risk_line)
+    notes = [zh_note(n) for n in (plan.get("notes") or []) + (plan.get("entry_blocked") or [])]
+    for n in dict.fromkeys(notes):
+        out.append(f"  備註：{n}")
+    flip_min = float(cfg.strategy.flip_min_abs_score)
+    held = pos_dir or enter
+    if held:
+        out.append(f"反手條件：分數去到 {(-held) * flip_min:+.0f} 或{'以下' if held > 0 else '以上'}"
+                   + ("，並連續兩個時段" if rolling and int(cfg.strategy.flip_confirm_periods) > 1 else ""))
+    if next_hkt:
+        out.append(f"下一次決定：{next_hkt}")
+    return out
+
+
+def short_line(decision: dict[str, Any]) -> str:
+    """One line for a desktop notification."""
+    sc = decision.get("score") or {}
+    plan = decision.get("plan") or {}
+    act = ACTION_ZH.get(plan.get("action", "none"), plan.get("action"))
+    return f"分數 {float(sc.get('score') or 0):+.0f}（{_dir(sc.get('direction'))}）→ {act}"

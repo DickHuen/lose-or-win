@@ -6,6 +6,7 @@
   dashboard [--port N] [--no-browser] | schedule install|remove|list|show [--dry-run] [--no-dashboard] [--upgrade]
   proxykey new --owner 0x.. [--days N<=30] [--offline] | proxykey finish [--signature 0x..] | proxykey status
   backtest download | criteria | confirm | run   (offline from downloaded Binance data; see BACKTEST.md)
+  preview [--equity USD]   (read-only: what the strategy would decide now; public data, no keys, no orders)
 
 Every bot command: exclusive file lock, full logging, non-zero exit code on error.
 Alerts (including errors) are stored and shown on the dashboard; Windows notifications (and Telegram,
@@ -48,7 +49,7 @@ log = logging.getLogger("perpbot.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_LOCK, EXIT_SELFTEST, EXIT_CONFIRM = 0, 1, 3, 4, 5, 6
 NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch", "snapshot"}
-NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest"}
+NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest", "preview"}
 QUIET = {"snapshot"}              # dashboard convenience read: failures are logged, never alerted
 SNAPSHOT_LOCK_WAIT_SECONDS = 5.0  # a snapshot never queues behind a real run
 NEEDS_BINANCE = {"decide", "manage", "smoketest"}
@@ -110,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--port", type=int, default=8766, help="new: local signing page port (default 8766)")
     pk.add_argument("--no-browser", action="store_true")
     pk.add_argument("--signature", default=None, help="finish: the signature (asked for if not given)")
+    pv = sub.add_parser("preview", help="read-only: what the strategy would decide right now (no orders, no keys)")
+    pv.add_argument("--equity", type=float, default=None, help="equity for the size example (default: last recorded)")
     bt = sub.add_parser("backtest", help="backtest on downloaded Binance history (never trades)")
     bt.add_argument("action", choices=["download", "criteria", "confirm", "run"])
     return p
@@ -402,6 +405,8 @@ def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any
             return serve(paths, cfg, calendar, clock, port=port, open_browser=not args.no_browser)
         if command == "proxykey":
             return _run_proxykey(args, paths, cfg, secrets)
+        if command == "preview":
+            return _run_preview(args, paths, cfg, calendar, clock, factories)
         if command == "backtest":
             return _run_backtest(args, paths, cfg, calendar, clock, factories, secrets)
         from perpbot import winsched
@@ -499,6 +504,40 @@ def _run_proxykey(args: Any, paths: Paths, cfg: Any, secrets: Any) -> int:
     except pkm.ProxyKeyError as e:
         print(f"FAILED: {e}")
         return EXIT_ERROR
+
+
+def _run_preview(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock, factories: Factories) -> int:
+    """v1.5.0 Preview.bat: the analysis for right now. Public Binance data only; reads the bot's database only to
+    know an open position and the last equity; never writes, never trades."""
+    from perpbot import analysis
+    from perpbot.preview import preview_decision
+    from perpbot.records import Records
+
+    trade, equity, ramp = None, args.equity, int(cfg.risk.ramp_trades) > 0      # no trades yet: ramp applies
+    if paths.db_file.exists():
+        store = Store(paths.db_file, clock, cfg.config_version, code_version())
+        try:
+            rec = Records(store)
+            trade = rec.open_trade()
+            last = store.latest("equity_log", "equity IS NOT NULL AND equity > 0")
+            if equity is None and last:
+                equity = float(last["equity"])
+            ramp = rec.live_trades_opened() < int(cfg.risk.ramp_trades)
+        finally:
+            store.close()
+    bn = (factories.binance or _default_binance)(cfg)
+    try:
+        decision, nxt = preview_decision(cfg, calendar, clock.now(), bn, trade)
+    except Exception as e:  # noqa: BLE001
+        print(f"PREVIEW FAILED: {type(e).__name__}: {e}")
+        return EXIT_ERROR
+    finally:
+        bn.close()
+    for line in analysis.render(decision, cfg, equity=equity, ramp=ramp, next_hkt=nxt, position=trade,
+                                title="預覽：如果而家決定"):
+        print(line)
+    print("（預覽只用公開數據，唔落單。實際決定仲會檢查暫停、時鐘、地區同交易所價格，所以有機會唔同。）")
+    return EXIT_OK
 
 
 def real_fee_rate(paths: Paths) -> float | None:
@@ -659,7 +698,8 @@ def _missed_run_alerts(engine: Any, cfg: Any, store: Store, clock: Clock) -> Non
         return
     for a in audit(store, cfg, start, end):
         if a["status"] == "missed" and a["command"] in ("decide", "manage"):
-            first_decide = a["command"] == "decide" and a["slot_hkt"].endswith(cfg.schedule.decide_times_hkt[0])
+            first_decide = (str(cfg.strategy.cadence) == "daily" and a["command"] == "decide"
+                            and a["slot_hkt"].endswith(cfg.schedule.decide_times_hkt[0]))
             engine.alert("missed run" if not first_decide else f"missed {cfg.schedule.decide_times_hkt[0]}",
                          f"scheduled {a['command']} at {a['slot_hkt']} HKT did not run",
                          dedupe_key=f"missed:{a['command']}:{a['slot_hkt']}")

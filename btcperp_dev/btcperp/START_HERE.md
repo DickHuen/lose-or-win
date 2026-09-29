@@ -1,6 +1,14 @@
 # START_HERE：喺你部 Windows 電腦行 btcperp
 
-呢個 bot 會用真錢，喺 Polymarket Perps 自動交易 BTC-PERP。佢喺你自己部 Windows 電腦上面行：
+呢個 bot 會用真錢，喺 Polymarket Perps 自動交易 BTC-PERP。
+
+**v1.5.0 起（你揀咗方案 B）**：bot **每 4 個鐘決定一次**（香港時間 00:30、04:30、08:30、12:30、16:30、20:30）。
+- 每次都用「截至嗰一刻嘅 24 小時」做日線計分數，規則同參數同 v1.4 一樣，只係更新密咗 6 倍。
+- 每個 4 小時時段最多入場一次。
+- 「連續 3 日反方向就平倉」而家即係連續 18 個時段（72 個鐘）。
+- 想改返每日一次，config 入面 `strategy.cadence` 改做 `daily`，要出新版本。
+
+佢喺你自己部 Windows 電腦上面行：
 - 由「工作排程器」（Task Scheduler）定時啟動；
 - 喺瀏覽器 dashboard 睇狀態；
 - 有交易或者有事就彈 Windows 通知。
@@ -106,7 +114,7 @@ bot 會喺呢部電腦產生 proxy key，你嘅**主錢包**只係簽一個 Crea
 ## 5. 回測（上實盤之前必做，詳情睇 BACKTEST.md）
 
 1. **仲未可以打 CONFIRM。** 先將以下三個檔案畀 Grok 委員會審閱：
-   - `config\backtest_criteria.yaml`（準則 draft-2：C0 至 C7）；
+   - `config\backtest_criteria.yaml`（準則 draft-3：C0 至 C7，主要變體係方案 B `R4h_live`）；
    - `REVIEW_v1.3.0.md`（今次點樣處理委員會建議，包括 C0 同 BT3 兩處唔同）；
    - `BACKTEST.md`。
 2. 委員會睇過、同意之後，雙擊 **`windows\Backtest.bat`**：
@@ -120,7 +128,7 @@ bot 會喺呢部電腦產生 proxy key，你嘅**主錢包**只係簽一個 Crea
 5. 如果 `run` 話「NEEDS CONFIRMATION: changed since the confirmation」，唔好自己再 CONFIRM，先問 Claude。
 
 - 回測唔會落單，亦唔會接觸你個戶口。
-- 實盤用 A_live。其他變體要符合 BACKTEST.md 入面 S5 嘅四個條件，再經委員會覆核，先可以取代佢。
+- 實盤用方案 B（`R4h_live`，每 4 個鐘）。回測亦會同時跑 v1.4 嘅每日版（`A_live`）做比較（I1）。其他變體要符合 BACKTEST.md 入面 S5 嘅四個條件，再經覆核，先可以取代佢。
 - 回測之後，Claude 會出新版本 config，將 I6 嘅第 5 百分位寫入「實盤檢討線」（第 9 步）。
 
 ## 6. Dashboard
@@ -135,14 +143,14 @@ bot 會喺呢部電腦產生 proxy key，你嘅**主錢包**只係簽一個 Crea
 | 權益 | 權益（交易所 total account value）、錢包、未實現盈虧、高水位 |
 | 回撤 / 連虧 / 本金底線 | kill switch 同底線：15% 回撤平倉暫停；連虧 8% 停新倉；跌穿淨投入本金 75% 硬停；跌穿累計投入本金 50%（永久底線）平倉永久停 |
 | 倉位 | 方向、數量、入場價、標記價、未實現盈虧、**止損 SL**（冇 SL 會紅字「無！」）、止盈 TP、強平價、累計資金費 |
-| 最新決定 | 分數同三個組成部分、方向、注碼級別、閘門、行動、原因 |
+| 最新決定 | 分數同三個組成部分、方向、注碼級別、閘門、行動、原因，同埋一段中文分析（每 4 個鐘更新；亦會彈一個簡短通知） |
 | 其他 | 權益走勢、統計、交易紀錄、警報、排程及錯誤、經濟事件、影子追蹤 |
 
 Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面嘅 .bat，重要動作要打字確認。
 
 ## 7. 上實盤（GO）：全部 ✓ 先可以開始（委員會 go/no-go B）
 
-- [ ] **回測**：第一次運行（Run #1），A_live 同 A_live_stress 都 PASS C0 至 C7。委員會睇過報告同 I5 多空分拆。
+- [ ] **回測**：第一次運行（Run #1），`R4h_live` 同 `R4h_live_stress` 都 PASS C0 至 C7。睇過報告、I1（4 小時對每日）同 I5 多空分拆。
 - [ ] **心跳監察**（第 8 步）：decide 同 manage 兩個 check 設定好。三種情況都試過手機收到通知：熄機、卡住、嚴重警報。
 - [ ] **升級還原測試**：`Upgrade.bat` 揀 `TEST-RESTORE` 做一次，見到 `RESTORE TEST PASSED`（第 10 步）。
 - [ ] **Proxy key**：用第 3 步做，主錢包私鑰冇經過呢部電腦。寫低：用咗 **N（硬件錢包）** 定 **O（另一部電腦）**：______
@@ -163,8 +171,8 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 
 | 工作 | 時間（HKT） | 做咩 |
 |---|---|---|
-| decide_0830、decide_0850 | 每日 08:30、08:50 | 計分數、開倉／平倉／flip（入場窗口 08:30–09:30，過咗唔補入；但平倉規則照做） |
-| manage × 5 | 12:30、16:30、20:30、00:30、04:30 | 對數、確保有 SL；如果當日 decide 冇行到，就補做平倉規則；**唔會開新倉** |
+| decide × 12 | 00:30、04:30、08:30、12:30、16:30、20:30，每個再加 :50 重試 | 計分數、開倉／平倉／反手（每個時段嘅入場窗口係 HH:30 至 HH+1:30；過咗唔補入，但平倉規則照做） |
+| manage × 6 | 02:30、06:30、10:30、14:30、18:30、22:30 | 對數、確保有 SL；如果嗰個時段嘅 decide 冇行到，就補做平倉規則；**唔會開新倉** |
 | report_daily / weekly / monthly | 08:45 / 星期日 20:00 / 每月第一個星期日 20:30 | 報告 |
 | backup | 每日 03:00 | 備份資料庫 |
 | dashboard | 每次登入 | 背景 dashboard |
@@ -181,11 +189,11 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 
 1. 喺 https://healthchecks.io 開免費戶口，裝佢嘅手機 App（或者用 email 通知）。
 2. **New Check** → 名 `btcperp decide` → Schedule 揀 **Cron**：
-   - Cron expression：`30,50 8 * * *`
+   - Cron expression：`30,50 0,4,8,12,16,20 * * *`
    - Time zone：`Asia/Hong_Kong`
    - Grace time：**20 分鐘**
 3. **New Check** → 名 `btcperp manage` → **Cron**：
-   - Cron expression：`30 0,4,12,16,20 * * *`
+   - Cron expression：`30 2,6,10,14,18,22 * * *`
    - Time zone：`Asia/Hong_Kong`
    - Grace time：**20 分鐘**
 4. 複製兩個 ping 網址（例如 `https://hc-ping.com/xxxxxxxx-…`）。雙擊 `windows\Edit_Secrets.bat`，填入：
@@ -207,7 +215,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 - **卡住**：有 `/start` 但 20 分鐘內冇完成，就通知。
 
 **上實盤前三個測試**（第 7 步）：
-1. **熄機**：喺 manage 時間（例如 12:30）之前熄機，12:50 左右手機應該收到通知。之後開返機。
+1. **熄機**：喺 manage 時間（例如 14:30）之前熄機，14:50 左右手機應該收到通知。之後開返機。
 2. **卡住**：喺「命令提示字元」行 `curl.exe -fsS https://hc-ping.com/<manage 嗰個 uuid>/start`，然後乜都唔做。20 分鐘後手機應該收到通知。下一次 manage 會變返正常。
 3. **嚴重警報**：行 `curl.exe -fsS https://hc-ping.com/<manage 嗰個 uuid>/fail`，手機應該即刻收到通知。bot 喺嚴重警報時 ping `/fail` 嘅邏輯，已經有單元測試。
 
@@ -217,6 +225,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 |---|---|
 | `Dashboard.bat` | 開 dashboard |
 | `Status.bat` | 狀態、倉位、SL/TP、權益、kill switch、最後決定 |
+| `Preview.bat` | **預覽**：如果而家決定，bot 會點做同點解（分數、閘門、入場、止損、止賺、注碼）。只用公開數據，**唔落單**，唔使 key |
 | `Pause_New_Entries.bat` | **暫停**：唔再開新倉；現有倉位同 SL/TP 保留 |
 | `Unpause.bat` | 只解除你嘅手動暫停（kill switch 同本金底線唔會解除；高水位同連虧計數不變） |
 | `Kill_Close_Position.bat` | **即刻平倉**（reduce-only 市價）並暫停；要打 `KILL` |
@@ -277,7 +286,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 ## 11. 電腦熄咗、瞓咗、斷網，或者你長時間唔喺度
 
 - 交易所上面嘅 **SL / TP 單照樣有效**。
-- 錯過 08:30 同 08:50 嘅話，當日唔會開新倉。下一次 decide 或者 manage 會用當日數據**補做平倉規則**（反向訊號、3 日規則、資金費規則），但唔會補入場。
+- 錯過某個時段嘅 HH:30 同 HH:50 嘅話，嗰個時段唔會開新倉。之後嘅 manage 會用嗰個時段嘅數據**補做平倉規則**（反向訊號、3 日規則、資金費規則），但唔會補入場。下一個時段照常決定。
 - 電腦熄咗嗰段時間，kill switch 同所有規則都唔會執行，只有 SL / TP 保護。
 - **預計離開超過 24 小時**：出門前雙擊 `Pause_New_Entries.bat`，返嚟再 `Unpause.bat`。
 - **超過 72 小時，或者未設定心跳監察**：出門前雙擊 `Kill_Close_Position.bat` 平倉。
@@ -286,7 +295,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 ## 12. 每月檢討
 
 - 每月第一個星期日 20:30 會出月報：`data\reports\monthly\monthly_YYYY-MM.md` 同 `.json`。
-- 如果一個月有超過 2 日冇準時做決定，月報會標「INCOMPLETE MONTH」，嗰個月唔應該用嚟評估策略。
+- 如果一個月有超過 12 個 4 小時時段（即 2 日）冇準時做決定，月報會標「INCOMPLETE MONTH」，嗰個月唔應該用嚟評估策略。
 - 將月報畀 Claude，佢會用繁體中文寫檢討，並提出改動建議（每項都要有數據）。
 - 任何改動都會係一個新版本 zip，由你決定裝唔裝。
 

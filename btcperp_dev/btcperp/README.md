@@ -18,6 +18,7 @@ desktop notifications. It runs on the owner's Windows PC from Windows Task Sched
 | `3_Schedule_Install.bat` | Go live (asks for `GO`; needs a passing full smoketest) |
 | `Dashboard.bat` | Open the dashboard |
 | `Status.bat` | Status |
+| `Preview.bat` | What the strategy would decide right now, with the reasons (read-only, no keys, no orders) |
 | `Pause_New_Entries.bat` | Stop new entries |
 | `Unpause.bat` | Remove your manual pause only |
 | `Kill_Close_Position.bat` | Close the position now (asks for `KILL`) |
@@ -34,7 +35,7 @@ other copy of the folder.
 
 | Command | What it does |
 |---|---|
-| `decide` | 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
+| `decide` | Every 4 h (rolling_4h, default): HH:30 / HH:50 HKT after each UTC 4h close, one entry per 4h period, entry window HH:30-HH+1:30. Daily cadence: 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
 | `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. If no decision was made in today's window and a position is open, runs the late close-only decision. Never opens. |
 | `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Reports printed and saved in `data/reports/`; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
 | `alerts` | Print every unread alert once (`PING OWNER ...`) and mark it read (same list as the dashboard). |
@@ -43,6 +44,7 @@ other copy of the folder.
 | `schedule install\|remove\|list\|show [--dry-run] [--no-dashboard] [--upgrade]` | Windows Task Scheduler tasks under `\btcperp\`. Daily tasks are pinned to HKT (`+08:00`). `install` needs a passing full smoketest of this version with this proxy key; `--upgrade` re-registers tasks that already run from this folder. `show`/`list` also print the sleep and wake-timer settings. No lock. |
 | `proxykey new --owner 0x.. [--days N<=30] [--offline] \| finish [--signature] \| status` | Create a proxy key here; the main wallet (fixed at `new`) only signs the one EIP-712 CreateProxy message (Polymarket, chain 137), which the signer builds itself: in a hardware wallet through a one-off page on 127.0.0.1:8766, or on another computer from `sign_fields.txt` with its own copy of `perpbot/offline_sign.py` or `offline_sign/offline_sign.html`. Registration and the .env write run under the bot lock. An unfinished request is deleted after 1 hour. `status` lists every registered proxy key. |
 | `backtest download \| criteria \| confirm \| run` | See BACKTEST.md. `confirm` locks criteria, config, calendars, code, data end date, data hash and fee rate; `run` refuses any change and numbers the runs under a confirmation. Never trades; no lock. |
+| `preview [--equity USD]` | Read-only: the decision the strategy would make now, as the readable analysis. Public Binance data only; no keys, no orders, nothing written. |
 | `backup` | SQLite backup (+config) into `data/backups/` (last 14 + first of each month kept). |
 | `status` | State, position, SL/TP, equity, drawdown, kill switches, last decision. |
 | `pause` / `unpause` | Stop new entries (position and SL/TP kept) / remove only that manual pause. |
@@ -113,6 +115,10 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
    evidence (exit fills, fired trigger, or two reads apart).
 
 ## Strategy (all numbers in `config/config.yaml`)
+
+- Cadence (`strategy.cadence`): `rolling_4h` (v1.5.0 default, the owner's option B) decides every 4 hours on daily
+  candles that END at the decision time (built from Binance 4h candles), one entry per 4h period, 3-day rule =
+  18 periods; `daily` decides once a day on candles closed at 00:00 UTC. Everything below applies to both.
 
 - Score = Trend (50 x clip((C - EMA50) / (2 x ATR14), -1, 1)) + Structure (+/-25 breakout of previous
   day high/low, + 25 x CLV; CLV = 0 if H = L), from closed UTC 00:00 daily candles (Binance BTCUSDT).

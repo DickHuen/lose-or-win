@@ -188,9 +188,34 @@ def install(cfg: Any, root: Path, tasks_dir: Path, *, dry_run: bool = False, wit
         results.append({"task": name, "ok": rc == 0, "xml": str(path), "output": out})
         if rc == 0 and spec.kind == "logon":
             _run(["schtasks", "/Run", "/TN", name])        # start the dashboard now, not only at next logon
+    if _live() and not dry_run:
+        results += remove_stale(cfg)
     if _live() and not dry_run and any(r["ok"] for r in results):
         write_marker(root)
     return results
+
+
+def registered_names() -> list[str] | None:
+    """Every task registered in the \\btcperp\\ folder (None: Task Scheduler could not be read)."""
+    rc, out = _run(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    if rc != 0:
+        return None
+    prefix = f"\\{FOLDER}\\".lower()
+    names = {line.split(",")[0].strip().strip('"') for line in out.splitlines()}
+    return sorted(n for n in names if n.lower().startswith(prefix))
+
+
+def remove_stale(cfg: Any) -> list[dict[str, Any]]:
+    """v1.5.0: decide/manage tasks from an older schedule (e.g. the daily cadence's manage_1230) that are not in
+    this plan are deleted, so the old and the new schedule never both run."""
+    current = {f"\\{FOLDER}\\{spec.name}".lower() for spec in plan(cfg, True)}
+    out = []
+    for n in registered_names() or []:
+        base = n.split("\\")[-1]
+        if n.lower() not in current and base.startswith(("decide_", "manage_")):
+            rc, text = _run(["schtasks", "/Delete", "/TN", n, "/F"])
+            out.append({"task": n, "ok": rc == 0, "output": f"removed (not in this schedule) {text}".strip()})
+    return out
 
 
 def _marker() -> Path | None:
@@ -248,6 +273,8 @@ def remove(cfg: Any) -> list[dict[str, Any]]:
             _run(["schtasks", "/End", "/TN", name])        # stop the running dashboard server first
         rc, out = _run(["schtasks", "/Delete", "/TN", name, "/F"])
         results.append({"task": name, "ok": rc == 0, "output": out})
+    if _live():
+        results += remove_stale(cfg)
     m = _marker()
     if _live() and m is not None and m.exists():
         m.unlink()

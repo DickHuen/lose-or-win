@@ -83,13 +83,14 @@ class Reporter:
     def daily(self) -> str:
         now = self.e.now()
         day = utc_day(now)
-        dec = self.store.latest("decisions", "utc_day = ? AND score IS NOT NULL", [day.isoformat()]) or \
+        dec = self.store.latest("decisions", "utc_day >= ? AND utc_day < ? AND score IS NOT NULL",
+                                [day.isoformat(), (day + timedelta(days=1)).isoformat()]) or \
             self.store.latest("decisions", "score IS NOT NULL")
         lines = [f"BTC-PERP daily report - {hkt_date(now).isoformat()} (HKT)"]
         if dec:
             d = dec["data"]
             sc = d.get("score", {})
-            lines.append(f"Decision day {dec['utc_day']}: score {_fmt(sc.get('score'))} "
+            lines.append(f"Decision {dec['utc_day']}: score {_fmt(sc.get('score'))} "
                          f"(trend {_fmt(sc.get('trend_component'))}, breakout {_fmt(sc.get('breakout_component'))}, "
                          f"CLV {_fmt(sc.get('clv_component'))}; CLV={_fmt(sc.get('clv'), 3)}) "
                          f"tier {_fmt(sc.get('tier_fraction'))}")
@@ -268,7 +269,7 @@ class Reporter:
         first = self.store.query("SELECT MIN(utc_day) AS d FROM decisions")
         if not first or not first[0]["d"]:
             return {"all_months": {"trades": 0}, "complete_months_only": {"trades": 0}, "incomplete_months": []}
-        d0 = date.fromisoformat(first[0]["d"])
+        d0 = date.fromisoformat(first[0]["d"][:10])
         months, cur = [], date(d0.year, d0.month, 1)
         while cur < end_d:
             nxt = date(cur.year + (cur.month == 12), cur.month % 12 + 1, 1)
@@ -286,22 +287,32 @@ class Reporter:
                 "incomplete_months": incomplete}
 
     def _decision_days(self, start_d: date, end_d: date, today: date, month: str, alert: bool = True) -> dict[str, Any]:
-        """Review v1.2.0 item 17: UTC days without an on-time decision (late close-only decisions count as missed)."""
+        """Review v1.2.0 item 17: UTC days without an on-time decision (late close-only decisions count as missed).
+        rolling_4h: 4h periods without an on-time decision; the month is incomplete above limit x 6 periods."""
         first = self.store.query("SELECT MIN(utc_day) AS d FROM decisions")
-        first_d = date.fromisoformat(first[0]["d"]) if first and first[0]["d"] else today
+        first_d = date.fromisoformat(first[0]["d"][:10]) if first and first[0]["d"] else today
         lo, hi = max(start_d, first_d), min(end_d, today)
         days = [lo + timedelta(days=i) for i in range(max(0, (hi - lo).days))]
         rows = self.store.query("SELECT utc_day, data FROM decisions WHERE score IS NOT NULL AND utc_day >= ? AND utc_day < ?",
                                 [start_d.isoformat(), end_d.isoformat()])
         on_time = {r["utc_day"] for r in rows if isinstance(r["data"], dict) and not (r["data"].get("plan") or {}).get("late")}
-        missed = [d.isoformat() for d in days if d.isoformat() not in on_time]
         limit = int(self.cfg.reports.max_missed_decision_days)
-        incomplete = len(missed) > limit
+        if str(self.cfg.strategy.cadence) == "rolling_4h":
+            keys = [f"{d.isoformat()}T{h:02d}:00" for d in days for h in range(0, 24, 4)]
+            missed = [k for k in keys if k not in on_time]
+            incomplete = len(missed) > limit * 6
+            what = f"{len(missed)} four-hour periods"
+        else:
+            missed = [d.isoformat() for d in days if d.isoformat() not in on_time]
+            incomplete = len(missed) > limit
+            what = f"{len(missed)} days"
         if incomplete and alert:
-            self.e.alert("incomplete month", f"{month}: no on-time decision on {len(missed)} days ({', '.join(missed)}); "
+            shown = ", ".join(missed[:20]) + (" ..." if len(missed) > 20 else "")
+            self.e.alert("incomplete month", f"{month}: no on-time decision in {what} ({shown}); "
                          f"the month is marked incomplete - do not judge the strategy on it",
                          dedupe_key=f"incomplete_month:{month}")
-        return {"days_counted": len(days), "missed_days": missed, "limit": limit, "incomplete_month": incomplete}
+        return {"days_counted": len(days), "missed_days": missed, "limit": limit, "incomplete_month": incomplete,
+                "cadence": str(self.cfg.strategy.cadence)}
 
     def _monthly_md(self, r: dict[str, Any]) -> str:
         L = [f"# BTC-PERP monthly report {r['month']}", "",

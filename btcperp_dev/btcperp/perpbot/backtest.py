@@ -33,7 +33,18 @@ from perpbot.exchange.base import Instrument
 from perpbot.indicators import Candle
 from perpbot.risk import compute_size, is_tie, losing_streak, risk_pct_for_trade
 from perpbot.shadow import SimTrade, _r, _slipped
-from perpbot.strategy import DayFeatures, InsufficientData, day_features, plan_for
+from perpbot.strategy import (
+    H4_MS,
+    DayFeatures,
+    InsufficientData,
+    day_features,
+    h4_gate_window,
+    period_features,
+    period_key,
+    plan_for,
+    rolling_score,
+    sc_day,
+)
 from perpbot.timeutil import DAY_MS, HOUR_MS, MINUTE_MS, day_start_ms, fmt_utc
 
 UTC = timezone.utc
@@ -52,23 +63,27 @@ class Variant:
     kills: bool = True             # kill switches on
     role: str = "candidate"        # candidate | stress | sensitivity
     twin: str | None = None        # stress twin of a candidate
+    cadence: str = "daily"         # daily | rolling_4h (v1.5.0 option B: decide every 4h on daily candles ending then)
+    flip_confirm: int = 1          # rolling_4h: consecutive opposite periods a flip needs
 
 
 def _variants() -> dict[str, Variant]:
-    base = [Variant("A_live"), Variant("B_breakeven", breakeven=True), Variant("C_control", control=True),
+    r = "rolling_4h"
+    base = [Variant("R4h_live", cadence=r), Variant("R4h_confirm", cadence=r, flip_confirm=2),
+            Variant("A_live"), Variant("B_breakeven", breakeven=True), Variant("C_control", control=True),
             Variant("A_live_fhold", funding_close=False), Variant("B_breakeven_fhold", breakeven=True, funding_close=False),
             Variant("C_control_fhold", control=True, funding_close=False)]
     out: dict[str, Variant] = {}
     for v in base:
         out[v.name] = replace(v, twin=f"{v.name}_stress")
         out[f"{v.name}_stress"] = replace(v, name=f"{v.name}_stress", stress=True, role="stress")
-    out["A_live_noevents"] = Variant("A_live_noevents", events=False, role="sensitivity")    # bounds calendar errors
-    out["A_live_nokill"] = Variant("A_live_nokill", kills=False, role="sensitivity")         # BT4: untruncated streaks
+    out["R4h_live_noevents"] = Variant("R4h_live_noevents", events=False, role="sensitivity", cadence=r)   # calendar errors
+    out["R4h_live_nokill"] = Variant("R4h_live_nokill", kills=False, role="sensitivity", cadence=r)        # BT4 streaks
     return out
 
 
 VARIANTS: dict[str, Variant] = _variants()
-PRIMARY = "A_live"
+PRIMARY = "R4h_live"            # v1.5.0: the owner chose option B (rolling 4h); A_live = the v1.4 daily cadence
 
 
 class BacktestError(Exception):
@@ -240,6 +255,64 @@ class DayInputs:
             return None
 
 
+class PeriodInputs:
+    """rolling_4h: features at each 4h boundary T exactly like the live decide at T + 30 min. The daily candles
+    ending at T are the same shifted candles live builds from 4h data (strategy.shifted_daily), taken here from
+    six precomputed phase series; scores are cached, which only saves time (a test checks equality with live)."""
+
+    def __init__(self, cfg: Any, ds: Dataset, calendar: EventCalendar) -> None:
+        self.cfg, self.ds, self.cal = cfg, ds, calendar
+        self.h4 = sorted(ds.h4, key=lambda c: c.open_ms)
+        self.h4_open = [c.open_ms for c in self.h4]
+        self._f_ts = [f[0] for f in ds.funding]
+        self.n_days = int(cfg.binance.daily_candles_to_load)
+        self._phase: dict[int, tuple[list[Candle], list[int]]] = {}
+        self._cache: dict[int, Any] = {}
+
+    def _series(self, phase_ms: int) -> tuple[list[Candle], list[int]]:
+        if phase_ms not in self._phase:
+            buckets: dict[int, list[Candle]] = {}
+            for c in self.h4:
+                buckets.setdefault((c.open_ms - phase_ms) // DAY_MS, []).append(c)
+            out = []
+            for k in sorted(buckets):
+                b = buckets[k]
+                o = k * DAY_MS + phase_ms
+                out.append(Candle(o, b[0].open, max(c.high for c in b), min(c.low for c in b), b[-1].close,
+                                  sum(c.volume for c in b), o + DAY_MS))
+            self._phase[phase_ms] = (out, [c.open_ms for c in out])
+        return self._phase[phase_ms]
+
+    def score_at(self, t_ms: int) -> Any:
+        if t_ms not in self._cache:
+            series, opens = self._series(t_ms % DAY_MS)
+            a, b = bisect_right(opens, t_ms - self.n_days * DAY_MS - 1), bisect_right(opens, t_ms - DAY_MS)
+            try:
+                self._cache[t_ms] = rolling_score(series[a:b], t_ms, self.cfg.strategy)
+            except InsufficientData as e:
+                self._cache[t_ms] = e
+        v = self._cache[t_ms]
+        if isinstance(v, InsufficientData):
+            raise v
+        return v
+
+    def features(self, t_ms: int) -> DayFeatures | None:
+        cfg = self.cfg
+        t_dec = t_ms + DECISION_OFFSET_MS
+        gate = h4_gate_window(self.h4, t_ms, int(cfg.binance.h4_candles_to_load), opens=self.h4_open)
+        f0 = day_start_ms(sc_day(t_ms)) - int(cfg.binance.funding_days_to_load) * DAY_MS
+        a, b = bisect_right(self._f_ts, f0 - 1), bisect_right(self._f_ts, t_dec)
+        funding = [(ts, r) for ts, r, _ in self.ds.funding[a:b]]
+        at = datetime.fromtimestamp(t_dec / 1000, tz=UTC)
+        active = self.cal.active_windows(at, cfg.gates.event_anchor_hkt, float(cfg.gates.event_post_release_hours))
+        events = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(st),
+                   "window_end_utc": fmt_utc(en), "note": e.note} for e, st, en in active]
+        try:
+            return period_features(cfg, t_ms, self.score_at, gate, funding, events)
+        except InsufficientData:
+            return None
+
+
 # ================================================================ simulation
 @dataclass
 class BtTrade:
@@ -304,8 +377,10 @@ def _synthetic_instrument(cfg: Any) -> Instrument:
 
 class Simulator:
     def __init__(self, cfg: Any, h1: list[Candle], funding: list[tuple[int, float, float]],
-                 feats: dict[date, DayFeatures | None], fee_rate: float) -> None:
+                 feats: dict[date, DayFeatures | None], fee_rate: float,
+                 pfeats: dict[int, DayFeatures | None] | None = None) -> None:
         self.cfg, self.h1, self.feats, self.fee = cfg, h1, feats, fee_rate
+        self.pfeats = pfeats or {}                         # rolling_4h features by period start T (ms)
         self.h1_open = [c.open_ms for c in h1]
         self.funding = [(ts, r) for ts, r, _ in funding]
         self._f_ts = [ts for ts, _ in self.funding]
@@ -392,15 +467,17 @@ class Simulator:
         tr = _Tracker(equity0)
         peak = equity0
         trade: BtTrade | None = None
-        pause_until: date | None = None
+        pause_until: int | None = None                  # ms
         pause_reason: str | None = None
         stopped = False
         since_resume: list[BtTrade] = []
         opened = 0 if ramp else int(rk.ramp_trades)     # review S6: windows at full risk from the first trade
         last_ms = day_start_ms(start)
         pause_days = int(cfg.backtest.kill_pause_days)
+        rolling = v.cadence == "rolling_4h"
+        step = H4_MS if rolling else DAY_MS
 
-        def after_close(t: BtTrade, day: date) -> None:
+        def after_close(t: BtTrade, day: date, t_ms: int) -> None:
             nonlocal pause_until, pause_reason
             since_resume.append(t)
             st = losing_streak([{"net_pnl": x.net_pnl, "equity_at_entry": x.equity_at_entry} for x in reversed(since_resume)],
@@ -409,24 +486,26 @@ class Simulator:
             if v.kills and st.triggered and pause_reason is None:
                 res.kills["losing_streak"] += 1
                 res.kill_log.append((day.isoformat(), "losing_streak"))
-                pause_until, pause_reason = day + timedelta(days=pause_days), "kill_losing_streak"
+                pause_until, pause_reason = t_ms + pause_days * DAY_MS, "kill_losing_streak"
 
-        d = start
-        while d < end:
-            fill_ms = day_start_ms(d) + FILL_OFFSET_MS
+        t_now, t_end = day_start_ms(start), day_start_ms(end)
+        while t_now < t_end:
+            d = sc_day(t_now)
+            key = period_key(t_now) if rolling else d.isoformat()
+            fill_ms = t_now + FILL_OFFSET_MS
             if trade is not None:
                 hit = self._walk(trade, last_ms, fill_ms, v, eq[0], tr, res)
                 if hit is not None:
                     self._book(trade, hit[0], hit[1], hit[2], v, res, eq, tr)
-                    after_close(trade, d)
+                    after_close(trade, d, t_now)
                     trade = None
             last_ms = fill_ms
-            mark = self._candle_close(day_start_ms(d))
+            mark = self._candle_close(t_now)
             if mark is None:
-                d += timedelta(days=1)
+                t_now += step
                 continue
             mtm = eq[0] + (trade.qty * (mark - trade.entry_price) * trade.direction if trade else 0.0)
-            if pause_until is not None and d >= pause_until and not stopped:
+            if pause_until is not None and t_now >= pause_until and not stopped:
                 pause_until, pause_reason = None, None          # automatic resume: peak reset, streak restarted
                 peak = mtm
                 since_resume.clear()
@@ -442,17 +521,18 @@ class Simulator:
                     (peak - mtm) / peak * 100.0 >= float(rk.kill_drawdown_pct):
                 res.kills["drawdown"] += 1
                 res.kill_log.append((d.isoformat(), "drawdown"))
-                pause_until, pause_reason = d + timedelta(days=pause_days), "kill_drawdown"
+                pause_until, pause_reason = t_now + pause_days * DAY_MS, "kill_drawdown"
                 if trade is not None:
                     self._book(trade, mark, fill_ms, "kill_switch", v, res, eq, tr)
                     trade = None
-            f = self.feats.get(d)
+            f = self.pfeats.get(t_now) if rolling else self.feats.get(d)
             if f is not None and not stopped:
                 pos_dir = trade.direction if trade else 0
-                entry_day = date.fromisoformat(trade.entry_day) if trade else d
+                entry_day = date.fromisoformat(trade.entry_day[:10]) if trade else d
                 plan, _ = plan_for(f, cfg, position_dir=pos_dir, entry_day=entry_day, entered_today=False,
                                    paused_reason=pause_reason, funding_rule_closes=v.funding_close,
-                                   ignore_events=not v.events)
+                                   ignore_events=not v.events, entry_key=trade.entry_day if trade else key,
+                                   flip_confirm_periods=v.flip_confirm)
                 close_reason, enter_dir, frac = plan.close_reason, plan.enter_direction, plan.enter_fraction
                 if v.control and plan.action != "paused" and f.score.abs_score < float(s.tier_low_max):
                     enter_dir, frac = 0, 0.0
@@ -460,7 +540,7 @@ class Simulator:
                         close_reason = "flat_rule"
                 if trade is not None and close_reason:
                     self._book(trade, mark, fill_ms, close_reason, v, res, eq, tr)
-                    after_close(trade, d)
+                    after_close(trade, d, t_now)
                     trade = None
                 if enter_dir and trade is None and pause_reason is None:
                     price = _slipped(mark, enter_dir, cfg)
@@ -476,13 +556,14 @@ class Simulator:
                         qty = float(size.qty)
                         atr = f.score.atr
                         sl_d, tp_d = float(cfg.exits.sl_atr_multiple) * atr, float(cfg.exits.tp_atr_multiple) * atr
-                        trade = BtTrade(d.isoformat(), enter_dir, qty, price, fill_ms, atr, price - enter_dir * sl_d,
+                        trade = BtTrade(key, enter_dir, qty, price, fill_ms, atr, price - enter_dir * sl_d,
                                         price + enter_dir * tp_d, frac, qty * sl_d, eq[0],
                                         any("notional" in c for c in size.capped_by), f.score.score, f.gates_triggered())
                         opened += 1
             mtm = eq[0] + (trade.qty * (mark - trade.entry_price) * trade.direction if trade else 0.0)
-            res.equity_curve.append((d.isoformat(), mtm))
-            d += timedelta(days=1)
+            if t_now % DAY_MS == 0:
+                res.equity_curve.append((d.isoformat(), mtm))                 # one point per UTC day
+            t_now += step
         if trade is not None:
             end_ms = day_start_ms(end)
             hit = self._walk(trade, last_ms, end_ms, v, eq[0], tr, res)
@@ -732,7 +813,7 @@ def select_variant(criteria: dict[str, Any], summaries: dict[str, dict[str, Any]
     the three segments (median over offsets), (d) its stress twin beats A_live_stress at every offset. If several
     qualify: the highest worst-offset total R, then a committee review. If A_live fails, nothing is approved
     automatically: a qualifying candidate needs a new committee meeting and a shadow forward period."""
-    prim = PRIMARY
+    prim = criteria.get("primary_variant", PRIMARY)
     ps, pst = summaries[prim], summaries[VARIANTS[prim].twin or prim]
     primary_pass = passes(evaluate(criteria, summaries, data, prim))
     qualified = []
@@ -756,15 +837,15 @@ def select_variant(criteria: dict[str, Any], summaries: dict[str, dict[str, Any]
             qualified.append(name)
     qualified.sort(key=lambda n: summaries[n]["full_total_r_min"] or -1e18, reverse=True)
     if primary_pass and not qualified:
-        decision, note = prim, "A_live passes and no other variant qualifies: live keeps A_live."
+        decision, note = prim, f"{prim} passes and no other variant qualifies: live keeps {prim}."
     elif primary_pass:
-        decision, note = prim, (f"A_live passes; {qualified[0]} qualifies under S5 - a committee review decides "
-                                f"whether to switch (live keeps A_live until then).")
+        decision, note = prim, (f"{prim} passes; {qualified[0]} qualifies under S5 - a review decides "
+                                f"whether to switch (live keeps {prim} until then).")
     elif qualified:
-        decision, note = None, (f"A_live FAILS; {qualified[0]} qualifies under S5 - NOT approved automatically: "
-                                f"new committee meeting plus a shadow forward period.")
+        decision, note = None, (f"{prim} FAILS; {qualified[0]} qualifies under S5 - NOT approved automatically: "
+                                f"new review plus a shadow forward period.")
     else:
-        decision, note = None, "A_live FAILS and no variant qualifies: no-go."
+        decision, note = None, f"{prim} FAILS and no variant qualifies: no-go."
     return {"primary_passes": primary_pass, "qualified_replacements": qualified, "live_variant": decision,
             "note": note, "detail": detail}
 
@@ -816,7 +897,8 @@ def prepare(cfg: Any, root: Path, data_dir: Path, live_calendar: EventCalendar,
 
 
 def pm_replay(cfg: Any, ds: Dataset, feats: dict[date, DayFeatures | None], fee: float, first: date, end: date,
-              equity0: float) -> dict[str, Any]:
+              equity0: float, pfeats: dict[int, DayFeatures | None] | None = None,
+              variant: str = PRIMARY) -> dict[str, Any]:
     """I7: the same decisions, SL/TP and fills on Polymarket's own 1h candles vs Binance, trade by trade."""
     pm = ds.pm_h1
     if not pm:
@@ -826,8 +908,8 @@ def pm_replay(cfg: Any, ds: Dataset, feats: dict[date, DayFeatures | None], fee:
     if (stop - start).days < int(cfg.backtest.pm_replay_min_days):
         return {"available": False, "note": f"Polymarket candles cover only {(stop - start).days} days",
                 "range": [start.isoformat(), stop.isoformat()]}
-    bn = Simulator(cfg, ds.h1, ds.funding, feats, fee).run(PRIMARY, start, stop, 0, equity0)
-    pmr = Simulator(cfg, pm, ds.funding, feats, fee).run(PRIMARY, start, stop, 0, equity0)
+    bn = Simulator(cfg, ds.h1, ds.funding, feats, fee, pfeats).run(variant, start, stop, 0, equity0)
+    pmr = Simulator(cfg, pm, ds.funding, feats, fee, pfeats).run(variant, start, stop, 0, equity0)
     by_entry = {(t.entry_day, t.direction): t for t in pmr.trades}
     matched = [(t, by_entry.get((t.entry_day, t.direction))) for t in bn.trades]
     same = sum(1 for a, b in matched if b is not None and a.exit_reason == b.exit_reason
@@ -857,8 +939,17 @@ def run_backtest(cfg: Any, root: Path, data_dir: Path, out_dir: Path, live_calen
         feats[d] = di.features(d)
         d += timedelta(days=1)
     missing = [k.isoformat() for k, v in feats.items() if v is None]
+    pfeats: dict[int, DayFeatures | None] = {}
+    if any(v.cadence == "rolling_4h" for v in VARIANTS.values()):
+        progress("computing 4-hour decisions (rolling_4h) ...")
+        pi = PeriodInputs(cfg, ds, cal)
+        t = day_start_ms(first)
+        while t < day_start_ms(final):
+            pfeats[t] = pi.features(t)
+            t += H4_MS
+    missing_periods = [period_key(k) for k, v in pfeats.items() if v is None]
     h1 = [c for c in ds.h1 if c.open_ms < day_start_ms(end)]
-    sim = Simulator(cfg, h1, ds.funding, feats, fee_rate)
+    sim = Simulator(cfg, h1, ds.funding, feats, fee_rate, pfeats)
     eq0 = float(cfg.backtest.start_equity_usd)
     tie = float(cfg.risk.losing_streak_tie_pct)
     runs: list[dict[str, Any]] = []
@@ -876,7 +967,7 @@ def run_backtest(cfg: Any, root: Path, data_dir: Path, out_dir: Path, live_calen
     summaries = {v: aggregate(runs, full_trades, v, cfg) for v in VARIANTS}
     crit_path = root / cfg.backtest.criteria_file
     criteria = yaml.safe_load(crit_path.read_text(encoding="utf-8"))
-    pm = pm_replay(cfg, ds, feats, fee_rate, first, final, eq0)
+    pm = pm_replay(cfg, ds, feats, fee_rate, first, final, eq0, pfeats)
     data_metrics = {"h1_missing_share": dq["h1"]["missing_share"], "h4_missing_share": dq["h4"]["missing_share"],
                     "d1_missing_share": dq["d1"]["missing_share"], "pm_exit_agreement": pm.get("exit_agreement"),
                     "funding_gaps_over_8h": len(dq["funding_gaps_over_8h"])}
@@ -889,7 +980,9 @@ def run_backtest(cfg: Any, root: Path, data_dir: Path, out_dir: Path, live_calen
         "manifest_sha256": manifest_sha, "run_number_under_confirmation": run_number,
         "data_end_utc": end.isoformat(), "data_quality": dq, "polymarket_replay": pm,
         "windows": [[a.isoformat(), b.isoformat()] for a, b in wins], "offsets_days": offsets,
-        "days_without_decision": missing, "fee_rate": fee_rate,
+        "days_without_decision": missing, "periods_without_decision": missing_periods[:500],
+        "periods_without_decision_count": len(missing_periods), "fee_rate": fee_rate,
+        "primary_variant": criteria.get("primary_variant", PRIMARY), "config_cadence": str(cfg.strategy.cadence),
         "summaries": summaries, "criteria": results, "selection": selection,
         "verdict": "PASS" if passes(results) else "FAIL",
     }
@@ -925,13 +1018,17 @@ def summary_md(rep: dict[str, Any]) -> str:
         return "-" if x is None else (f"{x:.{d}f}" if isinstance(x, float) else str(x))
 
     dq = rep["data_quality"]
-    L = [f"# btcperp backtest - verdict: **{rep['verdict']}** (A_live)", "",
+    prim = rep.get("primary_variant", PRIMARY)
+    L = [f"# btcperp backtest - verdict: **{rep['verdict']}** ({prim})", "",
          f"**Run #{rep['run_number_under_confirmation']} under this confirmation** (the committee uses run #1). "
          f"manifest {str(rep['manifest_sha256'])[:12]}, result sha256 {rep['result_sha256'][:16]}",
          f"config {rep['config_version']} / criteria {rep['criteria_version']} / calendar {rep['calendar_version']} / "
          f"fee {rep['fee_rate']} / data to {rep['data_end_utc']} (exclusive)",
          f"windows: {len(rep['windows'])} x offsets {rep['offsets_days']}; days without a decision: "
-         f"{len(rep['days_without_decision'])}", "",
+         f"{len(rep['days_without_decision'])}; 4-hour periods without a decision: "
+         f"{rep.get('periods_without_decision_count', 0)}", "",
+         f"Config strategy.cadence: {rep.get('config_cadence')} (primary variant {prim}). `R4h_*` = rolling_4h "
+         f"(decide every 4 h on daily candles ending then); the others decide once a day at 08:30 HKT (v1.4).", "",
          f"**Variant choice (pre-registered, S5):** {rep['selection']['note']}", "",
          "## Criteria (confirmed before the run)", "", "| id | criterion | value | threshold | result |",
          "|---|---|---|---|---|"]
@@ -955,12 +1052,13 @@ def summary_md(rep: dict[str, Any]) -> str:
                  f"{f(s['full_max_drawdown_pct_max'])} | {f(s['drawdown_kills_full_median'], 0)} | "
                  f"{s['losing_streak_kills_total']} | {s['floor_hits_total']} | {s['segments_positive']} | "
                  f"{f(s['t_stat_median_offset'])} | {f(s['rolling_expectancy_r_p5'], 3)} |")
-    a = rep["summaries"].get("A_live", {})
-    L += ["", "## A_live by direction (I5) and segment", "", "```", json.dumps(a.get("direction"), indent=1),
+    a = rep["summaries"].get(prim, {})
+    L += ["", f"## {prim} by direction (I5) and segment", "", "```", json.dumps(a.get("direction"), indent=1),
           json.dumps(a.get("segment_expectancy_r"), indent=1, default=str), "```",
           f"Short expectancy negative at every offset: {a.get('short_all_offsets_negative')} (if true: committee discussion).",
           "", f"Polymarket replay (I7): {json.dumps(rep['polymarket_replay'], default=str)}", "",
-          "`*_stress` = double fees, 30 bps exit slippage, double paid funding. `A_live_noevents` ignores the event "
-          "gate; `A_live_nokill` runs without kill switches (untruncated streaks, BT4). Details: summary.json, runs.csv, "
-          "trades_<variant>.csv (full period, first offset)."]
+          "`*_stress` = double fees, 30 bps exit slippage, double paid funding. `R4h_confirm` flips only after two "
+          "opposite 4-hour periods. `R4h_live_noevents` ignores the event gate; `R4h_live_nokill` runs without kill "
+          "switches (untruncated streaks, BT4). Details: summary.json, runs.csv, trades_<variant>.csv (full period, "
+          "first offset)."]
     return "\n".join(L) + "\n"
