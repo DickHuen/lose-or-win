@@ -482,7 +482,7 @@ class Engine:
         entry_order = None
         for a in range(1, int(self.cfg.exits.entry_attempts) + 1):
             try:
-                found = [o for o in self.ex.get_orders(client_order_id=self.coid(f"entry:{a}", day)) if not o.is_trigger]
+                found = self.orders_by_coid(self.coid(f"entry:{a}", day))
             except ExchangeError:
                 found = []
             if found and found[0].status in FILLED_STATUSES:
@@ -796,25 +796,52 @@ class Engine:
                        dedupe_key=f"key_expiry:{self.today()}")
 
     # ================================================================ orders
+    def orders_by_coid(self, coid: str) -> list[Order]:
+        """Non-trigger orders for a client order id. v1.5.5: live, the exchange's client-order-id lookup found
+        nothing for an accepted order, so fall back to the order ids known locally: the one the placement returned
+        (`orders` log) and the one on any fill carrying this client order id (a rejected bracket can still fill)."""
+        found = [o for o in self.ex.get_orders(client_order_id=coid) if not o.is_trigger]
+        if found:
+            return found
+        ids = sorted({int(r["order_id"]) for r in self.store.query(
+            "SELECT order_id FROM orders WHERE client_order_id=? AND order_id IS NOT NULL "
+            "UNION SELECT order_id FROM fills WHERE client_order_id=? AND order_id IS NOT NULL", (coid, coid))})
+        return [o for oid in ids for o in self.ex.get_orders(order_id=oid) if not o.is_trigger]
+
+    @staticmethod
+    def _order_final(o: Order) -> bool:
+        return (o.status in FILLED_STATUSES or o.status in NOT_FILLED_TERMINAL
+                or (o.status == "partial" and o.tif in ("ioc", "fok")))
+
     def confirm_order(self, coid: str, res: PlaceResult, purpose: str) -> Order | None:
-        """Poll order status by client order id until it is terminal (filled / not filled)."""
+        """The order's final status (filled / not filled). v1.5.4 live: a FOK that did not fill was accepted, but
+        GET /v1/account/orders?client_order_id= returned nothing. So: 1) the exchange's own order update received
+        with the placement; 2) poll by order id (proven live: found a cancelled order); 3) by client order id."""
         if not res.accepted and not res.outcome_unknown:
             return None
+        placed = res.order
+        if placed is not None and self._order_final(placed):
+            self.log_order(purpose, "status", coid, placed.id, placed.status,
+                           {"filled_quantity": placed.filled_quantity, "check": 0, "source": "placement update"})
+            return placed
+        oid = res.order_id or (placed.id if placed is not None else None)
         last: Order | None = None
         attempts = int(self.cfg.polymarket.order_status_poll_attempts)
         for i in range(attempts):
-            try:
-                found = [o for o in self.ex.get_orders(client_order_id=coid) if not o.is_trigger]
-            except ExchangeError as e:
-                log.warning("order status read failed (%s): %s", coid, e)
-                found = []
+            found: list[Order] = []
+            for query in ([{"order_id": oid}] if oid else []) + [{"client_order_id": coid}]:
+                try:
+                    found = [o for o in self.ex.get_orders(**query) if not o.is_trigger]
+                except ExchangeError as e:
+                    log.warning("order status read failed (%s %s): %s", coid, query, e)
+                    found = []
+                if found:
+                    break
             if found:
                 last = found[0]
                 self.log_order(purpose, "status", coid, last.id, last.status,
                                {"filled_quantity": last.filled_quantity, "check": i + 1})
-                if last.status in FILLED_STATUSES or last.status in NOT_FILLED_TERMINAL:
-                    return last
-                if last.status == "partial" and last.tif in ("ioc", "fok"):
+                if self._order_final(last):
                     return last
             self.sleep(float(self.cfg.polymarket.order_status_poll_interval_seconds))
         if last is not None and last.status in ACTIVE_ORDER_STATUSES and last.tif in ("ioc", "fok"):
@@ -1183,7 +1210,7 @@ class Engine:
             return False, (f"previous attempt rejected ({res.error}); the SDK rejects a whole bracket when one row is "
                            f"rejected, even if the entry row filled")
         try:
-            found = [x for x in self.ex.get_orders(client_order_id=coid) if not x.is_trigger]
+            found = self.orders_by_coid(coid)
         except ExchangeError as e:
             return False, f"order status unreadable: {e}"
         st = found[0].status if found else (o.status if o else None)
@@ -1494,7 +1521,7 @@ class Engine:
         for s in started:
             if s.get("attempt") in resolved:
                 continue
-            orders = [o for o in self.ex.get_orders(client_order_id=s["coid"]) if not o.is_trigger]
+            orders = self.orders_by_coid(s["coid"])
             st = orders[0].status if orders else "not_found"
             self.rec.intent_event(day, "entry_attempt", "filled" if st in FILLED_STATUSES else "unfilled",
                                   {"attempt": s.get("attempt"), "status": st, "resolved_on_resume": True})

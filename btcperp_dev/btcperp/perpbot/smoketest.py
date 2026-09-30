@@ -38,7 +38,7 @@ ZH = {
     "equity_formula": "權益計算方式核對", "telegram": "Telegram 通知（已停用）", "server_time": "伺服器時間同步",
     "short_and_flip": "最細倉做空及反手測試", "g1_bracket_partial_reject": "括號單部分被拒時入場是否成交",
     "fok_unfilled_status": "FOK 未成交時交易所回傳嘅狀態", "fees": "真實 taker 手續費率",
-    "basis": "Binance 現貨同 Polymarket mark 價差",
+    "basis": "Binance 現貨同 Polymarket mark 價差", "cleanup": "收尾：確認冇遺留測試倉位",
 }
 
 
@@ -287,11 +287,17 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
                              reduce_only=False, client_order_id=coid)
         engine.log_order("smoketest", "response", coid, res.order_id, str(res.accepted), {"error": res.error})
         engine.sleep(1.0)
-        found = [x for x in ex.get_orders(client_order_id=coid) if not x.is_trigger]
-        st = found[0].status if found else None
+        # v1.5.4: live, the client-order-id lookup found nothing for this order; record every source
+        by_update = res.order.status if res.order is not None else None
+        oid = res.order_id or (res.order.id if res.order is not None else None)
+        by_id = next((x.status for x in ex.get_orders(order_id=oid) if not x.is_trigger), None) if oid else None
+        by_coid = next((x.status for x in ex.get_orders(client_order_id=coid) if not x.is_trigger), None)
+        st = next((x for x in (by_update, by_id, by_coid) if x is not None), None)
         flat = ex.get_account().position(inst.id) is None
         known = st in NOT_FILLED_TERMINAL
-        return (flat and known), {"accepted": res.accepted, "error": res.error, "raw_status": st,
+        return (flat and known), {"accepted": res.accepted, "error": res.error, "order_id": oid, "raw_status": st,
+                                  "status_from_placement_update": by_update, "status_by_order_id": by_id,
+                                  "status_by_client_order_id": by_coid,
                                   "status_known_as_not_filled": known, "position_flat": flat,
                                   "note": ("status recognised: exits.entry_attempts may be raised to 2 in a new config "
                                            "version" if known else "status NOT recognised: keep exits.entry_attempts at 1 "
@@ -473,6 +479,17 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         engine.tg.get_updates(None)
         return ok, {"sent": ok}
     step("telegram", s_tg)
+
+    def s_cleanup() -> Any:
+        """v1.5.4: a failed step must never leave a test position behind (the trading steps after a critical
+        failure are skipped, including the close). Flatten reduce-only and cancel leftovers by id."""
+        pos = ex.get_account().position(ctx["inst"].id)
+        if pos is None:
+            return True, {"position": None, "action": "none needed"}
+        out = close_now("cleanup")
+        return bool(out.get("flat")), {"position_before": pos.__dict__, "cleanup": out}
+    if allow_trading and "inst" in ctx:
+        step("cleanup", s_cleanup)
 
     all_ok = all(r["ok"] is not False for r in results) and not any(r["ok"] is None for r in results if allow_trading)
     out = paths.smoketest_dir / f"smoketest_{tag}.json"

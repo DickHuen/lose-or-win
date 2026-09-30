@@ -3,6 +3,23 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.5 - 2026-09-30 (config 1.5.0) - order status without the client-order-id lookup; smoketest cleanup
+
+Smoketest W on v1.5.4: every read step, the leverage step and `place_cancel` passed (the price fixes work). It
+stopped at `fok_unfilled_status`: the FOK test order was accepted and did not fill (portfolio unchanged, no position),
+but `GET /v1/account/orders?client_order_id=` returned nothing, so its status was unknown. The order-id lookup does
+work (place_cancel found its order "cancelled").
+
+- **Order status:** `confirm_order` uses, in order: the exchange's own order update that comes with the placement,
+  the order id, then the client order id. Restart recovery, the entry-retry proof (B1) and position adoption use a
+  new `orders_by_coid`: the client-order-id lookup, else the order ids known locally (the placement response logged
+  in `orders`, and any fill carrying that client order id). The whole test suite also passes with the
+  client-order-id lookup disabled; the entry safety tests run that way in `test_order_status_v155.py`.
+- **Smoketest:** `fok_unfilled_status` records the status from each source. A new last step `cleanup` (YES / W)
+  closes any position left by a failed step, reduce-only, and cancels its leftover orders by id. Before, a critical
+  failure after the entry filled skipped the close.
+- **Tests:** 299 (+12).
+
 ## 1.5.4 - 2026-09-30 (config 1.5.0) - Windows: install test reset and a restore that gave up
 
 The v1.5.3 upgrade on the owner's PC failed one test and then could not restore v1.5.2. No position was open and no

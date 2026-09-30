@@ -76,6 +76,7 @@ class MockExchange(Exchange):
         self.liq_price_override: float | None = None
         self.raise_on: dict[str, Exception] = {}
         self.hide_orders_from_status = False         # /v1/account/orders does not show our order
+        self.coid_lookup_empty = False               # v1.5.4 live: ?client_order_id= found nothing, order id did
         self.lag_position_reads = 0                  # next N get_account calls hide the position (stale read)
         self.position_tpsl_unknown = False           # position TP/SL is placed but the client sees outcome unknown
         self.hide_fills = False                      # fills endpoint lags
@@ -255,7 +256,7 @@ class MockExchange(Exchange):
     def get_orders(self, *, order_id: int | None = None, client_order_id: str | None = None,
                    instrument_id: int | None = None, start_ms: int | None = None, end_ms: int | None = None) -> list[Order]:
         self._check_raise("get_orders")
-        if self.hide_orders_from_status:
+        if self.hide_orders_from_status or (client_order_id is not None and order_id is None and self.coid_lookup_empty):
             return []
         out = []
         for o in self.orders.values():
@@ -370,7 +371,9 @@ class MockExchange(Exchange):
         if row_rejected:
             # like SDK 0.11.0: any rejected row raises for the whole command, even if the entry row filled
             return PlaceResult(False, client_order_id=client_order_id, error=row_rejected)
-        return PlaceResult(True, order.id, client_order_id, tp_id, sl_id, replace(order))
+        # the SDK waits for the order update; hidden status = that update never came (SDK TimeoutError)
+        return PlaceResult(True, order.id, client_order_id, tp_id, sl_id,
+                           None if self.hide_orders_from_status else replace(order))
 
     def place_position_tpsl(self, *, instrument_id: int, tp_trigger: str | None, sl_trigger: str | None) -> PlaceResult:
         self.calls.append(("place_position_tpsl", {"tp": tp_trigger, "sl": sl_trigger}))
