@@ -11,7 +11,7 @@ desktop notifications. It runs on the owner's Windows PC from Windows Task Sched
 |---|---|
 | `1_Install.bat` | First install |
 | `Upgrade.bat` | Upgrade from the newest zip in Downloads (asks for `UPGRADE`; `TEST-RESTORE` checks the automatic restore) |
-| `Proxy_Key.bat` | Proxy key; the main wallet only signs (N: hardware wallet only, asks for `HARDWARE`; O: another computer) |
+| `Proxy_Key.bat` | Proxy key; the main wallet only signs (P: phone MetaMask on the same Wi-Fi; N: hardware wallet only, asks for `HARDWARE`; O: another computer) |
 | `Edit_Secrets.bat` | Open .env in Notepad |
 | `2_Smoketest.bat` | Smoketest: YES / W (+ withdrawal probe) / R |
 | `Backtest.bat` | Backtest (asks for `CONFIRM` on the criteria the first time) |

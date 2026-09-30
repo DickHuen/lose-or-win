@@ -12,6 +12,9 @@ goes to POST /v1/account/proxy, which returns the proxy secret.
   `proxykey new --owner 0xMAIN --offline`                 O: sign on ANOTHER computer (P5). This PC only writes
         data/proxykey/sign_fields.txt (four plain fields). The other computer uses ITS OWN verified copy of the
         release (offline_sign/offline_sign.html or perpbot/offline_sign.py), which rebuilds the message.
+  `proxykey new --owner 0xMAIN --phone`                   P (v1.5.1): sign on your PHONE. The same one-off page is served
+        on this PC's home Wi-Fi address (private network only, short one-time link, 15 minutes); the phone's
+        MetaMask app opens it and signs. The main wallet key stays on the phone.
   `proxykey finish --signature 0x...`                      register that signature; the signer must be the
         wallet given at `new` (P6).
   `proxykey status`                                        pending request, .env proxy, registered proxies.
@@ -23,11 +26,13 @@ written under the bot's lock (P7). Nothing secret is ever printed or logged.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets as _secrets
+import socket
 import stat
 import threading
 import time
@@ -87,7 +92,7 @@ class Pending:
     label: str
     created_utc: str
     owner: str
-    method: str                                  # browser (hardware wallet) | offline
+    method: str                                  # browser (hardware wallet) | offline | phone
 
     def typed_data(self) -> dict[str, Any]:
         return build_typed(self.proxy, self.exp_ms, self.salt, self.ts_ms)
@@ -141,8 +146,8 @@ def new_request(paths: Paths, cfg: Any, *, days: int, label: str, owner: str, me
                             f"changing the main wallet")
     if int(cfg.polymarket.chain_id) != CHAIN_ID:
         raise ProxyKeyError(f"unexpected chain id {cfg.polymarket.chain_id}")
-    if method not in ("browser", "offline"):
-        raise ProxyKeyError("method must be browser or offline")
+    if method not in ("browser", "offline", "phone"):
+        raise ProxyKeyError("method must be browser, offline or phone")
     pk = "0x" + _secrets.token_bytes(32).hex()
     ts = int(now_ms if now_ms is not None else time.time() * 1000)
     p = Pending(private_key=pk, proxy=Account.from_key(pk).address, exp_ms=ts + days * 86_400_000,
@@ -311,16 +316,51 @@ def status_lines(paths: Paths, cfg: Any, secrets: Any, transport: Any = None) ->
     return lines
 
 
-# ---------------------------------------------------------------- one-off local signing page (option N)
+# ---------------------------------------------------------------- one-off signing page (options N and P)
+
+PHONE_TOKEN_CHARS = "abcdefghjkmnpqrstuvwxyz23456789"          # no 0/o/1/l/i: easy to type on a phone
+PHONE_TOKEN_LEN = 10                                           # 31^10 ~ 8e14 guesses; the page lives 15 min
+
+
+HOME_NETWORKS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def is_private_lan(ip: str) -> bool:
+    """A home-network address (RFC 1918: 10/8, 172.16/12, 192.168/16): never a public, loopback or other one."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.version == 4 and any(a in n for n in HOME_NETWORKS)
+
+
+def lan_ip() -> str | None:
+    """This PC's address on the home network (the interface that routes outward; a UDP connect sends nothing)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))                      # TEST-NET-1: never actually contacted
+            ip = s.getsockname()[0]
+    except OSError:
+        return None
+    return ip if is_private_lan(ip) else None
+
+
+def phone_token() -> str:
+    return "".join(_secrets.choice(PHONE_TOKEN_CHARS) for _ in range(PHONE_TOKEN_LEN))
+
 
 def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser: bool, timeout_s: float = 900.0,
                   transport: Any = None, token: str | None = None,
-                  with_lock: Callable[[Callable[[], Any]], Any] | None = None) -> dict[str, Any]:
+                  with_lock: Callable[[Callable[[], Any]], Any] | None = None,
+                  host: str = "127.0.0.1") -> dict[str, Any]:
+    """`host` 127.0.0.1: this PC's browser (option N). A home-network address: the phone on the same Wi-Fi
+    (option P); only that address:port is accepted as Host, the link carries a one-time token, one submission."""
     token = token or _secrets.token_hex(16)
     result: dict[str, Any] = {}
     done = threading.Event()
     gate = threading.Lock()                                   # P8: only one POST can ever call finish()
-    allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    loopback = host.startswith("127.") or host == "localhost"
+    allowed = {f"127.0.0.1:{port}", f"localhost:{port}"} if host == "127.0.0.1" else {f"{host}:{port}"}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
@@ -357,12 +397,14 @@ def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser
             done.set()
             self._send(200, json.dumps(result).encode(), "application/json")
 
-    httpd = DashServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}/{token}/"
+    if not loopback and not is_private_lan(host):
+        raise ProxyKeyError(f"{host} is not a home-network address: the signing page is never served publicly")
+    httpd = DashServer((host, port), Handler)
+    url = f"http://{host}:{port}/{token}/"
     th = threading.Thread(target=httpd.serve_forever, daemon=True)
     th.start()
     print(f"Signing page: {url}")
-    if open_browser:
+    if open_browser and loopback:
         webbrowser.open(url)
     try:
         if not done.wait(timeout_s):
@@ -398,9 +440,9 @@ h1{font-size:20px;margin:0 0 6px}.mut{color:var(--mut)}code{word-break:break-all
 #out{white-space:pre-wrap;word-break:break-all}.ok{color:var(--ok)}.bad{color:var(--bad)}
 </style></head><body><main>
 <div class="card"><h1>btcperp：授權 proxy key</h1>
-<div class="mut">用你嘅<b>主錢包（硬件錢包）</b>簽一個訊息，授權下面呢個 proxy 地址代你落單。主錢包私鑰唔會離開硬件錢包。</div></div>
+<div class="mut">用你嘅<b>主錢包</b>（硬件錢包，或者手機 MetaMask）簽一個訊息，授權下面呢個 proxy 地址代你落單。主錢包私鑰唔會離開你個錢包。</div></div>
 <div class="card"><div>主錢包：<code id="owner"></code></div><div>Proxy 地址：<code id="proxy"></code></div><div>到期：<span id="exp"></span></div>
-<div class="mut">網絡：Polygon（chain 137）。錢包會顯示 CreateProxy：addr 要同上面 proxy 地址一樣，否則唔好簽。</div></div>
+<div class="mut">網絡：Polygon（chain 137）。錢包會顯示 CreateProxy、Polymarket：addr 要同上面 proxy 地址（亦即 bot 電腦顯示嗰個）一樣，否則唔好簽。如果錢包顯示 Permit、Approve、轉賬或者其他內容，一定唔好簽。</div></div>
 <div class="card"><button id="go">用錢包簽名</button><p id="out" class="mut"></p></div>
 </main><script>
 const F=__FIELDS__, OWNER=__OWNER__, TOKEN=__TOKEN__, POST=__POST__;
@@ -408,19 +450,23 @@ const TYPES={EIP712Domain:[{name:"name",type:"string"},{name:"version",type:"str
  CreateProxy:[{name:"addr",type:"address"},{name:"exp",type:"uint64"},{name:"salt",type:"uint64"},{name:"ts",type:"uint64"}]};
 const TYPED={types:TYPES,primaryType:"CreateProxy",domain:{name:"Polymarket",version:"1",chainId:137},
  message:{addr:F.addr,exp:Number(F.exp),salt:Number(F.salt),ts:Number(F.ts)}};
+const POLYGON={chainId:"0x89",chainName:"Polygon Mainnet",nativeCurrency:{name:"POL",symbol:"POL",decimals:18},
+ rpcUrls:["https://polygon-rpc.com"],blockExplorerUrls:["https://polygonscan.com"]};
 const $=id=>document.getElementById(id), show=(t,c)=>{$("out").textContent=t;$("out").className=c||"mut"};
 const hkt=ms=>new Date(Number(ms)+8*3600e3).toISOString().slice(0,16).replace("T"," ")+" HKT";
 $("owner").textContent=OWNER;$("proxy").textContent=F.addr;$("exp").textContent=hkt(F.exp);
 $("go").onclick=async()=>{
  try{
   if(!/^0x[0-9a-fA-F]{40}$/.test(F.addr)||Number(F.exp)-Number(F.ts)>30*86400e3){show("請求內容唔正常，唔好簽。","bad");return}
-  if(!window.ethereum){show("搵唔到瀏覽器錢包（例如 MetaMask）。","bad");return}
+  if(!window.ethereum){show("搵唔到錢包。電腦：用裝咗 MetaMask 嘅瀏覽器。手機：要喺 MetaMask App 入面嘅瀏覽器開呢個網址。","bad");return}
   const [acct]=await ethereum.request({method:"eth_requestAccounts"});
   if(acct.toLowerCase()!==OWNER.toLowerCase()){show("錢包帳戶 "+acct+" 唔係主錢包 "+OWNER+"：請喺錢包切換帳戶。","bad");return}
   if((await ethereum.request({method:"eth_chainId"})).toLowerCase()!=="0x89"){
    try{await ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x89"}]})}
-   catch(e){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}
-  show("請喺錢包（硬件錢包）確認簽名…");
+   catch(e){
+    try{await ethereum.request({method:"wallet_addEthereumChain",params:[POLYGON]})}
+    catch(e2){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}}
+  show("請喺錢包確認簽名（檢查係 CreateProxy、Polymarket，addr 同上面一樣）…");
   const sig=await ethereum.request({method:"eth_signTypedData_v4",params:[acct,JSON.stringify(TYPED)]});
   if(!POST){show("簽名（抄返去 bot 電腦，喺 Proxy_Key.bat 揀 F 貼上）：\n"+sig,"ok");return}
   show("已簽名，正在向交易所登記…");

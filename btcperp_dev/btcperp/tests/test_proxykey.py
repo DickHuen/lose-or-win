@@ -447,3 +447,102 @@ def test_cli_finish_refuses_while_the_bot_runs(tmp_root, capsys, monkeypatch):
         held.release()
     assert "a bot command is running" in capsys.readouterr().out
     assert registered == [] and (tmp_root / ".env").read_text(encoding="utf-8") == before and (tmp_root / pkm.PENDING_NAME).exists()
+
+
+# ---------------------------------------------------------------- v1.5.1 option P: sign on the phone
+def test_phone_page_is_served_on_the_given_address_only(root, cfg):
+    fx = FakeExchange()
+    p = _new(root, cfg, method="phone")
+    token = pkm.phone_token()
+    assert len(token) == pkm.PHONE_TOKEN_LEN and set(token) <= set(pkm.PHONE_TOKEN_CHARS)
+    port = _free_port()
+    result = {}
+    th = threading.Thread(target=lambda: result.update(pkm.serve_signing(
+        root, cfg, p, port=port, open_browser=False, timeout_s=20, transport=fx.transport(), token=token,
+        host="127.0.0.2")))
+    th.start()
+    page = None
+    for _ in range(50):
+        try:
+            c = http.client.HTTPConnection("127.0.0.2", port, timeout=5)
+            c.request("GET", f"/{token}/")
+            r = c.getresponse()
+            page = r.read().decode()
+            break
+        except OSError:
+            time.sleep(0.1)
+    assert r.status == 200 and p.proxy in page and "wallet_addEthereumChain" in page and "Permit" in page
+    c = http.client.HTTPConnection("127.0.0.2", port, timeout=5)
+    c.request("GET", f"/{token}/", headers={"Host": f"127.0.0.1:{port}"})       # another Host: refused
+    assert c.getresponse().status == 404
+    _, sig = osg.sign(p.typed_data(), MAIN_KEY)
+    c = http.client.HTTPConnection("127.0.0.2", port, timeout=30)
+    c.request("POST", f"/{token}/sign", body=json.dumps({"signature": sig}),
+              headers={"X-Token": token, "Content-Type": "application/json"})
+    answer = json.loads(c.getresponse().read())
+    th.join(10)
+    assert answer["ok"] is True and result["ok"] is True and answer["method"] == "phone"
+
+
+def test_phone_page_is_never_served_on_a_public_address(root, cfg):
+    p = _new(root, cfg, method="phone")
+    with pytest.raises(pkm.ProxyKeyError, match="never served publicly"):
+        pkm.serve_signing(root, cfg, p, port=_free_port(), open_browser=False, timeout_s=1, host="8.8.8.8")
+    assert pkm.is_private_lan("192.168.1.23") and pkm.is_private_lan("10.0.0.5") and pkm.is_private_lan("172.20.1.2")
+    assert not pkm.is_private_lan("8.8.8.8") and not pkm.is_private_lan("127.0.0.1")
+    assert not pkm.is_private_lan("169.254.1.1") and not pkm.is_private_lan("nonsense")
+
+
+def test_lan_ip_returns_only_a_home_network_address(monkeypatch):
+    class FakeSock:
+        ip = "192.168.1.23"
+
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def connect(self, addr):
+            assert addr[0] == "192.0.2.1"            # TEST-NET: nothing is sent
+
+        def getsockname(self):
+            return (FakeSock.ip, 5000)
+
+    monkeypatch.setattr(pkm.socket, "socket", FakeSock)
+    assert pkm.lan_ip() == "192.168.1.23"
+    FakeSock.ip = "203.0.113.9"                      # a public address: never used
+    assert pkm.lan_ip() is None
+
+
+def test_cli_phone_option_prints_the_link_and_serves_on_the_lan(tmp_root, capsys, monkeypatch):
+    from perpbot.cli import Factories, main
+    from perpbot.timeutil import FixedClock
+
+    from conftest import hkt
+
+    (tmp_root / ".env").write_text(f"PM_WALLET_ADDRESS={MAIN}\n", encoding="utf-8")
+    f = Factories(registered_root=lambda: None)
+    clock = FixedClock(hkt(2026, 10, 5, 12, 0))
+    paths = Paths(tmp_root)
+    seen = {}
+
+    def fake_serve(paths_, cfg_, p, **kw):
+        seen.update(kw, method=p.method)
+        return {"ok": False, "error": "test stop"}
+
+    monkeypatch.setattr(pkm, "serve_signing", fake_serve)
+    assert main(["proxykey", "new", "--phone", "--host", "192.168.1.23", "--owner", MAIN], paths=paths, clock=clock,
+                factories=f) == 1
+    out = capsys.readouterr().out
+    assert f"http://192.168.1.23:8766/{seen['token']}/" in out and "MetaMask" in out and "PRIVATE networks" in out
+    assert seen["host"] == "192.168.1.23" and seen["open_browser"] is False and seen["method"] == "phone"
+    monkeypatch.setattr(pkm, "lan_ip", lambda: None)
+    assert main(["proxykey", "new", "--phone", "--owner", MAIN], paths=paths, clock=clock, factories=f) == 1
+    assert "could not find this PC's home Wi-Fi" in capsys.readouterr().out
+    assert main(["proxykey", "new", "--phone", "--offline", "--owner", MAIN], paths=paths, clock=clock,
+                factories=f) == 1
+    assert "not both" in capsys.readouterr().out

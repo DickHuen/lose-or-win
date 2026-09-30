@@ -3,6 +3,24 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.1 - 2026-09-30 (config 1.5.0) - sign the proxy key on your phone
+
+The owner has no hardware wallet and no second computer. v1.5.1 lets the main wallet sign on the phone, so the main
+wallet key never touches the bot PC.
+
+- **Proxy_Key.bat option P** (`proxykey new --phone [--host IP]`):
+  - the one-off signing page is served on this PC's home Wi-Fi address (private addresses only: 192.168.x.x,
+    10.x.x.x, 172.16-31.x.x; never public or loopback);
+  - a short one-time link (10 characters, easy to type on a phone);
+  - only that address is accepted as Host; one submission; closes after 15 minutes;
+  - the phone's MetaMask app (in-app browser) opens the link and signs;
+  - the page builds the CreateProxy message itself, as before, and checks the wallet account is the main wallet
+    given at `new`. The bot PC registers the key and writes .env.
+- **Signing pages** (local, phone and `offline_sign.html`): if the wallet does not know Polygon, the pages add it
+  (`wallet_addEthereumChain`). They warn to reject Permit, Approve or transfer requests.
+- START_HERE section 3 gives the phone steps in Chinese.
+- **Tests:** 273 (+4). The LAN page, a public address refused, the address detection and the CLI option.
+
 ## 1.5.0 - 2026-09-29 (config 1.5.0) - option B: decide every 4 hours; readable analysis; Preview
 
 The owner chose option B: the same strategy, decided every 4 hours instead of once a day.

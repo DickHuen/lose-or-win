@@ -77,7 +77,10 @@ $("go").onclick=async()=>{
   if(OWNER&&acct.toLowerCase()!==OWNER.toLowerCase()){show("錢包帳戶 "+acct+" 唔係主錢包 "+OWNER+"：請喺錢包切換帳戶。","bad");return}
   if((await ethereum.request({method:"eth_chainId"})).toLowerCase()!=="0x89"){
    try{await ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x89"}]})}
-   catch(e){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}
+   catch(e){
+    try{await ethereum.request({method:"wallet_addEthereumChain",params:[{chainId:"0x89",chainName:"Polygon Mainnet",
+      nativeCurrency:{name:"POL",symbol:"POL",decimals:18},rpcUrls:["https://polygon-rpc.com"],blockExplorerUrls:["https://polygonscan.com"]}]})}
+    catch(e2){show("請先喺錢包切換到 Polygon 網絡，再撳一次。","bad");return}}}
   show("請喺錢包確認簽名…");
   const sig=await ethereum.request({method:"eth_signTypedData_v4",params:[acct,JSON.stringify(TYPED)]});
   show("簽名者："+acct+"\n簽名（抄返去 bot 電腦，喺 Proxy_Key.bat 揀 F 貼上）：\n"+sig,"ok");

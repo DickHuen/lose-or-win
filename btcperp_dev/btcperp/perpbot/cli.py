@@ -4,7 +4,7 @@
   pause | unpause | kill | resume [--reset-peak] | alerts | selftest | smoketest [--no-trade] [--probe-withdrawal]
   flowwatch | version | snapshot (read-only exchange read for the dashboard)
   dashboard [--port N] [--no-browser] | schedule install|remove|list|show [--dry-run] [--no-dashboard] [--upgrade]
-  proxykey new --owner 0x.. [--days N<=30] [--offline] | proxykey finish [--signature 0x..] | proxykey status
+  proxykey new --owner 0x.. [--days N<=30] [--offline | --phone [--host IP]] | proxykey finish [--signature 0x..] | proxykey status
   backtest download | criteria | confirm | run   (offline from downloaded Binance data; see BACKTEST.md)
   preview [--equity USD]   (read-only: what the strategy would decide now; public data, no keys, no orders)
 
@@ -108,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--owner", default=None, help="new: your MAIN wallet address (asked for if not given)")
     pk.add_argument("--label", default="btcperp")
     pk.add_argument("--offline", action="store_true", help="new: only write sign_fields.txt to sign on another computer")
+    pk.add_argument("--phone", action="store_true",
+                    help="new: serve the signing page on this PC's home Wi-Fi address for the phone's MetaMask app")
+    pk.add_argument("--host", default=None, help="new --phone: this PC's home-network IP (default: detected)")
     pk.add_argument("--port", type=int, default=8766, help="new: local signing page port (default 8766)")
     pk.add_argument("--no-browser", action="store_true")
     pk.add_argument("--signature", default=None, help="finish: the signature (asked for if not given)")
@@ -469,11 +472,21 @@ def _run_proxykey(args: Any, paths: Paths, cfg: Any, secrets: Any) -> int:
                 print(line)
             return EXIT_OK
         if args.action == "new":
+            if args.offline and args.phone:
+                print("FAILED: choose --offline or --phone, not both")
+                return EXIT_ERROR
+            host = "127.0.0.1"
+            if args.phone:
+                host = (args.host or pkm.lan_ip() or "").strip()
+                if not host or not pkm.is_private_lan(host):
+                    print("FAILED: could not find this PC's home Wi-Fi / LAN address (192.168.x.x, 10.x.x.x or "
+                          "172.16-31.x.x). Connect this PC to the same Wi-Fi as the phone and try again.")
+                    return EXIT_ERROR
             owner = (args.owner or "").strip()
             if not owner:
                 hint = f" [{secrets.wallet_address}]" if secrets.wallet_address else ""
                 owner = input(f"Your MAIN wallet address (0x...){hint}: ").strip() or secrets.wallet_address
-            method = "offline" if args.offline else "browser"
+            method = "phone" if args.phone else "offline" if args.offline else "browser"
             p = pkm.new_request(paths, cfg, days=int(args.days), label=str(args.label), owner=owner, method=method,
                                 expected_owner=secrets.wallet_address)
             print(f"New proxy key made on this computer: {p.proxy}")
@@ -486,9 +499,20 @@ def _run_proxykey(args: Any, paths: Paths, cfg: Any, secrets: Any) -> int:
                       f"  python perpbot\\offline_sign.py sign_fields.txt      (or offline_sign\\offline_sign.html)\n"
                       f"Then come back within 1 hour: Proxy_Key.bat, option F.")
                 return EXIT_OK
-            print("Your browser opens a signing page. Sign with the HARDWARE wallet connected to MetaMask/Rabby.")
-            res = pkm.serve_signing(paths, cfg, p, port=int(args.port), open_browser=not args.no_browser,
-                                    with_lock=with_lock)
+            if args.phone:
+                token = pkm.phone_token()
+                print("\nSIGN ON YOUR PHONE (same Wi-Fi as this PC), within 15 minutes:")
+                print("  1. Open the MetaMask app, tap the Browser, and type this address exactly:")
+                print(f"\n        http://{host}:{int(args.port)}/{token}/\n")
+                print("  2. Tap the sign button. MetaMask must show CreateProxy / Polymarket and the proxy address above.")
+                print("     If it shows Permit, Approve, a transfer or anything else: reject it and tell Claude.")
+                print("  If Windows Firewall asks about Python: allow it on PRIVATE networks.")
+                res = pkm.serve_signing(paths, cfg, p, port=int(args.port), open_browser=False, with_lock=with_lock,
+                                        host=host, token=token)
+            else:
+                print("Your browser opens a signing page. Sign with the HARDWARE wallet connected to MetaMask/Rabby.")
+                res = pkm.serve_signing(paths, cfg, p, port=int(args.port), open_browser=not args.no_browser,
+                                        with_lock=with_lock)
         else:
             sig = args.signature or input("Paste the signature (0x...): ").strip()
             res = dict(pkm.finish(paths, cfg, sig, with_lock=with_lock), ok=True)

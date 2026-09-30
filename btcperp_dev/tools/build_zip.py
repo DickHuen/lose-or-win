@@ -20,7 +20,7 @@ TOP_FILES = ["run.py", "install.py", "requirements.txt", "VERSION", "README.md",
 CODE_DIRS = ["perpbot", "tests"]
 BAT_DIR = "windows"                      # Windows shortcuts: packaged with CRLF line endings
 FORBIDDEN_PARTS = {".env", "data", "logs", "venv", "__pycache__", ".git", ".pytest_cache"}
-FIXED_TIME = (2026, 9, 29, 0, 0, 0)
+FIXED_TIME = (2026, 9, 30, 0, 0, 0)
 
 
 def collect() -> list[str]:
