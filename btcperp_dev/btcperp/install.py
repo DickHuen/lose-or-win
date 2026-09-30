@@ -31,6 +31,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -94,7 +95,7 @@ def remove_stale_files() -> None:
             rel = p.relative_to(ROOT).as_posix()
             if p.is_file() and "__pycache__" not in rel and rel not in keep:
                 say(f"removing stale file from an older version: {rel}")
-                p.unlink()
+                retry_fs(lambda p=p: _remove(p), f"remove {rel}")
 
 
 def read_zip(path: Path) -> tuple[str, list[tuple[str, bytes]]]:
@@ -159,23 +160,62 @@ def backup_install(dest: Path) -> list[str]:
     return saved
 
 
+RETRY_DELAYS_S = (0.5, 1.0, 2.0, 3.0, 5.0, 8.0)
+
+
+def retry_fs(fn, what: str):
+    """Windows: antivirus or the search indexer may hold a freshly written file or folder for a moment. v1.5.4: the
+    owner's restore failed on it (WinError 5, perpbot\\datasources). Retry for about 20 seconds before giving up."""
+    for delay in RETRY_DELAYS_S + (None,):
+        try:
+            return fn()
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            if delay is None:
+                raise
+            say(f"{what}: {e} - retrying in {delay:g}s")
+            time.sleep(delay)
+    return None
+
+
+def _remove(p: Path) -> None:
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p)
+    else:
+        try:
+            p.unlink()
+        except PermissionError:
+            os.chmod(p, stat.S_IWRITE)                      # a read-only file
+            p.unlink()
+
+
+def sync_dir(src: Path, dst: Path) -> None:
+    """Make dst hold exactly src's files (__pycache__ aside) WITHOUT deleting dst itself: overwrite in place, then
+    remove what src does not have, deepest first, each step retried."""
+    retry_fs(lambda: shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__")),
+             f"copy {src.name}")
+    for p in sorted(dst.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+        rel = p.relative_to(dst)
+        if "__pycache__" not in rel.parts and not (src / rel).exists():
+            retry_fs(lambda p=p: _remove(p), f"remove {dst.name}/{rel.as_posix()}")
+
+
 def restore_install(src: Path, new_members: list[str]) -> None:
     """Put the backed-up version back and remove files that only the new version had."""
     new_dirs = {rel.split("/")[0] for rel in new_members if "/" in rel}
     for d in CODE_DIRS + ("config",):
         if (src / d).exists():
-            if (ROOT / d).exists():
-                shutil.rmtree(ROOT / d)
-            shutil.copytree(src / d, ROOT / d)
+            sync_dir(src / d, ROOT / d)
         elif d in new_dirs and (ROOT / d).is_dir():
-            shutil.rmtree(ROOT / d)                         # a folder only the new version had
+            retry_fs(lambda d=d: _remove(ROOT / d), f"remove {d}")     # a folder only the new version had
     for p in src.iterdir():
         if p.is_file():
-            shutil.copy2(p, ROOT / p.name)
+            retry_fs(lambda p=p: shutil.copy2(p, ROOT / p.name), f"copy {p.name}")
     for rel in new_members:
         top = rel.split("/")[0]
         if "/" not in rel and not (src / top).exists() and (ROOT / top).is_file():
-            (ROOT / top).unlink()
+            retry_fs(lambda top=top: _remove(ROOT / top), f"remove {top}")
 
 
 def reinstall_requirements() -> None:

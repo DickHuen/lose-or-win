@@ -43,7 +43,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
-from perpbot.dashboard import CSP, DashServer
+from perpbot.dashboard import CSP, REQUEST_TIMEOUT_S, DashServer, read_body
 from perpbot.paths import Paths
 
 log = logging.getLogger("perpbot.proxykey")
@@ -363,6 +363,8 @@ def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser
     allowed = {f"127.0.0.1:{port}", f"localhost:{port}"} if host == "127.0.0.1" else {f"{host}:{port}"}
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT_S
+
         def log_message(self, fmt: str, *args: Any) -> None:
             log.debug(fmt, *args)
 
@@ -382,14 +384,14 @@ def serve_signing(paths: Paths, cfg: Any, p: Pending, *, port: int, open_browser
                        "text/html; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
+            body = read_body(self)                            # v1.5.4: before any answer (WinError 10053)
             if (self.headers.get("Host", "") not in allowed or self.path != f"/{token}/sign"
                     or self.headers.get("X-Token") != token):
                 return self._send(403, b"forbidden", "text/plain")
             if not gate.acquire(blocking=False):
                 return self._send(409, b'{"ok":false,"error":"already submitted"}', "application/json")
             try:
-                n = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                sig = json.loads(self.rfile.read(n) or b"{}").get("signature", "")
+                sig = json.loads(body or b"{}").get("signature", "")
                 res = finish(paths, cfg, sig, transport=transport, with_lock=with_lock)
                 result.update(res, ok=True)
             except Exception as e:  # noqa: BLE001

@@ -3,6 +3,24 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.4 - 2026-09-30 (config 1.5.0) - Windows: install test reset and a restore that gave up
+
+The v1.5.3 upgrade on the owner's PC failed one test and then could not restore v1.5.2. No position was open and no
+scheduled task was installed. v1.5.4 contains all of v1.5.3 plus:
+
+- **Local servers read the request body before answering** (signing page and dashboard).
+  `test_local_signing_page_round_trip_and_single_submit` failed with WinError 10053. http.client sends the headers
+  and the body separately; the signing server refused (403 / 409) before the body arrived, and on Windows the late
+  body resets the connection, so the client lost the answer. Handlers also time out after 10 s, so a client that
+  never sends its body cannot hold a thread.
+- **The automatic restore overwrites in place and retries.** It used to delete each code folder and copy the backup
+  back; Windows refused to delete `perpbot\datasources` for a moment (WinError 5, typically antivirus or the search
+  indexer), and the restore stopped half way. Now it copies the backup over the folder and then removes only the
+  files the new version added, each step retried for about 20 seconds.
+- **Recovery from that state:** `Upgrade.bat` with this zip. The installed VERSION still reads 1.5.3, so 1.5.4 is
+  accepted; every file is written again and the tests run (tested from exactly that half-restored state).
+- **Tests:** 287 (+4).
+
 ## 1.5.3 - 2026-09-30 (config 1.5.0) - live smoketest W: wrong ticker, price format, price band
 
 Smoketest W on the owner's PC placed no order: the first test order was refused. Its output also showed that the

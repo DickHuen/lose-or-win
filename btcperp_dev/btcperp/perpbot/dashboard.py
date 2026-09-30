@@ -131,6 +131,21 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
     }
 
 
+MAX_BODY = 10_000
+REQUEST_TIMEOUT_S = 10
+
+
+def read_body(handler: BaseHTTPRequestHandler, limit: int = MAX_BODY) -> bytes:
+    """Read the request body BEFORE answering (v1.5.4). http.client sends the headers and the body separately; on
+    Windows a body that arrives after the server has answered and closed makes the connection reset, and the client
+    sees WinError 10053 instead of the answer (seen in the owner's install tests)."""
+    try:
+        n = max(0, min(int(handler.headers.get("Content-Length") or 0), limit))
+    except ValueError:
+        n = 0
+    return handler.rfile.read(n) if n else b""
+
+
 class DashServer(ThreadingHTTPServer):
     """Loopback-only server. On Windows SO_REUSEADDR would let a second copy bind the same port,
     so the port is bound exclusively there instead."""
@@ -171,6 +186,8 @@ def make_handler(state: DashboardState, port: int) -> type[BaseHTTPRequestHandle
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT_S                      # a client that never sends its body cannot hold a thread
+
         def log_message(self, fmt: str, *args: Any) -> None:  # keep the console quiet
             log.debug(fmt, *args)
 
@@ -206,6 +223,7 @@ def make_handler(state: DashboardState, port: int) -> type[BaseHTTPRequestHandle
             return self._send(404, b"not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
+            read_body(self)
             if not self._host_ok() or self.headers.get("X-Token") != state.token:
                 return self._send(403, b"forbidden", "text/plain")
             if self.path == "/api/refresh":
