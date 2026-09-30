@@ -33,6 +33,7 @@ from perpbot.exchange.base import (
     Order,
     PlaceResult,
     Position,
+    mark_vs_book,
     parse_server_time_ms,
 )
 from perpbot.indicators import Candle
@@ -1275,6 +1276,10 @@ class Engine:
         self.store_binance(daily, h4, funding)
         ticker = self.ex.get_ticker(inst.id)
         book = self.ex.get_book(inst.id, int(cfg.polymarket.book_depth))
+        ok, dev = mark_vs_book(ticker.mark, book, inst.price_bounds)
+        if not ok:                                   # v1.5.3: never size or place SL/TP from another market's price
+            raise ExchangeError(f"mark {ticker.mark} does not match the {inst.symbol} order book "
+                                f"({book.bids[:1]} / {book.asks[:1]}, deviation {dev}): exchange data inconsistent")
         try:
             pm_funding = self.ex.get_funding_history(inst.id, now_ms - DAY_MS, now_ms)
         except ExchangeError as e:
@@ -1518,6 +1523,9 @@ class Engine:
         try:
             t = self.ex.get_ticker(inst.id)
             b = self.ex.get_book(inst.id, int(self.cfg.polymarket.book_depth))
+            if not mark_vs_book(t.mark, b, inst.price_bounds)[0]:
+                log.warning("market data skipped: mark %s does not match the order book", t.mark)
+                return
             depth_bid = sum(q for _, q in b.bids)
             depth_ask = sum(q for _, q in b.asks)
             snap = {"mark": t.mark, "index": t.index, "last": t.last, "funding_rate": t.funding_rate,

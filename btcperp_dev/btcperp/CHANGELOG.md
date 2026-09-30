@@ -3,6 +3,31 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.3 - 2026-09-30 (config 1.5.0) - live smoketest W: wrong ticker, price format, price band
+
+Smoketest W on the owner's PC placed no order: the first test order was refused. Its output also showed that the
+ticker belonged to another market. Nothing was traded; the withdrawal probe was refused as expected.
+
+- **Wrong ticker (serious, fixed):** the SDK's `fetch_perps_ticker` returns the first ticker the API sends, and the
+  API ignored the instrument filter: the bot read mark 7690.6 while BTC-USD's book was 83264 / 83265. The mark feeds
+  sizing and the SL/TP prices, so a live entry would have been wrong.
+  - The adapter now picks the ticker whose `instrument_id` matches (searching the full list if the filtered one
+    lacks it) and refuses otherwise.
+  - Guard: every decision checks the mark against the same instrument's order book (tolerance: the instrument's
+    price band, at least 2%). If they disagree the decision stops with an error and alert; nothing is sized or
+    placed. Market-data logging skips such a snapshot.
+  - Smoketest `prices` fails (and stops the trading steps) if the mark, the last Polymarket 1h close or Binance
+    disagree with the book; `basis` fails beyond max(price band, 200 bps).
+  - Backtest download keeps Polymarket 1h candles only if the latest one matches the book.
+- **Price format (fixed):** "price exceeds allowed significant figures". BTC-USD allows 1 decimal but at most
+  5 significant figures (its book quotes whole dollars). Every order and SL/TP price is now rounded to at most
+  5 significant figures in the same direction as before (BTC at 83,264: whole dollars; at 100,000 or more: steps
+  of 10).
+- **Price band:** BTC-USD refuses orders more than 2% from the mark (`price_bounds` 0.02). The smoketest's resting
+  test order now sits at most half the band below the bid (1%).
+- The mock exchange enforces both rules, so every test checks them.
+- **Tests:** 283 (+7).
+
 ## 1.5.2 - 2026-09-30 (config 1.5.0) - smoketest fee check fixed after the first live read-only run
 
 First live `smoketest --no-trade` on the owner's PC: key, account (100 USDC) and prices read fine, but two steps failed.

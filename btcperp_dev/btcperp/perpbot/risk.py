@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal
 from typing import Any, Sequence
 
-from perpbot.exchange.base import Instrument
+from perpbot.exchange.base import PRICE_SIG_FIGS, Instrument
 
 
 class OrderRuleError(Exception):
@@ -19,14 +19,18 @@ def quantize_qty(qty: float, decimals: int) -> Decimal:
     return Decimal(str(qty)).quantize(q, rounding=ROUND_DOWN)
 
 
-def quantize_price(price: float, decimals: int, mode: str) -> Decimal:
-    """mode: 'down' | 'up' | 'nearest'."""
-    q = Decimal(1).scaleb(-decimals)
-    rounding = {"down": ROUND_FLOOR, "up": ROUND_CEILING}.get(mode)
+def quantize_price(price: float, decimals: int, mode: str, sig_figs: int = PRICE_SIG_FIGS) -> Decimal:
+    """mode: 'down' | 'up' | 'nearest'. At most `decimals` decimals AND at most `sig_figs` significant figures:
+    BTC at 83,264 -> whole dollars; at 100,000 or more -> steps of 10. Never an exponent in the result."""
     d = Decimal(str(price))
-    if rounding is None:
-        return d.quantize(q)
-    return d.quantize(q, rounding=rounding)
+    q = Decimal(1).scaleb(-decimals)
+    if sig_figs and d != 0:
+        q = max(q, Decimal(1).scaleb(d.adjusted() - (sig_figs - 1)))
+    rounding = {"down": ROUND_FLOOR, "up": ROUND_CEILING}.get(mode)
+    out = d.quantize(q) if rounding is None else d.quantize(q, rounding=rounding)
+    if out.as_tuple().exponent > 0:                       # 8.327E+4 -> 83270
+        out = out.quantize(Decimal(1))
+    return out
 
 
 def risk_pct_for_trade(cfg_risk: Any, live_trades_opened_before: int) -> tuple[float, bool]:

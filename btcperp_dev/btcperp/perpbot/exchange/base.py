@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Order statuses (official SDK PerpsOrderStatus, polymarket-client 0.11.0).
+# Exchange price rule (not a strategy number): at most this many significant figures. Live 2026-09-30 the exchange
+# refused a 6-figure BTC price ("price exceeds allowed significant figures"); its book quoted whole dollars (83264).
+PRICE_SIG_FIGS = 5
 ACTIVE_TRIGGER_STATUSES = {"untriggered", "armed"}
 ACTIVE_ORDER_STATUSES = {"accepted", "open", "partial", "untriggered", "armed"}
 FILLED_STATUSES = {"filled"}
@@ -303,3 +306,14 @@ def taker_fee_for(schedule: list[dict[str, Any]], category: str, estimate: float
         return float(row["taker_fee_rate"]), True
     listed = [float(e["taker_fee_rate"]) for e in schedule if e.get("taker_fee_rate") is not None]
     return max([float(estimate), *listed]), False
+
+
+def mark_vs_book(mark: float, book: Book, bounds: float) -> tuple[bool, float | None]:
+    """(consistent, deviation as a fraction) v1.5.3: the mark must sit near the SAME instrument's order book.
+    Live 2026-09-30 the ticker belonged to another instrument (mark 7690.6, book 83264/83265). Tolerance: the
+    instrument's own price bound (orders further than that from the mark are refused anyway), at least 2%."""
+    if not book.bids or not book.asks or not mark or mark != mark:
+        return False, None
+    mid = (book.bids[0][0] + book.asks[0][0]) / 2.0
+    dev = abs(mark / mid - 1.0)
+    return dev <= max(float(bounds or 0.0), 0.02), dev

@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import math
 import statistics
 from bisect import bisect_right
@@ -29,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from perpbot.calendar_events import EventCalendar, parse_calendar
-from perpbot.exchange.base import Instrument
+from perpbot.exchange.base import Instrument, mark_vs_book
 from perpbot.indicators import Candle
 from perpbot.risk import compute_size, is_tie, losing_streak, risk_pct_for_trade
 from perpbot.shadow import SimTrade, _r, _slipped
@@ -46,6 +47,8 @@ from perpbot.strategy import (
     sc_day,
 )
 from perpbot.timeutil import DAY_MS, HOUR_MS, MINUTE_MS, day_start_ms, fmt_utc
+
+log = logging.getLogger(__name__)
 
 UTC = timezone.utc
 INTERVALS = {"1d": DAY_MS, "4h": 4 * HOUR_MS, "1h": HOUR_MS}
@@ -205,6 +208,13 @@ def download_polymarket(pm: Any, d: Path, now_ms: int, cfg: Any) -> int:
         stop = min(end, cur + 30 * DAY_MS)
         new += [c for c in pm.get_klines(inst.id, "1h", cur, stop) if c.open_ms + HOUR_MS <= end]
         cur = stop
+    if new:                     # v1.5.3: the candles must be THIS instrument's (the live ticker once was another's)
+        book = pm.get_book(inst.id, 10)
+        ok, dev = mark_vs_book(new[-1].close, book, 0.10)
+        if not ok:
+            log.warning("Polymarket 1h candles skipped: last close %s does not match the %s order book (%s)",
+                        new[-1].close, inst.symbol, dev)
+            return len(have)
     merged = {c.open_ms: c for c in have + new}
     _write_candles(path, [merged[k] for k in sorted(merged)])
     return len(merged)

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
+from decimal import Decimal
 from typing import Any
 
 from perpbot.exchange.base import (
     ACTIVE_ORDER_STATUSES,
+    PRICE_SIG_FIGS,
     AccountConfig,
     AccountSnapshot,
     Balance,
@@ -302,6 +304,12 @@ class MockExchange(Exchange):
             return PlaceResult(False, client_order_id=client_order_id, error="duplicate_order")
         if reduce_only and self.reduce_only_fails:
             return PlaceResult(False, client_order_id=client_order_id, error="reduce-only order rejected")
+        for p in (price, tp_trigger, sl_trigger):          # v1.5.3: the live exchange's price rules
+            if p is not None and len(Decimal(str(p)).normalize().as_tuple().digits) > PRICE_SIG_FIGS:
+                return PlaceResult(False, client_order_id=client_order_id,
+                                   error="price exceeds allowed significant figures")
+        if price is not None and abs(float(price) / self.mark - 1.0) > self.inst.price_bounds:
+            return PlaceResult(False, client_order_id=client_order_id, error="price outside the allowed bounds")
         self.used_coids.add(client_order_id)
         qty = float(quantity)
         px = float(price) if price is not None else None

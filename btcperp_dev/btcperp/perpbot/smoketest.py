@@ -19,6 +19,7 @@ from perpbot.exchange.base import (
     ACTIVE_TRIGGER_STATUSES,
     FILLED_STATUSES,
     NOT_FILLED_TERMINAL,
+    mark_vs_book,
     parse_server_time_ms,
     taker_fee_for,
 )
@@ -94,11 +95,22 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         sc = compute_score(daily, utc_day(now), cfg.strategy)
         ctx["atr"] = sc.atr
         ctx["book"] = b
-        return {"mark": t.mark, "index": t.index, "polymarket_funding_rate": t.funding_rate, "best_bid": b.best_bid,
-                "best_ask": b.best_ask, "pm_1h_klines_24h": len(k1h), "pm_1d_klines_30d": len(k1d),
-                "pm_funding_prints_24h": len(fh), "binance_daily": len(daily), "binance_4h": len(h4),
-                "binance_funding_prints": len(bf), "binance_price": engine.bn.price(),
-                "today_score": sc.score, "atr14": sc.atr}
+        # v1.5.3: every price must belong to THIS instrument (live 2026-09-30 the ticker was another market's)
+        mark_ok, dev = mark_vs_book(t.mark, b, inst.price_bounds)
+        mid = (b.best_bid + b.best_ask) / 2.0
+        last_1h = k1h[-1].close if k1h else None
+        k_ok = last_1h is None or abs(last_1h / mid - 1.0) < 0.10
+        bnp = engine.bn.price()
+        bn_ok = bool(bnp) and abs(mid / bnp - 1.0) < 0.05
+        return (mark_ok and k_ok and bn_ok), {
+            "ticker_instrument_id": t.instrument_id, "mark": t.mark, "index": t.index,
+            "polymarket_funding_rate": t.funding_rate, "best_bid": b.best_bid, "best_ask": b.best_ask,
+            "mark_vs_book_mid": dev, "mark_matches_book": mark_ok, "pm_1h_last_close": last_1h,
+            "pm_1h_close_matches_book": k_ok, "book_mid_matches_binance": bn_ok,
+            "pm_1h_klines_24h": len(k1h), "pm_1d_klines_30d": len(k1d),
+            "pm_funding_prints_24h": len(fh), "binance_daily": len(daily), "binance_4h": len(h4),
+            "binance_funding_prints": len(bf), "binance_price": bnp,
+            "today_score": sc.score, "atr14": sc.atr}
     step("prices", s_prices, critical=True)
 
     def s_time() -> Any:
@@ -131,8 +143,10 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         inst = ctx.get("inst") or engine.instrument()
         mark = ex.get_ticker(inst.id).mark
         bnp = engine.bn.price()
-        return True, {"polymarket_mark": mark, "binance_price": bnp,
-                      "basis_bps": (mark / bnp - 1) * 1e4 if bnp else None}
+        basis = (mark / bnp - 1) * 1e4 if bnp else None
+        limit = max(float(inst.price_bounds or 0.0) * 1e4, 200.0)
+        return (basis is not None and abs(basis) <= limit), {"polymarket_mark": mark, "binance_price": bnp,
+                                                              "basis_bps": basis, "max_abs_bps": limit}
     step("basis", s_basis)
 
     def s_region() -> Any:
@@ -174,6 +188,11 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         step_q = Decimal(1).scaleb(-inst.quantity_decimals)
         need = Decimal(str(math.ceil(inst.min_notional * 1.2 / price / float(step_q)))) * step_q
         return max(need, step_q)
+
+    def rest_offset_pct(inst: Any) -> float:
+        """v1.5.3: below the bid, but inside the instrument's price band (BTC-USD: orders more than 2% from the
+        mark are refused), so the test order is accepted and rests."""
+        return min(float(cfg.smoketest.resting_order_offset_pct), float(inst.price_bounds or 0.02) * 100 / 2)
 
     tag = now.strftime("%Y%m%d%H%M%S")
 
@@ -234,7 +253,7 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
     def s_place_cancel() -> Any:
         inst = ctx["inst"]
         b = ex.get_book(inst.id, int(cfg.polymarket.book_depth))
-        px = quantize_price(b.best_bid * (1 - float(cfg.smoketest.resting_order_offset_pct) / 100), inst.price_decimals, "down")
+        px = quantize_price(b.best_bid * (1 - rest_offset_pct(inst) / 100), inst.price_decimals, "down")
         qty = min_qty(float(px))
         coid = engine.coid(f"smoketest:{tag}:rest")
         engine.log_order("smoketest", "request", coid, None, None, {"side": "BUY", "qty": _dec(qty), "price": _dec(px), "tif": "gtc"})
@@ -260,7 +279,7 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
         """Review v1.2.0 item 10: the exchange's real status for a FOK that cannot fill (priced below the bid)."""
         inst = ctx["inst"]
         b = ex.get_book(inst.id, int(cfg.polymarket.book_depth))
-        px = quantize_price(b.best_bid * (1 - float(cfg.smoketest.resting_order_offset_pct) / 100), inst.price_decimals, "down")
+        px = quantize_price(b.best_bid * (1 - rest_offset_pct(inst) / 100), inst.price_decimals, "down")
         qty = min_qty(float(px))
         coid = engine.coid(f"smoketest:{tag}:fok_unfilled")
         engine.log_order("smoketest", "request", coid, None, None, {"side": "BUY", "qty": _dec(qty), "price": _dec(px), "tif": "fok"})

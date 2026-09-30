@@ -188,9 +188,19 @@ class PolymarketExchange(Exchange):
         return self._run(go)
 
     def get_ticker(self, instrument_id: int) -> Ticker:
+        """v1.5.3: the SDK's fetch_perps_ticker returns the FIRST ticker the API sends, and the API ignored the
+        instrument filter (live 2026-09-30: another instrument's mark 7690.6 while BTC traded at 83264). Pick the
+        ticker whose instrument_id matches; never fall back to another one."""
         async def go() -> Ticker:
             c = await self._public_client()
-            t = await c.fetch_perps_ticker(instrument_id=instrument_id)
+            tickers = await c.fetch_perps_tickers(instrument_id=instrument_id)
+            t = next((x for x in tickers if int(x.instrument_id) == int(instrument_id)), None)
+            if t is None:                                      # the filter misbehaved: search the full list
+                tickers = await c.fetch_perps_tickers()
+                t = next((x for x in tickers if int(x.instrument_id) == int(instrument_id)), None)
+            if t is None:
+                raise ExchangeError(f"ticker for instrument {instrument_id} not returned "
+                                    f"(got ids {sorted({int(x.instrument_id) for x in tickers})[:20]})")
             return Ticker(int(t.instrument_id), _f(t.mark_price), _f(t.index_price), _f(t.last_price), _f(t.mid_price),
                           _f(t.funding_rate), _f(t.open_interest), _ms(t.next_funding), _ms(t.timestamp) or None)
         return self._run(go)
