@@ -19,6 +19,7 @@ from perpbot.exchange.base import (
     ACTIVE_TRIGGER_STATUSES,
     FILLED_STATUSES,
     NOT_FILLED_TERMINAL,
+    ExchangeError,
     mark_vs_book,
     parse_server_time_ms,
     taker_fee_for,
@@ -196,14 +197,19 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
 
     tag = now.strftime("%Y%m%d%H%M%S")
 
-    def wait_flat(max_reads: int = 20) -> dict[str, Any]:
-        """Review G3: how long until the account read shows the position gone."""
+    def wait_flat(max_reads: int = 15) -> dict[str, Any]:
+        """Review G3: how long until the account read shows the position gone. v1.5.6: one read per second (live,
+        reads every 0.5 s were rate-limited); a failed read counts as "not yet", never as a failed close."""
         t0 = time.monotonic()
+        errors = []
         for i in range(1, max_reads + 1):
-            if ex.get_account().position(ctx["inst"].id) is None:
-                return {"flat": True, "reads": i, "seconds": round(time.monotonic() - t0, 2)}
-            engine.sleep(0.5)
-        return {"flat": False, "reads": max_reads, "seconds": round(time.monotonic() - t0, 2)}
+            try:
+                if ex.get_account().position(ctx["inst"].id) is None:
+                    return {"flat": True, "reads": i, "seconds": round(time.monotonic() - t0, 2), "read_errors": errors}
+            except ExchangeError as e:
+                errors.append(str(e)[:120])
+            engine.sleep(1.0)
+        return {"flat": False, "reads": max_reads, "seconds": round(time.monotonic() - t0, 2), "read_errors": errors}
 
     def fok(side: str, label: str, sl_mult: float | None = None, tp_mult: float | None = None,
             sl_override: Decimal | None = None) -> tuple[Any, Any, Any]:

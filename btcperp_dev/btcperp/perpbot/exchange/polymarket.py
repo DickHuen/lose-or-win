@@ -50,6 +50,8 @@ from perpbot.timeutil import HOUR_MS
 
 log = logging.getLogger("perpbot.exchange")
 T = TypeVar("T")
+RATE_LIMIT_RETRIES = 4          # reads only (GET); about 1 s each per the exchange's retry_after
+RATE_LIMIT_MAX_WAIT_S = 5.0
 
 _MAX_PAGE_ITEMS = 50_000
 
@@ -115,21 +117,33 @@ class PolymarketExchange(Exchange):
         self._closed = False
 
     # ------------------------------------------------------------ plumbing
-    def _run(self, factory: Callable[[], Awaitable[T]], timeout: float | None = None) -> T:
+    def _run(self, factory: Callable[[], Awaitable[T]], timeout: float | None = None, *, read: bool = False) -> T:
+        """`read`: an idempotent GET. v1.5.6 live: the exchange rate-limited GET /v1/account/portfolio
+        (retry_after=1.0) while the smoketest polled it every 0.5 s; reads now wait and retry. Writes never retry."""
+        from polymarket import errors as pe
+
         if self._closed:
             raise ExchangeError("exchange client closed")
 
         async def runner() -> T:
             return await factory()
 
-        fut = asyncio.run_coroutine_threadsafe(runner(), self._loop)
-        try:
-            return fut.result(timeout or float(self._pm.command_timeout_seconds))
-        except concurrent.futures.TimeoutError as e:
-            fut.cancel()
-            raise ExchangeError("Polymarket call timed out (outcome unknown)") from e
-        except Exception as e:  # noqa: BLE001
-            raise self._translate(e) from e
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            fut = asyncio.run_coroutine_threadsafe(runner(), self._loop)
+            try:
+                return fut.result(timeout or float(self._pm.command_timeout_seconds))
+            except concurrent.futures.TimeoutError as e:
+                fut.cancel()
+                raise ExchangeError("Polymarket call timed out (outcome unknown)") from e
+            except pe.RateLimitError as e:
+                if not read or attempt == RATE_LIMIT_RETRIES:
+                    raise self._translate(e) from e
+                wait = min(float(getattr(e, "retry_after", None) or 1.0), RATE_LIMIT_MAX_WAIT_S)
+                log.info("rate limited; retrying in %.1fs", wait)
+                time.sleep(wait)
+            except Exception as e:  # noqa: BLE001
+                raise self._translate(e) from e
+        raise ExchangeError("unreachable")
 
     @staticmethod
     def _translate(e: BaseException) -> ExchangeError:
@@ -185,7 +199,7 @@ class PolymarketExchange(Exchange):
         async def go() -> list[Instrument]:
             c = await self._public_client()
             return [instrument_from_sdk(i) for i in await c.fetch_perps_instruments()]
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_ticker(self, instrument_id: int) -> Ticker:
         """v1.5.3: the SDK's fetch_perps_ticker returns the FIRST ticker the API sends, and the API ignored the
@@ -203,7 +217,7 @@ class PolymarketExchange(Exchange):
                                     f"(got ids {sorted({int(x.instrument_id) for x in tickers})[:20]})")
             return Ticker(int(t.instrument_id), _f(t.mark_price), _f(t.index_price), _f(t.last_price), _f(t.mid_price),
                           _f(t.funding_rate), _f(t.open_interest), _ms(t.next_funding), _ms(t.timestamp) or None)
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_book(self, instrument_id: int, depth: int) -> Book:
         async def go() -> Book:
@@ -211,7 +225,7 @@ class PolymarketExchange(Exchange):
             b = await c.fetch_perps_book(instrument_id=instrument_id, depth=depth)
             return Book([(_f(l.price), _f(l.quantity)) for l in b.bids], [(_f(l.price), _f(l.quantity)) for l in b.asks],
                         _ms(b.timestamp))
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_klines(self, instrument_id: int, interval: str, start_ms: int, end_ms: int) -> list[Candle]:
         step = {"1h": HOUR_MS, "4h": 4 * HOUR_MS, "1d": 24 * HOUR_MS}[interval]
@@ -222,21 +236,21 @@ class PolymarketExchange(Exchange):
                                                            start=start_ms, end=end_ms))
             return [Candle(_ms(k.timestamp), _f(k.open), _f(k.high), _f(k.low), _f(k.close), _f(k.volume),
                            _ms(k.timestamp) + step) for k in items]
-        return self._run(go, timeout=120)
+        return self._run(go, timeout=120, read=True)
 
     def get_funding_history(self, instrument_id: int, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
         async def go() -> list[tuple[int, float]]:
             c = await self._public_client()
             items = await self._drain(c.list_perps_funding_history(instrument_id=instrument_id, start=start_ms, end=end_ms))
             return [(_ms(r.timestamp), _f(r.funding_rate)) for r in items]
-        return self._run(go, timeout=120)
+        return self._run(go, timeout=120, read=True)
 
     def get_fee_schedule(self) -> list[dict[str, Any]]:
         async def go() -> list[dict[str, Any]]:
             c = await self._public_client()
             return [{"category": e.category, "taker_fee_rate": _f(e.taker_fee_rate), "maker_fee_rate": _f(e.maker_fee_rate)}
                     for e in await c.fetch_perps_fees()]
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_geoblock(self) -> dict[str, Any]:
         try:
@@ -272,7 +286,7 @@ class PolymarketExchange(Exchange):
             return AccountSnapshot([Balance(b.asset, _f(b.balance), _f(b.value)) for b in bals], positions,
                                    _f(pf.margin.total_account_value), _f(pf.withdrawable), bool(pf.in_liquidation),
                                    _ms(pf.timestamp))
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_account_config(self, instrument_id: int) -> AccountConfig | None:
         async def go() -> AccountConfig | None:
@@ -281,13 +295,13 @@ class PolymarketExchange(Exchange):
                 if int(c.instrument_id) == instrument_id:
                     return AccountConfig(int(c.instrument_id), int(c.leverage), bool(c.cross))
             return None
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_open_orders(self, instrument_id: int) -> list[Order]:
         async def go() -> list[Order]:
             s = await self._get_session(open_ws=False)
             return [order_from_sdk(o) for o in await s.fetch_open_orders(instrument_id=instrument_id)]
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_orders(self, *, order_id: int | None = None, client_order_id: str | None = None,
                    instrument_id: int | None = None, start_ms: int | None = None, end_ms: int | None = None) -> list[Order]:
@@ -296,7 +310,7 @@ class PolymarketExchange(Exchange):
             return [order_from_sdk(o) for o in await s.fetch_orders(
                 order_id=order_id, client_order_id=client_order_id, instrument_id=instrument_id,
                 start=start_ms, end=end_ms)]
-        return self._run(go)
+        return self._run(go, read=True)
 
     def get_fills(self, start_ms: int, end_ms: int | None = None) -> list[Fill]:
         async def go() -> list[Fill]:
@@ -304,7 +318,7 @@ class PolymarketExchange(Exchange):
             end = end_ms if end_ms is not None else int(time.time() * 1000)
             items = await self._drain(s.list_fills(start=start_ms, end=end, sort="asc"))
             return [fill_from_sdk(f) for f in items]
-        return self._run(go, timeout=120)
+        return self._run(go, timeout=120, read=True)
 
     def get_funding_payments(self, instrument_id: int, start_ms: int, end_ms: int | None = None) -> list[FundingPayment]:
         async def go() -> list[FundingPayment]:
@@ -313,7 +327,7 @@ class PolymarketExchange(Exchange):
             items = await self._drain(s.list_funding_payments(instrument_id=instrument_id, start=start_ms, end=end))
             return [FundingPayment(int(p.id), int(p.instrument_id), _f(p.size), _f(p.funding_rate), _f(p.funding),
                                    _ms(p.timestamp)) for p in items]
-        return self._run(go, timeout=120)
+        return self._run(go, timeout=120, read=True)
 
     def get_flows(self, start_ms: int) -> list[Flow]:
         async def go() -> list[Flow]:
@@ -327,7 +341,7 @@ class PolymarketExchange(Exchange):
                 out.append(Flow(f"wd:{w.withdrawal_id}", "withdrawal", _f(w.amount) + _f(getattr(w, "fee", 0)),
                                 str(w.status), _ms(ts)))
             return out
-        return self._run(go, timeout=120)
+        return self._run(go, timeout=120, read=True)
 
     def get_proxy_key_info(self) -> ProxyKeyInfo | None:
         # GET /v1/account/credentials (path and headers from the official SDK validate_credentials).

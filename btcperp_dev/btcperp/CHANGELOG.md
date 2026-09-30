@@ -3,6 +3,19 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.6 - 2026-09-30 (config 1.5.0) - rate limits: reads wait and retry
+
+Smoketest W on v1.5.5 got much further: `fok_unfilled_status`, `open_bracket` (a real minimum long with bracket SL/TP)
+and `b_position_sl_with_bracket` ("YES, both can exist") passed. The close filled one second after the entry
+(exchange history: open long 13:44:27 at 83,421, close long 13:44:28 at 83,420, 0.00015 BTC, fee 0.005005 each =
+0.04% taker), but the step failed: `GET /v1/account/portfolio` answered "rate limited (retry_after=1.0)" while the
+smoketest polled it every 0.5 s. The new `cleanup` step found no position (PASS). Cost of the test: about 1 cent.
+
+- **Exchange reads (GET) wait and retry** on a rate limit: the exchange's `retry_after` (at most 5 s), up to 4 times.
+  Commands (orders, cancels, leverage) never retry.
+- Smoketest: the flat check reads once a second, and a failed read counts as "not yet flat", never as a failed close.
+- **Tests:** 302 (+3).
+
 ## 1.5.5 - 2026-09-30 (config 1.5.0) - order status without the client-order-id lookup; smoketest cleanup
 
 Smoketest W on v1.5.4: every read step, the leverage step and `place_cancel` passed (the price fixes work). It
