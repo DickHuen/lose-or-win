@@ -565,15 +565,19 @@ def _run_preview(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock,
 
 
 def real_fee_rate(paths: Paths) -> float | None:
-    """Taker fee rate recorded by the latest smoketest (review BT3: the backtest never uses less)."""
+    """Taker fee rate recorded by the latest smoketest (review BT3: the backtest never uses less). v1.5.2: the
+    higher of the exchange's fee schedule and the fee actually charged on the smoketest's fills."""
+    keys = {"fees": "taker_fee_rate", "d_funding_after_close": "measured_taker_fee_rate"}
     for f in sorted(paths.smoketest_dir.glob("smoketest_*.json"), reverse=True):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        for r in data.get("results", []):
-            if r.get("step") == "fees" and isinstance(r.get("detail"), dict) and r["detail"].get("taker_fee_rate") is not None:
-                return float(r["detail"]["taker_fee_rate"])
+        found = [float(r["detail"][keys[r.get("step")]]) for r in data.get("results", [])
+                 if r.get("step") in keys and isinstance(r.get("detail"), dict)
+                 and r["detail"].get(keys[r["step"]]) is not None]
+        if found:
+            return max(found)
     return None
 
 
@@ -786,9 +790,9 @@ def _dispatch(command: str, args: Any, engine: Any, paths: Paths, cfg: Any) -> d
                                     probe_withdrawal=bool(args.probe_withdrawal))
         text = summary_text(ok, results)
         print(text)
-        print(json.dumps(results, indent=2, default=str)[:20000])
+        print(json.dumps(results, indent=2, default=str, ensure_ascii=False)[:20000])
         return {"ok": ok}
     else:
         raise ValueError(f"unknown command {command}")
-    print(json.dumps(out, indent=2, default=str))
+    print(json.dumps(out, indent=2, default=str, ensure_ascii=False))
     return out

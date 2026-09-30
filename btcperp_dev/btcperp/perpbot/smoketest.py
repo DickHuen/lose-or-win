@@ -20,6 +20,7 @@ from perpbot.exchange.base import (
     FILLED_STATUSES,
     NOT_FILLED_TERMINAL,
     parse_server_time_ms,
+    taker_fee_for,
 )
 from perpbot.paths import Paths
 from perpbot.risk import quantize_price
@@ -111,12 +112,18 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
     step("server_time", s_time)
 
     def s_fees() -> Any:
-        """Review v1.3.0 BT3: the real taker fee; the backtest never uses a lower one."""
+        """Review v1.3.0 BT3: the real taker fee; the backtest never uses a lower one. v1.5.2: the instrument's own
+        category; when the exchange does not list it, the highest listed rate or the config estimate (higher one)."""
         sched = ex.get_fee_schedule()
-        row = next((e for e in sched if e.get("category") == cfg.market.category), None)
-        taker = float(row["taker_fee_rate"]) if row and row.get("taker_fee_rate") is not None else None
-        return taker is not None, {"taker_fee_rate": taker, "category": cfg.market.category, "raw": sched,
-                                   "config_estimate": float(cfg.shadow.fee_rate_estimate)}
+        inst = ctx.get("inst")
+        cat = str(getattr(inst, "category", "") or cfg.market.category)
+        estimate = float(cfg.shadow.fee_rate_estimate)
+        taker, listed = taker_fee_for(sched, cat, estimate)
+        return True, {"taker_fee_rate": taker, "category": cat, "category_listed": listed, "raw": sched,
+                      "config_estimate": estimate,
+                      "note": "" if listed else (f"the exchange lists no fee for category '{cat}': using the higher of "
+                                                 "the listed rates and the config estimate; the full smoketest also "
+                                                 "measures the fee actually charged")}
     step("fees", s_fees)
 
     def s_basis() -> Any:
@@ -369,6 +376,7 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
                             "wallet_delta_matches_pnl_only": abs(delta - gross) < max(1e-6, abs(fees) * 0.05)}
         sem = [{"trade_id": f.trade_id, "side": f.side, "previous_size": f.previous_size, "quantity": f.quantity,
                 "pnl": f.pnl, "fee": f.fee} for f in fills]
+        rates = [abs(f.fee) / (f.price * f.quantity) for f in fills if f.taker and f.price > 0 and f.quantity > 0]
         return True, {"position_in_portfolio_after_close": pos.__dict__ if pos else None,
                       "fill_semantics": {"fills": sem, "note": "entry fill should have previous_size 0; exit fill "
                                          "previous_size should be +qty (signed) for a long; side shows whether "
@@ -376,7 +384,8 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
                       "funding_payments_in_window": [p.__dict__ for p in pays],
                       "answer_d": ("cumulative_funding is only on open positions; after close use "
                                    "GET /v1/account/funding (payments listed: %d)" % len(pays)),
-                      "fills": [f.__dict__ for f in fills], "pnl_check": ctx["pnl_check"]}
+                      "fills": [f.__dict__ for f in fills], "pnl_check": ctx["pnl_check"],
+                      "measured_taker_fee_rate": max(rates) if rates else None}
     step("d_funding_after_close", s_d, trading=True)
 
     def s_short_flip() -> Any:
@@ -450,7 +459,8 @@ def run_smoketest(engine: Any, paths: Paths, *, allow_trading: bool = True,
     out = paths.smoketest_dir / f"smoketest_{tag}.json"
     meta = {"code_version": code_version(), "config_version": cfg.config_version, "allow_trading": allow_trading,
             "proxy_address": getattr(engine.secrets, "proxy_address", ""), "run_utc": now.isoformat()}
-    out.write_text(json.dumps({"ok": all_ok, **meta, "results": results}, indent=2, default=str), encoding="utf-8")
+    out.write_text(json.dumps({"ok": all_ok, **meta, "results": results}, indent=2, default=str, ensure_ascii=False),
+                   encoding="utf-8")
     return all_ok, results
 
 

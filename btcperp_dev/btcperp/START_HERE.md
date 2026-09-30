@@ -125,23 +125,27 @@ bot 會喺呢部電腦產生 proxy key，你嘅**主錢包**只係簽一個 Crea
 - 之後 bot 每次 manage 都會記錄價差，月報會列出 p99。
 - **W**：同 YES 一樣，再加**提款探測**：用 proxy key 叫交易所提 1 個最細單位去你自己錢包，**一定要被拒絕**。上實盤之前要做一次。
 - **R**：只做唯讀檢查，唔落單。
+- **region（地區）FAIL**（`"blocked": true`）：Polymarket 唔開放你而家嘅地區，bot 唔會開倉。
+  - 先確認 VPN 完全熄咗（Quit，唔係淨係 Disconnect），再行一次 R。
+  - 用你真實嘅網絡都係 blocked，就唔可以上實盤。**唔可以用 VPN 或者 proxy 繞過。**
+- **fees**：交易所有時冇列出 BTC 嗰類嘅手續費（v1.5.2）。咁 bot 會用較高嘅估計，完整 smoketest 會記錄實際收咗幾多。
 
 完成之後將畫面上嘅 **SUMMARY** 截圖畀 Claude（唔好截 `.env`）。完整結果喺 `C:\btcperp\data\smoketest\`。
 
 ## 5. 回測（上實盤之前必做，詳情睇 BACKTEST.md）
 
-1. **仲未可以打 CONFIRM。** 先將以下三個檔案畀 Grok 委員會審閱：
+1. 打 CONFIRM 之前，**你（批准人）**先睇過以下三個檔案（2026-09-30 你決定唔再等委員會）：
    - `config\backtest_criteria.yaml`（準則 draft-3：C0 至 C7，主要變體係方案 B `R4h_live`）；
    - `REVIEW_v1.3.0.md`（今次點樣處理委員會建議，包括 C0 同 BT3 兩處唔同）；
    - `BACKTEST.md`。
-2. 委員會睇過、同意之後，雙擊 **`windows\Backtest.bat`**：
+2. 你睇過、同意之後，雙擊 **`windows\Backtest.bat`**：
    1. 佢會下載 Binance 公開數據（第一次要幾分鐘），同埋 Polymarket 有嘅 1 小時 K 線；
    2. 第一次會要你打 **CONFIRM**。確認會鎖死：
       - 準則、config、日曆同程式；
       - 數據截止日同回測費率。
    3. 然後用低優先度跑。
-3. 報告第一行會寫「Run #N under this confirmation」。**委員會以第 1 次為準**，重跑唔會改變結果。
-4. 將 `data\backtest\results_…\summary.md` 同 `summary.json` 畀 Claude 同委員會。
+3. 報告第一行會寫「Run #N under this confirmation」。**以第 1 次為準**，重跑唔會改變結果。
+4. 將 `data\backtest\results_…\summary.md` 同 `summary.json` 畀 Claude。
 5. 如果 `run` 話「NEEDS CONFIRMATION: changed since the confirmation」，唔好自己再 CONFIRM，先問 Claude。
 
 - 回測唔會落單，亦唔會接觸你個戶口。
@@ -178,7 +182,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
   - 記錄咗真實 taker 手續費同 Polymarket／Binance 價差。
 - [ ] **電腦設定**：永不睡眠、Windows Update 使用時段、更新後自動登入，並做過一次重新開機測試。
 - [ ] **你書面確認**：
-  1. proxy key 用 N 定 O；
+  1. proxy key 用 P、N 定 O；
   2. 永久底線：累計投入本金嘅 **50%**（委員會建議；想改就話 Claude 知）；
   3. 名義上限 30%、連虧 8%、本金底線 75%，同埋打和規則 ±0.1%。
 
@@ -275,7 +279,7 @@ Dashboard 係**唯讀**，亦永遠唔會加交易掣。交易控制只用下面
 
 ## 10. 升級（收到新版本 zip）
 
-避開 08:20–09:35 HKT。
+避開決定時間（HKT 00:30、04:30、08:30、12:30、16:30、20:30，各自前後約半個鐘）。
 1. 將新 zip 放喺「下載」，**唔使解壓**。
 2. 雙擊 `windows\Pause_New_Entries.bat`。
 3. 雙擊 `windows\Upgrade.bat`。

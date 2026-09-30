@@ -292,3 +292,14 @@ def parse_server_time_ms(raw: Any) -> int | None:
     else:
         return None
     return int(v if v > 10_000_000_000 else v * 1000)
+
+
+def taker_fee_for(schedule: list[dict[str, Any]], category: str, estimate: float) -> tuple[float, bool]:
+    """(taker fee rate, listed) from GET /v1/info/fees (v1.5.2). The exchange may leave the instrument's category
+    out of its schedule (seen live: only "equity" listed). Then the highest listed taker rate or the config
+    estimate is used, whichever is higher, so the bot never assumes a lower fee than it has evidence for."""
+    row = next((e for e in schedule if e.get("category") == category and e.get("taker_fee_rate") is not None), None)
+    if row is not None:
+        return float(row["taker_fee_rate"]), True
+    listed = [float(e["taker_fee_rate"]) for e in schedule if e.get("taker_fee_rate") is not None]
+    return max([float(estimate), *listed]), False

@@ -3,6 +3,27 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.2 - 2026-09-30 (config 1.5.0) - smoketest fee check fixed after the first live read-only run
+
+First live `smoketest --no-trade` on the owner's PC: key, account (100 USDC) and prices read fine, but two steps failed.
+
+- **fees** (bot bug, fixed): `GET /v1/info/fees` listed only the `equity` category (taker 0.0004), so the lookup for
+  `crypto` found nothing and the step failed. Now:
+  - the lookup uses the resolved instrument's own category (config `market.category` only if unknown);
+  - if the exchange does not list that category, the fee is the **higher** of the listed taker rates and the config
+    estimate (0.0005), and the step passes with a note;
+  - the full smoketest (YES / W) also records the fee actually charged on its fills (`measured_taker_fee_rate`);
+    the backtest fee is the highest of the config estimate, the schedule and the measured fee (BT3 unchanged in
+    spirit: never lower than the evidence).
+  - The shadow fee uses the same rule.
+- **region** (not a bug): the exchange's geoblock answered `blocked: true` for the PC's network. The bot does not
+  open positions while blocked, and it must never be worked around with a VPN or proxy. START_HERE section 4 says
+  what to check.
+- Smoketest output and result files show Chinese text instead of `\uXXXX` escapes.
+- Docs: START_HERE go-live list names option P; the owner approves the backtest criteria (no committee wait);
+  Upgrade.bat and START_HERE give the 4-hourly decision times to avoid when upgrading.
+- **Tests:** 276 (+3).
+
 ## 1.5.1 - 2026-09-30 (config 1.5.0) - sign the proxy key on your phone
 
 The owner has no hardware wallet and no second computer. v1.5.1 lets the main wallet sign on the phone, so the main

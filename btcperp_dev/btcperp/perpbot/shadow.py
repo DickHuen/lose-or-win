@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+from perpbot.exchange.base import taker_fee_for
 from perpbot.strategy import DecisionContext, decide_plan
 from perpbot.timeutil import DAY_MS, HOUR_MS, to_ms
 
@@ -216,13 +217,12 @@ def gate_trades(days: list[dict[str, Any]], candles: list[dict[str, Any]], cfg: 
 
 
 def _fee_rate(engine: Any) -> float:
+    estimate = float(engine.cfg.shadow.fee_rate_estimate)
     try:
-        for e in engine.ex.get_fee_schedule():
-            if e.get("category") == engine.cfg.market.category:
-                return float(e["taker_fee_rate"])
+        cat = str(getattr(engine.instrument(), "category", "") or engine.cfg.market.category)
+        return taker_fee_for(engine.ex.get_fee_schedule(), cat, estimate)[0]
     except Exception:  # noqa: BLE001
-        pass
-    return float(engine.cfg.shadow.fee_rate_estimate)
+        return estimate
 
 
 def update_shadow(engine: Any) -> None:
