@@ -36,6 +36,7 @@ from perpbot.risk import compute_size, is_tie, losing_streak, risk_pct_for_trade
 from perpbot.shadow import SimTrade, _r, _slipped
 from perpbot.strategy import (
     H4_MS,
+    ROLLING_PERIOD_MS,
     DayFeatures,
     InsufficientData,
     day_features,
@@ -66,13 +67,14 @@ class Variant:
     kills: bool = True             # kill switches on
     role: str = "candidate"        # candidate | stress | sensitivity
     twin: str | None = None        # stress twin of a candidate
-    cadence: str = "daily"         # daily | rolling_4h (v1.5.0 option B: decide every 4h on daily candles ending then)
+    cadence: str = "daily"         # daily | rolling_4h (v1.5.0 option B) | rolling_2h (v1.6.0, backtest only)
     flip_confirm: int = 1          # rolling_4h: consecutive opposite periods a flip needs
 
 
 def _variants() -> dict[str, Variant]:
     r = "rolling_4h"
     base = [Variant("R4h_live", cadence=r), Variant("R4h_confirm", cadence=r, flip_confirm=2),
+            Variant("R2h_live", cadence="rolling_2h"),            # v1.6.0: the owner asks about deciding every 2h
             Variant("A_live"), Variant("B_breakeven", breakeven=True), Variant("C_control", control=True),
             Variant("A_live_fhold", funding_close=False), Variant("B_breakeven_fhold", breakeven=True, funding_close=False),
             Variant("C_control_fhold", control=True, funding_close=False)]
@@ -270,10 +272,13 @@ class PeriodInputs:
     ending at T are the same shifted candles live builds from 4h data (strategy.shifted_daily), taken here from
     six precomputed phase series; scores are cached, which only saves time (a test checks equality with live)."""
 
-    def __init__(self, cfg: Any, ds: Dataset, calendar: EventCalendar) -> None:
-        self.cfg, self.ds, self.cal = cfg, ds, calendar
+    def __init__(self, cfg: Any, ds: Dataset, calendar: EventCalendar, cadence: str = "rolling_4h") -> None:
+        self.cfg, self.ds, self.cal, self.cadence = cfg, ds, calendar, cadence
+        self.period_ms = ROLLING_PERIOD_MS[cadence]
         self.h4 = sorted(ds.h4, key=lambda c: c.open_ms)
         self.h4_open = [c.open_ms for c in self.h4]
+        # v1.6.0: a 2h boundary is not a 4h one, so its 24h candles are built from 1h candles
+        self.base = self.h4 if self.period_ms % H4_MS == 0 else sorted(ds.h1, key=lambda c: c.open_ms)
         self._f_ts = [f[0] for f in ds.funding]
         self.n_days = int(cfg.binance.daily_candles_to_load)
         self._phase: dict[int, tuple[list[Candle], list[int]]] = {}
@@ -282,7 +287,7 @@ class PeriodInputs:
     def _series(self, phase_ms: int) -> tuple[list[Candle], list[int]]:
         if phase_ms not in self._phase:
             buckets: dict[int, list[Candle]] = {}
-            for c in self.h4:
+            for c in self.base:
                 buckets.setdefault((c.open_ms - phase_ms) // DAY_MS, []).append(c)
             out = []
             for k in sorted(buckets):
@@ -318,7 +323,7 @@ class PeriodInputs:
         events = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(st),
                    "window_end_utc": fmt_utc(en), "note": e.note} for e, st, en in active]
         try:
-            return period_features(cfg, t_ms, self.score_at, gate, funding, events)
+            return period_features(cfg, t_ms, self.score_at, gate, funding, events, cadence=self.cadence)
         except InsufficientData:
             return None
 
@@ -388,9 +393,11 @@ def _synthetic_instrument(cfg: Any) -> Instrument:
 class Simulator:
     def __init__(self, cfg: Any, h1: list[Candle], funding: list[tuple[int, float, float]],
                  feats: dict[date, DayFeatures | None], fee_rate: float,
-                 pfeats: dict[int, DayFeatures | None] | None = None) -> None:
+                 pfeats: dict[int, DayFeatures | None] | None = None,
+                 pfeats2h: dict[int, DayFeatures | None] | None = None) -> None:
         self.cfg, self.h1, self.feats, self.fee = cfg, h1, feats, fee_rate
         self.pfeats = pfeats or {}                         # rolling_4h features by period start T (ms)
+        self.pfeats2h = pfeats2h or {}                     # rolling_2h (v1.6.0, backtest only)
         self.h1_open = [c.open_ms for c in h1]
         self.funding = [(ts, r) for ts, r, _ in funding]
         self._f_ts = [ts for ts, _ in self.funding]
@@ -484,8 +491,9 @@ class Simulator:
         opened = 0 if ramp else int(rk.ramp_trades)     # review S6: windows at full risk from the first trade
         last_ms = day_start_ms(start)
         pause_days = int(cfg.backtest.kill_pause_days)
-        rolling = v.cadence == "rolling_4h"
-        step = H4_MS if rolling else DAY_MS
+        rolling = v.cadence in ROLLING_PERIOD_MS
+        step = ROLLING_PERIOD_MS[v.cadence] if rolling else DAY_MS
+        pfeats = self.pfeats2h if v.cadence == "rolling_2h" else self.pfeats
 
         def after_close(t: BtTrade, day: date, t_ms: int) -> None:
             nonlocal pause_until, pause_reason
@@ -535,7 +543,7 @@ class Simulator:
                 if trade is not None:
                     self._book(trade, mark, fill_ms, "kill_switch", v, res, eq, tr)
                     trade = None
-            f = self.pfeats.get(t_now) if rolling else self.feats.get(d)
+            f = pfeats.get(t_now) if rolling else self.feats.get(d)
             if f is not None and not stopped:
                 pos_dir = trade.direction if trade else 0
                 entry_day = date.fromisoformat(trade.entry_day[:10]) if trade else d
@@ -957,9 +965,17 @@ def run_backtest(cfg: Any, root: Path, data_dir: Path, out_dir: Path, live_calen
         while t < day_start_ms(final):
             pfeats[t] = pi.features(t)
             t += H4_MS
+    pfeats2h: dict[int, DayFeatures | None] = {}
+    if any(v.cadence == "rolling_2h" for v in VARIANTS.values()):
+        progress("computing 2-hour decisions (rolling_2h, backtest only) ...")
+        pi2 = PeriodInputs(cfg, ds, cal, cadence="rolling_2h")
+        t = day_start_ms(first)
+        while t < day_start_ms(final):
+            pfeats2h[t] = pi2.features(t)
+            t += ROLLING_PERIOD_MS["rolling_2h"]
     missing_periods = [period_key(k) for k, v in pfeats.items() if v is None]
     h1 = [c for c in ds.h1 if c.open_ms < day_start_ms(end)]
-    sim = Simulator(cfg, h1, ds.funding, feats, fee_rate, pfeats)
+    sim = Simulator(cfg, h1, ds.funding, feats, fee_rate, pfeats, pfeats2h)
     eq0 = float(cfg.backtest.start_equity_usd)
     tie = float(cfg.risk.losing_streak_tie_pct)
     runs: list[dict[str, Any]] = []
@@ -1038,7 +1054,8 @@ def summary_md(rep: dict[str, Any]) -> str:
          f"{len(rep['days_without_decision'])}; 4-hour periods without a decision: "
          f"{rep.get('periods_without_decision_count', 0)}", "",
          f"Config strategy.cadence: {rep.get('config_cadence')} (primary variant {prim}). `R4h_*` = rolling_4h "
-         f"(decide every 4 h on daily candles ending then); the others decide once a day at 08:30 HKT (v1.4).", "",
+         f"(decide every 4 h on daily candles ending then); `R2h_*` = the same every 2 h (v1.6.0, backtest only: live "
+         f"cannot decide every 2 h yet); the others decide once a day at 08:30 HKT (v1.4).", "",
          f"**Variant choice (pre-registered, S5):** {rep['selection']['note']}", "",
          "## Criteria (confirmed before the run)", "", "| id | criterion | value | threshold | result |",
          "|---|---|---|---|---|"]

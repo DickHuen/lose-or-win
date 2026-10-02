@@ -3,6 +3,24 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.6.0 - 2026-10-02 (config 1.5.9) - backtest: deciding every 2 hours
+
+The owner asked whether deciding more often would be better and chose to backtest a 2-hour cadence first. Live is
+unchanged: it still decides every 4 hours (config 1.5.9).
+
+- **Backtest variants `R2h_live` and `R2h_live_stress`:** the same score and rules at every 2-hour boundary (UTC 00,
+  02, 04, ...). The daily candles ending at a 2-hour boundary are built from 1h candles (12 phase series); at
+  4-hour boundaries they equal the 4h-built ones. The 3-day rule is 36 periods. The h4 gate uses the last 4h candle
+  closed at the boundary (at 02:00 the one that closed at 00:00) - a test caught that it had demanded a 4h candle
+  ending exactly at 02:00, which would have silently made R2h decide only every 4 hours.
+- **Criteria draft-4:** new informational I8 = R2h_live minus R4h_live, full-period total R (median). Nothing else
+  changes; the committee wording in the file header now says the owner confirms.
+- `strategy.shifted_daily` takes the input candle length (`bar_ms`, default 4h); `period_features` takes the
+  cadence. The live 4-hour path is unchanged (its gate cutoff is still the decision time).
+- The code, criteria and config changed since the 2026-09-30 confirmation: `Backtest.bat` asks for CONFIRM again.
+  A full synthetic run takes about 15% longer.
+- Live config still accepts only `daily` and `rolling_4h`. **Tests:** 316 (+5).
+
 ## 1.5.9 - 2026-10-02 (config 1.5.9) - owner: 10x isolated
 
 The owner chose 10x after the trade-offs were laid out. Sizing is by risk (5% at the 100% tier), so the size and

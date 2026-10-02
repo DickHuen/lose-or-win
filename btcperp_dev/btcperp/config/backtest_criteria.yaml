@@ -1,13 +1,14 @@
-# Backtest pass/fail rules (review B3). draft-3 (v1.5.0): draft-2 (the committee's v1.3.0 ruling C0-C7, I1-I7 as
+# Backtest pass/fail rules (review B3). draft-4 (v1.6.0): draft-3 plus I8, the 2-hour cadence (R2h_live, backtest
+# only) against the live 4-hour one. draft-3 (v1.5.0): draft-2 (the committee's v1.3.0 ruling C0-C7, I1-I7 as
 # adopted by the developer; REVIEW_v1.3.0.md explains C0b/C0c) applied to the owner's choice, option B: the primary
 # variant is R4h_live (strategy.cadence rolling_4h). The rules themselves are unchanged; I1 now compares the 4h
 # cadence with the v1.4 daily one, I2/I3b use the rolling variants.
-# The owner confirms with `backtest confirm` (windows\Backtest.bat, type CONFIRM) only AFTER the committee has
-# reviewed this file. The confirmation locks this file, the strategy / risk / backtest config, both calendars, the
-# code, the data slice (fixed end date) and the fee rate (review R1); `backtest run` refuses any change and numbers
-# each run under the confirmation - the committee uses run #1.
+# The owner confirms with `backtest confirm` (windows\Backtest.bat, type CONFIRM) after reading this file (the
+# committee was dissolved on 2026-09-30). The confirmation locks this file, the strategy / risk / backtest config,
+# both calendars, the code, the data slice (fixed end date) and the fee rate (review R1); `backtest run` refuses any
+# change and numbers each run under the confirmation - run #1 counts.
 # Everything is on the primary variant R4h_live unless stated; `use_twin` reads its stress twin (R4h_live_stress).
-criteria_version: "draft-3 (2026-09-29)"
+criteria_version: "draft-4 (2026-10-02)"
 primary_variant: R4h_live
 rules:
   # ---- C0 data completeness (review R2)
@@ -57,3 +58,6 @@ rules:
      text: "Rolling 30-trade expectancy, 5th percentile (R) - becomes the live review line (S9)"}
   - {id: I7, informational: true, scope: data, metric: pm_exit_agreement, op: ">=", value: 0.9,
      text: "Polymarket-candle replay vs Binance: same exit reason and day for >= 90% of trades (where data exists)"}
+  - {id: I8, informational: true, variant: R2h_live, metric: full_total_r_median,
+     metric_minus: {variant: R4h_live, metric: full_total_r_median}, op: ">", value: 0,
+     text: "2h cadence adds value: R2h_live minus R4h_live (live, every 4h), full-period total R (median)"}

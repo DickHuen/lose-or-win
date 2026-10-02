@@ -24,6 +24,9 @@ from perpbot.timeutil import DAY_MS, HOUR_MS, MINUTE_MS, day_start_ms, from_ms, 
 
 H4_MS = 4 * HOUR_MS
 CADENCES = ("daily", "rolling_4h")
+# Period length of each rolling cadence. rolling_2h (v1.6.0) exists in the backtest only (variant R2h_live): live
+# config accepts CADENCES, and the live engine decides every 4 hours.
+ROLLING_PERIOD_MS = {"rolling_4h": H4_MS, "rolling_2h": 2 * HOUR_MS}
 
 
 class InsufficientData(Exception):
@@ -439,9 +442,9 @@ def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | N
     """`entry_day` (daily) / `entry_key` (rolling_4h: the entry period key) of the open position."""
     s, g = cfg.strategy, cfg.gates
     sc = f.score
-    rolling = f.cadence == "rolling_4h"
+    rolling = f.cadence in ROLLING_PERIOD_MS
     if rolling:
-        per_day = DAY_MS // H4_MS
+        per_day = DAY_MS // ROLLING_PERIOD_MS[f.cadence]
         streak = opposite_streak_keys(position_dir, entry_key, f.directions, f.key)
         rule = int(s.opposite_days_rule) * per_day
         k = int(flip_confirm_periods if flip_confirm_periods is not None else s.flip_confirm_periods)
@@ -461,7 +464,7 @@ def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | N
         flip_min_abs_score=float(s.flip_min_abs_score), opposite_days_rule=rule,
         event_allows_rule_closes=bool(g.event_allows_rule_closes), entry_block=entry_block,
         funding_rule_closes=funding_rule_closes, flip_confirmed=confirmed,
-        period_word="4-hour period" if rolling else "UTC day")
+        period_word=f"{ROLLING_PERIOD_MS[f.cadence] // HOUR_MS}-hour period" if rolling else "UTC day")
     return decide_plan(ctx), ctx
 
 
@@ -483,11 +486,12 @@ def key_ms(key: str) -> int:
     return to_ms(datetime.fromisoformat(k).replace(tzinfo=timezone.utc))
 
 
-def shifted_daily(h4: Sequence[Candle], cutoff_ms: int, count: int) -> list[Candle]:
+def shifted_daily(h4: Sequence[Candle], cutoff_ms: int, count: int, bar_ms: int = H4_MS) -> list[Candle]:
     """Daily candles that END exactly at cutoff_ms (a 4h boundary): candle k covers
     [cutoff - (count-k)*1d, cutoff - (count-k-1)*1d), built from the 4h candles inside it (open of the first,
     highest high, lowest low, close of the last, summed volume). A day without any 4h candle is left out.
-    `h4` must be sorted by open time. At cutoff 00:00 UTC this equals Binance's own daily candles."""
+    `h4` must be sorted by open time. At cutoff 00:00 UTC this equals Binance's own daily candles.
+    `bar_ms`: the length of the input candles (v1.6.0: 1h candles for a 2h boundary in the backtest)."""
     start = int(cutoff_ms) - int(count) * DAY_MS
     opens = [c.open_ms for c in h4]
     i, j = bisect_left(opens, start), bisect_left(opens, int(cutoff_ms))
@@ -501,7 +505,7 @@ def shifted_daily(h4: Sequence[Candle], cutoff_ms: int, count: int) -> list[Cand
                               bucket[-1].close, sum(c.volume for c in bucket), o + DAY_MS))
 
     for c in h4[i:j]:
-        if c.open_ms + H4_MS > cutoff_ms:
+        if c.open_ms + bar_ms > cutoff_ms:
             continue
         k = (c.open_ms - start) // DAY_MS
         if k != cur_k:
@@ -555,19 +559,23 @@ def flip_confirmed(position_dir: int, scores: dict[str, float], current_key: str
 
 
 def period_features(cfg: Any, t_ms: int, score_at: Any, h4: Sequence[Candle],
-                    funding_records: Sequence[tuple[int, float]], events: list[dict[str, Any]]) -> DayFeatures:
-    """Rolling_4h features at the 4h boundary t_ms. `score_at(T)` returns the ScoreResult at boundary T (or raises
-    InsufficientData); live computes it from the fetched 4h candles, the backtest from a cache of the same values.
-    `h4`: the 4h candles available at t_ms (the h4 gate uses the ones closed at t_ms)."""
+                    funding_records: Sequence[tuple[int, float]], events: list[dict[str, Any]],
+                    cadence: str = "rolling_4h") -> DayFeatures:
+    """Rolling features at the period boundary t_ms (4h; 2h for the backtest-only rolling_2h). `score_at(T)` returns
+    the ScoreResult at boundary T (or raises InsufficientData); live computes it from the fetched 4h candles, the
+    backtest from a cache of the same values. `h4`: the 4h candles available at t_ms (the h4 gate uses the ones
+    closed at t_ms)."""
+    per = ROLLING_PERIOD_MS[cadence]
     s, g = cfg.strategy, cfg.gates
     sc = score_at(t_ms)
-    e_fast, e_slow, h4_open = h4_emas(h4, sc_day(t_ms), int(g.h4_ema_fast), int(g.h4_ema_slow), cutoff_ms=t_ms)
+    h4_cut = int(t_ms) // H4_MS * H4_MS            # rolling_2h at 02:00, 06:00, ...: the 4h candle closed at 00:00
+    e_fast, e_slow, h4_open = h4_emas(h4, sc_day(t_ms), int(g.h4_ema_fast), int(g.h4_ema_slow), cutoff_ms=h4_cut)
     cutoff = int(t_ms) + int(float(g.funding_cutoff_tolerance_minutes) * MINUTE_MS)
     fstat = funding_percentile(funding_records, cutoff, int(g.funding_lookback_days))
-    n = int(s.opposite_days_rule) * int(DAY_MS // H4_MS) + 2
+    n = int(s.opposite_days_rule) * int(DAY_MS // per) + 2
     scores: dict[str, float] = {}
     for i in range(n):
-        ti = int(t_ms) - i * H4_MS
+        ti = int(t_ms) - i * per
         try:
             scores[period_key(ti)] = (sc if i == 0 else score_at(ti)).score
         except InsufficientData:
@@ -578,7 +586,7 @@ def period_features(cfg: Any, t_ms: int, score_at: Any, h4: Sequence[Candle],
     g_fund = funding_gate(fstat.percentile, sc.direction, float(g.funding_high_percentile), float(g.funding_low_percentile))
     caps = [(x.name, float(x.cap)) for x in (g_regime, g_h4) if x.triggered and x.cap is not None]
     return DayFeatures(sc_day(t_ms), sc, e_fast, e_slow, h4_open, fstat, dirs, events, g_regime, g_h4, g_fund,
-                       event_gate(events), caps, "rolling_4h", period_key(t_ms), int(t_ms), scores)
+                       event_gate(events), caps, cadence, period_key(t_ms), int(t_ms), scores)
 
 
 def live_rolling_features(cfg: Any, t_ms: int, h4: Sequence[Candle], funding_records: Sequence[tuple[int, float]],
