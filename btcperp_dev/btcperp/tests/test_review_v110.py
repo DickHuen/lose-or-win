@@ -336,12 +336,18 @@ def test_e_equity_floor_hard_stop_needs_new_config_version(world, cfg_dict, tmp_
     assert not w.state()["paused"]                        # new funded baseline, no immediate re-trigger
 
 
-def test_e_parameters_pending_user_decision(cfg):
-    assert cfg.risk.notional_cap_pct_equity == 30
+def test_e_parameters_decided_by_the_owner():
+    """Review E parameters: confirmed by the owner 2026-09-30; notional cap raised to 60% on 2026-10-02 (v1.5.7)."""
+    from conftest import shipped_config
+    from perpbot.config import config_from_dict
+
+    cfg = config_from_dict(shipped_config())
+    assert cfg.risk.notional_cap_pct_equity == 60
     assert cfg.risk.kill_losing_streak_pct == 8
     assert cfg.risk.equity_floor_pct_of_net_funded == 75
+    assert cfg.risk.permanent_floor_pct_of_cumulative_funded == 50
     text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(encoding="utf-8")
-    assert text.count("PENDING USER DECISION") >= 3
+    assert "PENDING USER DECISION" not in text and "committee" not in text
 
 
 # ---------------------------------------------------------------- smoketest (A2, D17, G1, G3, G7)

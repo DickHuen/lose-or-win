@@ -97,7 +97,7 @@ REASON_HELP = {
     "adopted_over_budget": "an adopted position was over the risk budget (Resume.bat clears it)",
     "permanent_floor": "permanent floor on all capital ever funded (only a new config version with "
                        "risk.permanent_floor_reset_for = the trigger date can restart it)",
-    "live_review": "live expectancy below the backtest's review line (committee review, then Resume.bat)",
+    "live_review": "live expectancy below the backtest's review line (owner review with Claude, then Resume.bat)",
 }
 # pause reasons that keep the heartbeat failing while active (review v1.3.0 V4)
 HARD_STOP_REASONS = ("kill_drawdown", "kill_losing_streak", "equity_floor", "permanent_floor", "live_review")
@@ -736,7 +736,7 @@ class Engine:
             self.rec.set_state(add_reason="live_review", note="live review line")
             self.alert("live review", f"rolling {rv_n}-trade expectancy {rv_exp:.3f} R is below the backtest's 5th "
                        f"percentile {rv_floor} R after {len(all_trades)} live trades: new entries paused; position and "
-                       f"SL/TP kept. The committee reviews before Resume.bat.")
+                       f"SL/TP kept. Review with Claude before Resume.bat.")
         if floor_hit and "equity_floor" not in st["pause_reasons"]:
             self.rec.set_state(add_reason="equity_floor", note="equity floor hard stop")
             self.alert("KILL SWITCH: equity floor",
@@ -1116,7 +1116,8 @@ class Engine:
             size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=float(plan["enter_fraction"]), price=ref,
                                 atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
                                 notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
-                                leverage=int(self.cfg.risk.leverage), inst=inst)
+                                leverage=int(self.cfg.risk.leverage), inst=inst,
+                                raise_to_min=bool(self.cfg.risk.raise_to_min_notional))
             if not size.ok:
                 self.rec.intent_event(day, "entry", "failed", {"reason": size.reject_reason, "size": size.to_dict()})
                 self.alert("entry rejected", f"order violates limits: {size.reject_reason}")

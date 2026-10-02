@@ -240,7 +240,7 @@ def test_shipped_config_is_rolling_and_validated(rolling_cfg_dict):
     from perpbot.config import ConfigError, config_from_dict
 
     cfg = config_from_dict(rolling_cfg_dict)
-    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.5.0"
+    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.5.7"
     assert len(cfg.schedule.decide_times_hkt) == 12 and len(cfg.schedule.manage_times_hkt) == 6
     bad = dict(rolling_cfg_dict, schedule=dict(rolling_cfg_dict["schedule"], decide_times_hkt=["08:30", "08:50"]))
     with pytest.raises(ConfigError, match="no decide time"):
@@ -344,7 +344,7 @@ def test_preview_is_read_only_and_explains_the_rolling_decision(tmp_root, capsys
     bn.signal_4h(T(2026, 10, 5, 4), "strong_long")
     assert _preview(tmp_root, FixedClock(now), bn, "--equity", "200") == 0
     out = capsys.readouterr().out
-    assert "預覽：如果而家決定" in out and "做多" in out and "行動：開倉" in out and "≈ $1.50" in out
+    assert "預覽：如果而家決定" in out and "做多" in out and "行動：開倉" in out and "≈ $4.00" in out
     assert "每 4 小時" in out and "唔落單" in out
     assert not (tmp_root / "data" / "btcperp.sqlite3").exists()          # nothing written
 

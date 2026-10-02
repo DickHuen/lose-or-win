@@ -52,7 +52,8 @@ def test_s9_live_review_pauses_below_backtest_line_once_per_new_trade(world):
 
 
 def test_s9_line_not_set_means_no_check(world):
-    w = world(hkt(2026, 10, 5, 12, 30), risk__live_review_min_trades=5, risk__live_review_window_trades=5)
+    w = world(hkt(2026, 10, 5, 12, 30), risk__live_review_min_trades=5, risk__live_review_window_trades=5,
+              risk__live_review_expectancy_floor_r=None)
     ok_leverage(w.ex)
     assert w.cfg.risk.live_review_expectancy_floor_r is None
     for i in range(5):

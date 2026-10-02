@@ -110,7 +110,7 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
    after 30 live trades, a rolling 30-trade expectancy below the backtest's review line (S9) -> pause new entries;
    a failed kill close is retried every run; pending deposits/withdrawals skip
    the drawdown/floor checks and block entries; 25-trade size-weighted expectancy < 0 -> warning.
-   Proxy key expiry alert 5 days ahead. (8%, 75% and the 30% notional cap are pending the owner's decision.)
+   Proxy key expiry alert 5 days ahead. (8%, 75% and 50% confirmed by the owner 2026-09-30; notional cap 60% since v1.5.7.)
 7. A missing position on one read is not trusted: closes are booked and leftover orders cancelled only with
    evidence (exit fills, fired trigger, or two reads apart).
 
@@ -136,8 +136,9 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
-- Risk: 1.5% of equity at SL for the 100% tier (first 10 live trades: half), leverage 3x isolated
-  (checked/set before every entry; failure = no trade), notional <= 30% of equity (pending decision),
+- Risk (v1.5.7, owner): 2% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
+  minimum is raised to it if that risk stays within the 100%-tier budget; leverage 3x isolated
+  (checked/set before every entry; failure = no trade), notional <= 60% of equity,
   liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the
   exchange's value; a missing liquidation price fails the check).
 - A rejected or unknown FOK is never retried in the same run (the SDK reports a whole bracket as rejected

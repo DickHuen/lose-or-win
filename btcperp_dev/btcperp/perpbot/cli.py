@@ -639,7 +639,7 @@ def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock
             return EXIT_OK
         if confirmed is None:
             print("NEEDS CONFIRMATION: the pass/fail criteria must be confirmed by the owner BEFORE the backtest runs "
-                  "(after the committee has reviewed them). Read them (`backtest criteria`), then `backtest confirm`.")
+                  "(read them first: `backtest criteria`), then `backtest confirm`.")
             return EXIT_CONFIRM
         man0 = confirmed["data"]["manifest"]
         from datetime import date as _date
@@ -649,7 +649,7 @@ def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock
         man = btm.manifest(cfg, paths.root, dq, end, fee)
         if man["sha256"] != man0["sha256"]:
             print(f"NEEDS CONFIRMATION: changed since the confirmation: {', '.join(btm.manifest_diff(man0, man))}. "
-                  f"A new confirmation is a new pre-registration: the committee must see why.")
+                  f"A new confirmation is a new pre-registration: note why before confirming again.")
             return EXIT_CONFIRM
         prior = [r for r in store.query("SELECT data FROM backtest_log WHERE event='run'")
                  if isinstance(r["data"], dict) and r["data"].get("manifest_sha256") == man["sha256"]]
@@ -663,8 +663,8 @@ def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock
                                                          "manifest_sha256": man["sha256"], "run_number": n_run,
                                                          "dir": str(out), **rep_hist})
         text = (out / "summary.md").read_text(encoding="utf-8")
-        text = text.replace("(the committee uses run #1).",
-                            f"(the committee uses run #1). History: {rep_hist['confirmations_total']} confirmation(s), "
+        text = text.replace("(run #1 counts).",
+                            f"(run #1 counts). History: {rep_hist['confirmations_total']} confirmation(s), "
                             f"{rep_hist['runs_total']} run(s) in total.")
         (out / "summary.md").write_text(text, encoding="utf-8")
         print(text)

@@ -558,7 +558,7 @@ class Simulator:
                     size = compute_size(equity=eq[0], risk_pct=pct, fraction=frac, price=price, atr=f.score.atr,
                                         sl_atr_multiple=float(cfg.exits.sl_atr_multiple),
                                         notional_cap_pct=float(rk.notional_cap_pct_equity), leverage=int(rk.leverage),
-                                        inst=self.inst)
+                                        inst=self.inst, raise_to_min=bool(rk.raise_to_min_notional))
                     if not size.ok or size.qty <= Decimal(0):
                         key = size.reject_reason or "size"
                         res.entries_skipped[key] = res.entries_skipped.get(key, 0) + 1
@@ -821,8 +821,8 @@ def select_variant(criteria: dict[str, Any], summaries: dict[str, dict[str, Any]
     """Pre-registered choice (review S5). Live uses A_live. Another candidate may replace it only if it (a) passes
     C0-C7 itself, (b) beats A_live's full-period total R at EVERY start offset, (c) beats A_live in at least two of
     the three segments (median over offsets), (d) its stress twin beats A_live_stress at every offset. If several
-    qualify: the highest worst-offset total R, then a committee review. If A_live fails, nothing is approved
-    automatically: a qualifying candidate needs a new committee meeting and a shadow forward period."""
+    qualify: the highest worst-offset total R, then the owner decides. If the primary fails, nothing is approved
+    automatically: the owner decides (2026-09-30: the owner runs R4h_live although run #1 failed)."""
     prim = criteria.get("primary_variant", PRIMARY)
     ps, pst = summaries[prim], summaries[VARIANTS[prim].twin or prim]
     primary_pass = passes(evaluate(criteria, summaries, data, prim))
@@ -1030,7 +1030,7 @@ def summary_md(rep: dict[str, Any]) -> str:
     dq = rep["data_quality"]
     prim = rep.get("primary_variant", PRIMARY)
     L = [f"# btcperp backtest - verdict: **{rep['verdict']}** ({prim})", "",
-         f"**Run #{rep['run_number_under_confirmation']} under this confirmation** (the committee uses run #1). "
+         f"**Run #{rep['run_number_under_confirmation']} under this confirmation** (run #1 counts). "
          f"manifest {str(rep['manifest_sha256'])[:12]}, result sha256 {rep['result_sha256'][:16]}",
          f"config {rep['config_version']} / criteria {rep['criteria_version']} / calendar {rep['calendar_version']} / "
          f"fee {rep['fee_rate']} / data to {rep['data_end_utc']} (exclusive)",
@@ -1065,7 +1065,7 @@ def summary_md(rep: dict[str, Any]) -> str:
     a = rep["summaries"].get(prim, {})
     L += ["", f"## {prim} by direction (I5) and segment", "", "```", json.dumps(a.get("direction"), indent=1),
           json.dumps(a.get("segment_expectancy_r"), indent=1, default=str), "```",
-          f"Short expectancy negative at every offset: {a.get('short_all_offsets_negative')} (if true: committee discussion).",
+          f"Short expectancy negative at every offset: {a.get('short_all_offsets_negative')} (if true: owner review).",
           "", f"Polymarket replay (I7): {json.dumps(rep['polymarket_replay'], default=str)}", "",
           "`*_stress` = double fees, 30 bps exit slippage, double paid funding. `R4h_confirm` flips only after two "
           "opposite 4-hour periods. `R4h_live_noevents` ignores the event gate; `R4h_live_nokill` runs without kill "

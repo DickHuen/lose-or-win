@@ -134,6 +134,7 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("risk.leverage", int, lambda v: 1 <= v <= 20),
     ("risk.cross_margin", bool, None),
     ("risk.notional_cap_pct_equity", _NUM, lambda v: 0 < v <= 300),
+    ("risk.raise_to_min_notional", bool, None),
     ("risk.liq_min_sl_multiple", _NUM, lambda v: v >= 1),
     ("risk.liq_estimate_mmr_divisor", _NUM, lambda v: v > 0),
     ("risk.kill_drawdown_pct", _NUM, lambda v: 0 < v < 100),

@@ -3,6 +3,32 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.7 - 2026-10-02 (config 1.5.7) - owner: more aggressive sizing so a small account trades
+
+First live decision (2026-09-30 16:30 HKT): score +37.17, LONG, 50% tier, all gates clear - but no order: 100 USDC x
+1.5% x 0.5 (ramp) x 0.5 (tier) = $0.375 at the stop = 0.00011 BTC = $9.1, below BTC-USD's $10 minimum ("entry
+rejected"). With 100 USDC only 100%-tier signals could trade during the ramp. The owner asked for more aggressive
+sizing so that a small account always trades.
+
+- **Sizing (config 1.5.7, owner 2026-10-02):** risk 2% at the 100% tier (was 1.5%); no half-size ramp
+  (`ramp_trades` 0, was 10); notional cap 60% of equity (was 30%).
+- **`risk.raise_to_min_notional: true`:** a size below the exchange minimum is raised to the minimum if that trade's
+  risk at the stop stays within the 100%-tier budget (equity x 2%) and the notional and leverage caps; otherwise the
+  entry is refused as before. With 100 USDC at BTC 83,066 and ATR 2,198: 25% tier 0.00015 BTC (risk ~$0.49),
+  50% tier 0.0003 BTC (~$0.99), 100% tier 0.0006 BTC (~$1.98, notional ~$50 under the $60 cap). The refused
+  16:30 trade would have been 0.0003 BTC.
+- Unchanged: 3x isolated, SL 1.5 ATR / TP 3 ATR, kill switches (15% drawdown, 8% losing streak, 75% equity floor,
+  50% permanent floor), tie rule +/-0.1%. With 2% risk the losing-streak switch can fire after four full-size losses.
+- **Backtest:** the R numbers (expectancy, t, I1, I6) do not depend on sizing; % returns and drawdowns scale by about
+  2/1.5 (run #1: max drawdown 10.9% -> about 14.5%, close to the 15% drawdown kill). The config change ends the
+  2026-09-30 confirmation: a new `Backtest.bat` run asks for CONFIRM again.
+- **Live review line (S9):** -0.196 R (I6 of R4h_live, run #1). After 30 live trades, a rolling 30-trade expectancy
+  below it pauses new entries until you review with Claude.
+- **Owner decisions recorded:** option B (4h) runs live although backtest run #1 failed (C0c data gaps, C1d t 1.79);
+  8% / 75% / 50% confirmed 2026-09-30; the committee is dissolved - texts now say "owner" / "you".
+- Tests run on the v1.5.6 sizing (pinned in conftest) plus `test_sizing_v157.py` for the shipped values. **Tests:**
+  308 (+6).
+
 ## 1.5.6 - 2026-09-30 (config 1.5.0) - rate limits: reads wait and retry
 
 Smoketest W on v1.5.5 got much further: `fok_unfilled_status`, `open_bracket` (a real minimum long with bracket SL/TP)

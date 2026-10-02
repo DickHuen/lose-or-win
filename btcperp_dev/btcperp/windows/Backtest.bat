@@ -18,7 +18,7 @@ if errorlevel 6 goto confirm
 goto done
 :confirm
 echo.
-echo The rules above are not confirmed yet. Only confirm them after the committee has reviewed them:
+echo The rules above are not confirmed yet. Only confirm them after you have read them:
 echo they cannot be changed after you see the results.
 set "ANS="
 set /p "ANS=Type CONFIRM and press Enter: "

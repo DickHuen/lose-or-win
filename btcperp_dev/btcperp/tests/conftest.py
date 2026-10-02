@@ -56,6 +56,20 @@ def as_daily(d: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+# The rule tests were written for the v1.5.6 sizing (1.5% risk, 10 half-size ramp trades, 30% notional cap, no
+# raise to the exchange minimum). v1.5.7 ships the owner's more aggressive sizing; test_sizing_v157.py tests that.
+TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "notional_cap_pct_equity": 30,
+             "raise_to_min_notional": False}
+TEST_RISK_YAML = (("risk_per_trade_pct: 2.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
+                  ("notional_cap_pct_equity: 60 ", "notional_cap_pct_equity: 30 "),
+                  ("raise_to_min_notional: true ", "raise_to_min_notional: false "))
+
+
+def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
+    d["risk"].update(TEST_RISK)
+    return d
+
+
 def shipped_config() -> dict[str, Any]:
     import yaml
 
@@ -64,17 +78,17 @@ def shipped_config() -> dict[str, Any]:
 
 @pytest.fixture
 def cfg_dict() -> dict[str, Any]:
-    return as_daily(shipped_config())
+    return with_test_risk(as_daily(shipped_config()))
 
 
 @pytest.fixture
 def rolling_cfg_dict() -> dict[str, Any]:
-    return shipped_config()
+    return with_test_risk(shipped_config())
 
 
 @pytest.fixture
 def cfg() -> Any:
-    return config_from_dict(as_daily(shipped_config()))
+    return config_from_dict(with_test_risk(as_daily(shipped_config())))
 
 
 class FakeBinance:
@@ -251,7 +265,7 @@ def tmp_root(tmp_path: Path) -> Path:
                  ('decide_times_hkt: ["00:30", "00:50", "04:30", "04:50", "08:30", "08:50", "12:30", "12:50", "16:30", '
                   '"16:50",\n                     "20:30", "20:50"]', 'decide_times_hkt: ["08:30", "08:50"]'),
                  ('manage_times_hkt: ["02:30", "06:30", "10:30", "14:30", "18:30", "22:30"]',
-                  'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]')):
+                  'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]')) + TEST_RISK_YAML:
         assert a in text, a
         text = text.replace(a, b)
     (root / "config" / "config.yaml").write_text(text, encoding="utf-8")     # daily cadence, like cfg_dict
