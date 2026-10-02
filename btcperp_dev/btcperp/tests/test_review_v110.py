@@ -338,15 +338,17 @@ def test_e_equity_floor_hard_stop_needs_new_config_version(world, cfg_dict, tmp_
 
 def test_e_parameters_decided_by_the_owner():
     """Review E parameters: confirmed by the owner 2026-09-30; on 2026-10-02 the owner chose 5% risk (v1.5.8) with a
-    150% notional cap and 25% / 20% drawdown / losing-streak kills. The 75% and 50% floors are unchanged."""
+    150% notional cap, then bold mode (v1.7.0): drawdown / losing-streak kills at 95% (effectively off) and both
+    floors at 5%, lowered once in config 1.7.0."""
     from conftest import shipped_config
     from perpbot.config import config_from_dict
 
     cfg = config_from_dict(shipped_config())
     assert cfg.risk.notional_cap_pct_equity == 150
-    assert cfg.risk.kill_losing_streak_pct == 20 and cfg.risk.kill_drawdown_pct == 25
-    assert cfg.risk.equity_floor_pct_of_net_funded == 75
-    assert cfg.risk.permanent_floor_pct_of_cumulative_funded == 50
+    assert cfg.risk.kill_losing_streak_pct == 95 and cfg.risk.kill_drawdown_pct == 95
+    assert cfg.risk.equity_floor_pct_of_net_funded == 5
+    assert cfg.risk.permanent_floor_pct_of_cumulative_funded == 5
+    assert cfg.risk.permanent_floor_lowered_in == cfg.config_version == "1.7.0"
     text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(encoding="utf-8")
     assert "PENDING USER DECISION" not in text and "committee" not in text
 

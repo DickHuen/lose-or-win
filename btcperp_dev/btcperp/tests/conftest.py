@@ -58,19 +58,30 @@ def as_daily(d: dict[str, Any]) -> dict[str, Any]:
 
 # The rule tests were written for the v1.5.6 sizing and kill switches (1.5% risk, 10 half-size ramp trades, 30%
 # notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills, 3x). v1.5.7 - v1.5.9 ship
-# the owner's more aggressive values; test_sizing_v157.py tests those.
+# the owner's more aggressive values; test_sizing_v157.py tests those. v1.7.0 ships bold mode (20x all-in, floors
+# 5%, kill switches 95%, live review off); the rule tests run with bold mode off and the v1.5.6 lines, and
+# test_bold_v170.py tests the shipped bold config.
 TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "notional_cap_pct_equity": 30,
-             "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3}
+             "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3,
+             "equity_floor_pct_of_net_funded": 75, "permanent_floor_pct_of_cumulative_funded": 50,
+             "permanent_floor_lowered_in": None, "live_review_expectancy_floor_r": -0.196}
+TEST_BOLD = {"enabled": False}
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
                   ("notional_cap_pct_equity: 150 ", "notional_cap_pct_equity: 30 "),
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
-                  ("kill_drawdown_pct: 25 ", "kill_drawdown_pct: 15 "),
-                  ("kill_losing_streak_pct: 20 ", "kill_losing_streak_pct: 8 "),
-                  ("  leverage: 10 ", "  leverage: 3 "))
+                  ("kill_drawdown_pct: 95 ", "kill_drawdown_pct: 15 "),
+                  ("kill_losing_streak_pct: 95 ", "kill_losing_streak_pct: 8 "),
+                  ("  leverage: 20 ", "  leverage: 3 "),
+                  ("equity_floor_pct_of_net_funded: 5 ", "equity_floor_pct_of_net_funded: 75 "),
+                  ("permanent_floor_pct_of_cumulative_funded: 5 ", "permanent_floor_pct_of_cumulative_funded: 50 "),
+                  ('permanent_floor_lowered_in: "1.7.0"', "permanent_floor_lowered_in: null"),
+                  ("live_review_expectancy_floor_r: null", "live_review_expectancy_floor_r: -0.196"),
+                  ("enabled: true                  # v1.7.0 bold mode", "enabled: false"))
 
 
 def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
     d["risk"].update(TEST_RISK)
+    d["bold"].update(TEST_BOLD)
     return d
 
 

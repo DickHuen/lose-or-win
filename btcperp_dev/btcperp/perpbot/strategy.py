@@ -380,6 +380,18 @@ def restrict_to_close(plan: Plan, reason: str, position_dir: int) -> Plan:
     return plan
 
 
+def hold_for_bold(plan: Plan, position_dir: int) -> Plan:
+    """v1.7.0 bold mode (live only): an open bet ends only at its TP or SL. Strategy exits (flip, 3-day, funding,
+    flat rules) and entries while it is open are dropped; a flat account decides as usual."""
+    if position_dir and plan.action not in ("hold", "paused", "none"):
+        plan.notes.append(f"bold mode: TP/SL only, {plan.action} ignored"
+                          + (f" ({plan.close_reason})" if plan.close_reason else ""))
+        plan.action, plan.close_reason = "hold", None
+        plan.enter_direction, plan.enter_fraction = 0, 0.0
+        plan.target_direction = position_dir
+    return plan
+
+
 # ---------------------------------------------------------------- one day, shared by engine and backtest
 
 @dataclass

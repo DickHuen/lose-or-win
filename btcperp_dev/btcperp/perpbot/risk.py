@@ -112,6 +112,38 @@ def compute_size(*, equity: float, risk_pct: float, fraction: float, price: floa
     return res
 
 
+def bold_plan(*, equity: float, price: float, direction: int, notional_multiple: float, leverage: int,
+              target_multiple: float, max_loss_fraction: float, fee_rate: float, liq_buffer_pct: float,
+              inst: Instrument, mmr_divisor: float) -> tuple[SizeResult, float, float, float]:
+    """v1.7.0 bold mode (owner 2026-10-02: "I want to gamble", high return): one all-in bet. Position = equity x
+    notional_multiple, isolated at `leverage`. TP where equity reaches target_multiple after both taker fees; SL where
+    the loss incl. both fees is max_loss_fraction of equity. Refused if the liquidation estimate is not beyond the SL
+    by liq_buffer_pct of the price, or if the order breaks an instrument rule. Returns (size, sl, tp, liq_estimate)."""
+    mult = float(notional_multiple)
+    fees = 2.0 * float(fee_rate) * mult                       # both fills, as a fraction of equity
+    tp_move = (float(target_multiple) - 1.0 + fees) / mult
+    sl_move = (float(max_loss_fraction) - fees) / mult
+    qty = quantize_qty(equity * mult / price, inst.quantity_decimals) if price > 0 and equity > 0 else Decimal(0)
+    notional = float(qty) * price
+    sl = price * (1.0 - direction * sl_move)
+    tp = price * (1.0 + direction * tp_move)
+    res = SizeResult(True, qty, notional, float(qty) * abs(price - sl), float(max_loss_fraction) * 100.0,
+                     abs(price - sl), notional / equity if equity > 0 else 0.0, ["bold"])
+    liq = estimate_liquidation(price, direction, leverage, inst, notional, mmr_divisor) if notional > 0 else 0.0
+    try:
+        if sl_move <= 0:
+            raise OrderRuleError(f"bold max_loss_fraction {max_loss_fraction} does not cover the fees ({fees:.4f})")
+        if notional > equity * leverage:
+            raise OrderRuleError(f"bold notional {notional:.2f} needs more than {leverage}x on equity {equity:.2f}")
+        validate_order(inst, qty=qty, price=price, leverage=leverage, market=False)
+        if abs(price - liq) / price < sl_move + float(liq_buffer_pct) / 100.0:
+            raise OrderRuleError(f"bold liquidation estimate {liq:.2f} is not beyond the SL {sl:.2f} by "
+                                 f"{liq_buffer_pct}% of the price")
+    except OrderRuleError as e:
+        res.ok, res.reject_reason = False, str(e)
+    return res, sl, tp, liq
+
+
 def validate_order(inst: Instrument, *, qty: Decimal, price: float, leverage: int, market: bool) -> None:
     if qty <= 0:
         raise OrderRuleError("quantity rounds to zero at instrument quantity_decimals")

@@ -40,6 +40,7 @@ from perpbot.indicators import Candle
 from perpbot.records import Records, client_order_id
 from perpbot.risk import (
     DrawdownState,
+    bold_plan,
     compute_size,
     drawdown,
     estimate_liquidation,
@@ -59,6 +60,7 @@ from perpbot.strategy import (
     compute_score,
     H4_MS,
     day_features,
+    hold_for_bold,
     key_ms,
     live_rolling_features,
     period_key,
@@ -523,12 +525,18 @@ class Engine:
         self.alert("position adopted" if external else "entry recovered",
                    f"{'Unknown' if external else 'Interrupted-entry'} position on exchange: size {pos.size} @ {pos.entry_price}; "
                    f"SL {sl} TP {tp}")
-        budget = eq * float(self.cfg.risk.risk_per_trade_pct) / 100.0 if eq else 0.0
+        if bool(self.cfg.bold.enabled):    # v1.7.0: a bet risks max_loss_fraction of the equity before it (uPnL excluded)
+            base = (eq - float(pos.unrealized_pnl or 0.0)) if eq else 0.0
+            budget = base * float(self.cfg.bold.max_loss_fraction)
+            budget_txt = f"{float(self.cfg.bold.max_loss_fraction) * 100:.0f}% of equity, bold mode"
+        else:
+            budget = eq * float(self.cfg.risk.risk_per_trade_pct) / 100.0 if eq else 0.0
+            budget_txt = f"{self.cfg.risk.risk_per_trade_pct}% of equity"
         if budget and trade["initial_risk_usd"] > budget * 1.01:
             self.rec.set_state(add_reason="adopted_over_budget", note="adopted position risk above budget")
             self.alert("adopted position over risk budget",
                        f"risk at SL {trade['initial_risk_usd']:.2f} > budget {budget:.2f} "
-                       f"({self.cfg.risk.risk_per_trade_pct}% of equity). Bot paused; SL/TP kept. Resume only after you confirm.")
+                       f"({budget_txt}). Bot paused; SL/TP kept. Resume only after you confirm.")
         return trade
 
     def _latest_atr(self) -> float | None:
@@ -647,10 +655,17 @@ class Engine:
 
     # ================================================================ kill switches
     def check_permanent_floor_config(self, prev_data: dict[str, Any]) -> float:
-        """Review v1.3.0 F1: a new config may never lower the permanent floor."""
+        """Review v1.3.0 F1: a new config may never lower the permanent floor. v1.7.0: except once, by the owner's
+        explicit decision, in the config version named in risk.permanent_floor_lowered_in; the lower value then
+        becomes the new maximum, so a later config cannot lower it again without naming its own version."""
         pct = float(self.cfg.risk.permanent_floor_pct_of_cumulative_funded)
         seen = prev_data.get("permanent_floor_pct_max")
         if seen is not None and pct < float(seen):
+            if (self.cfg.risk.permanent_floor_lowered_in or "") == self.cfg.config_version:
+                self.alert("permanent floor lowered", f"config {self.cfg.config_version} lowers the permanent floor from "
+                           f"{seen}% to {pct}% (owner decision, risk.permanent_floor_lowered_in)",
+                           dedupe_key=f"perm_floor_lowered_ok:{self.cfg.config_version}")
+                return pct
             self.alert("KILL SWITCH: permanent floor", f"config {self.cfg.config_version} lowers the permanent floor from "
                        f"{seen}% to {pct}%: refused, the bot does not trade with this config",
                        dedupe_key=f"perm_floor_lowered:{self.cfg.config_version}")
@@ -1113,16 +1128,28 @@ class Engine:
             book = self.ex.get_book(inst.id, int(self.cfg.polymarket.book_depth))
             ref = book.best_ask if d > 0 else book.best_bid
             limit = quantize_price(ref * (1 + d * slip), inst.price_decimals, "down" if d > 0 else "up")
-            size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=float(plan["enter_fraction"]), price=ref,
-                                atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
-                                notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
-                                leverage=int(self.cfg.risk.leverage), inst=inst,
-                                raise_to_min=bool(self.cfg.risk.raise_to_min_notional))
+            bold = bool(self.cfg.bold.enabled)
+            if bold:                                    # v1.7.0: one all-in bet, SL/TP from the bet's own rules
+                b = self.cfg.bold
+                size, sl_p, tp_p, liq_est = bold_plan(
+                    equity=eq["equity"], price=ref, direction=d, notional_multiple=float(b.notional_multiple),
+                    leverage=int(self.cfg.risk.leverage), target_multiple=float(b.target_multiple),
+                    max_loss_fraction=float(b.max_loss_fraction), fee_rate=float(self.cfg.shadow.fee_rate_estimate),
+                    liq_buffer_pct=float(b.liq_buffer_pct), inst=inst,
+                    mmr_divisor=float(self.cfg.risk.liq_estimate_mmr_divisor))
+            else:
+                size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=float(plan["enter_fraction"]),
+                                    price=ref, atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
+                                    notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
+                                    leverage=int(self.cfg.risk.leverage), inst=inst,
+                                    raise_to_min=bool(self.cfg.risk.raise_to_min_notional))
             if not size.ok:
                 self.rec.intent_event(day, "entry", "failed", {"reason": size.reject_reason, "size": size.to_dict()})
                 self.alert("entry rejected", f"order violates limits: {size.reject_reason}")
                 return False
-            sl_p, tp_p = bracket_prices(d, ref, atr, float(self.cfg.exits.sl_atr_multiple), float(self.cfg.exits.tp_atr_multiple))
+            if not bold:
+                sl_p, tp_p = bracket_prices(d, ref, atr, float(self.cfg.exits.sl_atr_multiple),
+                                            float(self.cfg.exits.tp_atr_multiple))
             sl_q = quantize_price(sl_p, inst.price_decimals, "nearest")
             tp_q = quantize_price(tp_p, inst.price_decimals, "nearest")
             try:
@@ -1134,9 +1161,10 @@ class Engine:
                 self.rec.intent_event(day, "entry", "failed", {"reason": str(e)})
                 self.alert("entry rejected", f"order violates instrument rules: {e}")
                 return False
-            liq_est = estimate_liquidation(ref, d, int(self.cfg.risk.leverage), inst, size.notional,
-                                           float(self.cfg.risk.liq_estimate_mmr_divisor))
-            if not liquidation_ok(ref, liq_est, size.sl_distance, float(self.cfg.risk.liq_min_sl_multiple)):
+            if not bold:
+                liq_est = estimate_liquidation(ref, d, int(self.cfg.risk.leverage), inst, size.notional,
+                                               float(self.cfg.risk.liq_estimate_mmr_divisor))
+            if not bold and not liquidation_ok(ref, liq_est, size.sl_distance, float(self.cfg.risk.liq_min_sl_multiple)):
                 self.rec.intent_event(day, "entry", "failed", {"reason": "liquidation check (estimate)", "liq_est": liq_est})
                 self.alert("entry rejected", f"estimated liquidation {liq_est:.2f} closer than "
                            f"{self.cfg.risk.liq_min_sl_multiple}x SL distance {size.sl_distance:.2f}")
@@ -1272,13 +1300,20 @@ class Engine:
                        {"fills": [f.__dict__ for f in fills], "entry_price": entry_price, "qty": qty,
                         "slippage_bps_vs_decision_mark": trade["slippage_bps_vs_decision_mark"],
                         "decision_to_fill_s": trade["decision_to_fill_s"]})
+        bold = bool(self.cfg.bold.enabled)
+        risk_txt = (f"BOLD all-in: {float(self.cfg.bold.max_loss_fraction) * 100:.0f}% of equity at the SL, "
+                    f"x{float(self.cfg.bold.target_multiple):g} at the TP" if bold else
+                    f"risk {trade['initial_risk_usd']:.2f} ({risk_pct * float(plan.get('enter_fraction') or 0):.3f}% equity)"
+                    f"{' [ramp]' if ramp else ''}")
         self.alert("open", f"{'LONG' if d > 0 else 'SHORT'} {qty} {inst.symbol} @ {entry_price:.2f} | SL {sl_s} TP {tp_s} | "
-                   f"risk {trade['initial_risk_usd']:.2f} ({risk_pct * float(plan.get('enter_fraction') or 0):.3f}% equity)"
-                   f"{' [ramp]' if ramp else ''} | score {plan.get('score')}")
-        if pos is not None and not liquidation_ok(entry_price, pos.liquidation_price, sl_dist,
-                                                  float(self.cfg.risk.liq_min_sl_multiple), isolated=not pos.cross):
+                   f"{risk_txt} | score {plan.get('score')}")
+        liq_mult = float(self.cfg.risk.liq_min_sl_multiple)
+        if bold and sl_dist > 0:      # v1.7.0: the exchange's liquidation must lie beyond the SL by liq_buffer_pct
+            liq_mult = (sl_dist + entry_price * float(self.cfg.bold.liq_buffer_pct) / 100.0) / sl_dist
+        if pos is not None and not liquidation_ok(entry_price, pos.liquidation_price, sl_dist, liq_mult,
+                                                  isolated=not pos.cross):
             self.alert("liquidation check", f"liquidation price {pos.liquidation_price!r} is missing or closer than "
-                       f"{self.cfg.risk.liq_min_sl_multiple}x SL distance {sl_dist:.2f}; closing")
+                       f"{liq_mult:.2f}x SL distance {sl_dist:.2f}; closing")
             self.close_position(reason="liq_check")
             return False
         if pos is not None:
@@ -1399,6 +1434,8 @@ class Engine:
             restrict_to_close(plan, f"region blocked by geoblock ({geo.get('country')}/{geo.get('region')})", pos_dir)
         if late:
             restrict_to_close(plan, "late decision after the entry window: close rules only, no late entry", pos_dir)
+        if bool(cfg.bold.enabled) and bool(cfg.bold.hold_until_tp_sl):
+            hold_for_bold(plan, pos_dir)                 # v1.7.0: an open bet ends only at its TP or SL
         if self.rolling:
             used = shifted_daily(sorted(inputs["h4"], key=lambda c: c.open_ms), t_ms, 3)
         else:

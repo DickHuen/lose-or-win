@@ -136,6 +136,12 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
+- **Bold mode (v1.7.0, owner, `bold.enabled` true):** every entry is one all-in bet: position = equity x 19 at
+  20x isolated; TP where equity doubles after both taker fees (~+5.4%), SL where the loss incl. fees is 70% of
+  equity (~-3.6%); refused if the liquidation estimate (~4% at 20x on max 50x) is not beyond the SL by 0.3% of the
+  price, and closed after the fill if the exchange's liquidation price is not. While a bet is open, flips, the
+  3-day rule and the funding / flat rules are ignored: it ends only at its TP or SL. Kill switches 95%, floors 5%,
+  live review line off: the bot keeps betting until the owner pauses it. The rules below apply when bold mode is off.
 - Risk (v1.5.8, owner): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
   minimum is raised to it if that risk stays within the 100%-tier budget; leverage 10x isolated (v1.5.9)
   (checked/set before every entry; failure = no trade), notional <= 150% of equity,

@@ -109,7 +109,8 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
         "limits": {"kill_drawdown_pct": cfg.risk.kill_drawdown_pct, "kill_losing_streak_pct": cfg.risk.kill_losing_streak_pct,
                    "equity_floor_pct": cfg.risk.equity_floor_pct_of_net_funded, "risk_per_trade_pct": cfg.risk.risk_per_trade_pct,
                    "notional_cap_pct": cfg.risk.notional_cap_pct_equity, "leverage": cfg.risk.leverage,
-                   "permanent_floor_pct": cfg.risk.permanent_floor_pct_of_cumulative_funded},
+                   "permanent_floor_pct": cfg.risk.permanent_floor_pct_of_cumulative_funded,
+                   "bold": bool(cfg.bold.enabled)},
         "position": position,
         "open_trade": ({k: open_t.get(k) for k in ("direction", "qty", "entry_price", "entry_utc_day", "sl_price", "tp_price",
                                                   "initial_risk_usd", "score", "effective_fraction", "entry_ts_ms")}
@@ -331,7 +332,7 @@ function chart(series){
 function render(d){
  const st=d.state;$("state").textContent=stateLabel(st.display);$("state").className="badge "+(st.paused?"b-paused":st.display==="open"?"b-open":"b-flat");
  $("reasons").textContent=st.reasons.length?("暫停原因: "+st.reasons.join(", ")):"";
- $("upd").textContent="更新: "+d.now_hkt+(d.snapshot_ts_hkt?" ・ 交易所快照: "+d.snapshot_ts_hkt:"")+(d.refresh_busy?" ・ 更新中…":"")+" ・ v"+d.code_version+"/cfg "+d.config_version;
+ $("upd").textContent="更新: "+d.now_hkt+(d.snapshot_ts_hkt?" ・ 交易所快照: "+d.snapshot_ts_hkt:"")+(d.refresh_busy?" ・ 更新中…":"")+" ・ v"+d.code_version+"/cfg "+d.config_version+(d.limits&&d.limits.bold?" ・ 孤注模式 "+d.limits.leverage+"x":"");
  $("snaperr").textContent=d.snapshot_error?("交易所讀取失敗 "+d.snapshot_error):"";
  $("unread").textContent=d.unread;
  const e=d.equity,L=d.limits,k=(e&&e.kill)||{};

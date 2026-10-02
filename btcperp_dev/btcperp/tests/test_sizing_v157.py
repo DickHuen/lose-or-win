@@ -35,14 +35,13 @@ def _size(cfg, equity, fraction, trades_before=0, raise_to_min=None):
 
 
 def test_shipped_sizing_values():
+    """The risk-based sizing used while bold.enabled is false. v1.7.0 changed the leverage, kill switches, floors and
+    live review line for bold mode; test_bold_v170.py tests those."""
     cfg = config_from_dict(shipped_config())
     r = cfg.risk
     assert (r.risk_per_trade_pct, r.ramp_trades, r.notional_cap_pct_equity, r.raise_to_min_notional) == (5.0, 0, 150, True)
-    assert (r.kill_drawdown_pct, r.kill_losing_streak_pct) == (25, 20)
-    assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (75, 50)
-    assert r.live_review_expectancy_floor_r == -0.196
     assert risk_pct_for_trade(r, 0) == (5.0, False)
-    assert r.leverage == 10 and r.cross_margin is False and r.liq_min_sl_multiple == 2.0
+    assert r.cross_margin is False and r.liq_min_sl_multiple == 2.0
 
 
 def test_the_refused_1630_trade_would_have_been_placed():
@@ -78,8 +77,9 @@ def test_raise_to_minimum_stays_within_the_full_tier_budget():
 @pytest.mark.parametrize("atr,ok", [(2_198.0, True), (2_400.0, True), (2_600.0, False)])
 def test_10x_liquidation_guard(atr, ok):
     """v1.5.9, 10x isolated on BTC-USD (max 50x): the liquidation estimate sits ~9% away (1/10 - 0.5/50). The entry
-    needs it at least 2 x the stop (1.5 ATR) away, so in high volatility (stop above ~4.5%) the entry is refused."""
-    cfg = config_from_dict(shipped_config())
+    needs it at least 2 x the stop (1.5 ATR) away, so in high volatility (stop above ~4.5%) the entry is refused.
+    (v1.7.0 ships 20x for bold mode, which checks its own liquidation buffer: test_bold_v170.py.)"""
+    cfg = config_from_dict(dict(shipped_config(), risk=dict(shipped_config()["risk"], leverage=10)))
     s = _size(cfg, 100.0, 1.0)
     liq = estimate_liquidation(PRICE, 1, int(cfg.risk.leverage), _inst(), s.notional,
                                float(cfg.risk.liq_estimate_mmr_divisor))

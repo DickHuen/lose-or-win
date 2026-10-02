@@ -14,6 +14,7 @@ CLOSE_ZH = {"flip": "反方向強訊號（反手）", "three_day_rule": "連續 
             "flat_rule": "訊號太弱（空倉規則）"}
 GATE_ZH = {"ema200_regime": "200 日線", "h4_trend": "4 小時趨勢", "extreme_funding": "資金費", "event_window": "經濟數據"}
 NOTE_ZH = (
+    ("bold mode: TP/SL only", "孤注模式：只等止賺或止損，策略平倉／反手唔執行"),
     ("same direction: hold", "同方向：繼續持有"),
     ("weak opposite signal", "反方向但訊號弱：繼續持有，止損止賺不變"),
     ("score 0", "分數係 0：不變"),
@@ -124,7 +125,24 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
         line += f"（原因：{CLOSE_ZH.get(plan['close_reason'], plan['close_reason'])}）"
     out.append(line)
     enter = int(plan.get("enter_direction") or 0)
-    if enter and mark and atr:
+    bold = getattr(cfg, "bold", None)
+    bold = bold if bold is not None and bool(bold.enabled) else None
+    if enter and mark and bold is not None:
+        # v1.7.0 bold mode: the same numbers as risk.bold_plan, before rounding to the instrument's steps
+        mult = float(bold.notional_multiple)
+        fees = 2.0 * float(cfg.shadow.fee_rate_estimate) * mult
+        tp_move = (float(bold.target_multiple) - 1.0 + fees) / mult
+        sl_move = (float(bold.max_loss_fraction) - fees) / mult
+        m = float(mark)
+        sl, tp = m * (1 - enter * sl_move), m * (1 + enter * tp_move)
+        out.append(f"  {_dir(enter)}：入場約 {_p(m)}｜止損約 {_p(sl)}（{(sl - m) / m * 100:+.1f}%）"
+                   f"｜止賺約 {_p(tp)}（{(tp - m) / m * 100:+.1f}%）")
+        line = (f"  注碼：孤注，全部權益 ×{mult:g} 倉位（{int(cfg.risk.leverage)} 倍逐倉）；中止損蝕權益約 "
+                f"{float(bold.max_loss_fraction) * 100:.0f}%，中止賺權益約 ×{float(bold.target_multiple):g}")
+        if equity:
+            line += f"（倉位約 ${float(equity) * mult:,.0f}）"
+        out.append(line)
+    elif enter and mark and atr:
         sl_m, tp_m = float(cfg.exits.sl_atr_multiple), float(cfg.exits.tp_atr_multiple)
         sl = float(mark) - enter * sl_m * float(atr)
         tp = float(mark) + enter * tp_m * float(atr)
@@ -144,7 +162,9 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
         out.append(f"  備註：{n}")
     flip_min = float(cfg.strategy.flip_min_abs_score)
     held = pos_dir or enter
-    if held:
+    if held and bold is not None and bool(bold.hold_until_tp_sl):
+        out.append("孤注模式：持倉期間唔反手、唔提早平倉，只等止賺或止損")
+    elif held:
         out.append(f"反手條件：分數去到 {(-held) * flip_min:+.0f} 或{'以下' if held > 0 else '以上'}"
                    + ("，並連續兩個時段" if rolling and int(cfg.strategy.flip_confirm_periods) > 1 else ""))
     if next_hkt:

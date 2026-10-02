@@ -3,6 +3,36 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.7.0 - 2026-10-02 (config 1.7.0) - owner: bold mode (all-in bets at 20x)
+
+The owner: "I want to gamble", high return, small capital, "keep going until I say stop". After the numbers were
+laid out (bold play maximises the chance of doubling; the expected value per bet is still negative after fees and
+the strategy's edge is unproven, backtest run #1 FAIL), the owner chose 20x all-in bets. Live decides every 4 hours
+as before; the strategy picks the direction.
+
+- **New `bold` section:** each entry is one bet: position = equity x 19 (`notional_multiple`), isolated at 20x.
+  TP where equity reaches x2 after both taker fees (~+5.36% at the 0.05% fee estimate), SL where the loss incl. fees
+  is 70% of equity (~-3.58%). `risk.bold_plan` sizes it; the entry is refused if a rule of the instrument breaks, if
+  the notional needs more than the leverage, or if the liquidation estimate (1/20 - 0.5/50 = 4% on BTC-USD) is not
+  beyond the SL by `liq_buffer_pct` (0.3% of the price). After the fill the same buffer is checked against the
+  exchange's liquidation price; if it fails the bet is closed (as before for the 2 x SL rule).
+- **Held until TP or SL** (`hold_until_tp_sl`): while a bet is open, flips, the 3-day rule and the funding / flat
+  rules are ignored (`strategy.hold_for_bold`, logged as a note). Pause / kill still work.
+- **No automatic stop (owner):** drawdown and losing-streak kills 95% (were 25 / 20), equity floor 5% of net funded
+  (was 75), permanent floor 5% (was 50), live review line off (was -0.196R). 100 USDC -> ~30 after one loss -> ~9
+  after two: the bot still bets. Pause.bat or Telegram /pause stops it.
+- **Permanent floor lowered once:** the bot refuses any config that lowers the permanent floor (review v1.3.0 F1).
+  New `risk.permanent_floor_lowered_in`: the ONE config version allowed to lower it (here "1.7.0"); the lower value
+  becomes the new maximum and a later config cannot reuse the name. An alert records it.
+- Not used while bold mode is on: `risk_per_trade_pct`, tiers, ramp, notional cap, raise to minimum,
+  `liq_min_sl_multiple`. They still apply if `bold.enabled` is set to false.
+- An entry recovered after a crash is checked against 70% of the equity before the bet (was 5%), so it does not
+  pause the bot. Preview / dashboard analysis text shows the bet (position, SL, TP); the dashboard shows "孤注模式 20x".
+- Tests run with bold mode off and the v1.5.6 risk lines (conftest); `test_bold_v170.py` covers the shipped values,
+  the bet's numbers on 100 USDC (TP ~ +$100, SL ~ -$70), refusals, holding through a flip and the funding rule, TP
+  and re-bet, two losses and a third bet, the liquidation buffer, crash recovery and the floor override.
+  **Tests:** 334 (+18).
+
 ## 1.6.0 - 2026-10-02 (config 1.5.9) - backtest: deciding every 2 hours
 
 The owner asked whether deciding more often would be better and chose to backtest a 2-hour cadence first. Live is

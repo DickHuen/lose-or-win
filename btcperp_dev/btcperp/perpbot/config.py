@@ -179,6 +179,13 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("smoketest.probe_proxy_withdrawal", bool, None),
     ("smoketest.perps_deposit_contract", str, None),
     ("smoketest.collateral_token", str, None),
+    # v1.7.0 bold mode (owner 2026-10-02)
+    ("bold.enabled", bool, None),
+    ("bold.notional_multiple", _NUM, lambda v: 0 < v <= 50),
+    ("bold.target_multiple", _NUM, lambda v: v > 1),
+    ("bold.max_loss_fraction", _NUM, lambda v: 0 < v < 1),
+    ("bold.liq_buffer_pct", _NUM, lambda v: v >= 0),
+    ("bold.hold_until_tp_sl", bool, None),
 ]
 
 
@@ -229,6 +236,11 @@ def validate(data: dict[str, Any]) -> None:
                 _d.fromisoformat(str(v))
             except ValueError:
                 errors.append(f"config key risk.{key}: must be null or a date YYYY-MM-DD")
+    pl = (data.get("risk") or {}).get("permanent_floor_lowered_in", "missing")
+    if pl == "missing":
+        errors.append("missing config key: risk.permanent_floor_lowered_in")
+    elif pl is not None and not isinstance(pl, str):
+        errors.append("config key risk.permanent_floor_lowered_in: must be null or a config_version string")
     lr = (data.get("risk") or {}).get("live_review_expectancy_floor_r", "missing")
     if lr == "missing":
         errors.append("missing config key: risk.live_review_expectancy_floor_r")
