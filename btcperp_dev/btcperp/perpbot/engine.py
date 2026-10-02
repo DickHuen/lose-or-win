@@ -891,7 +891,9 @@ class Engine:
         mult = float(r.notional_multiple_full_tier)
         want = mult * float(plan.get("enter_fraction") or 0.0)
         mark = float(plan.get("mark") or 0.0)
-        sl_pct = float(self.cfg.exits.sl_atr_multiple) * float(plan.get("atr") or 0.0) / mark if mark > 0 else 0.0
+        # +1%: the entry is priced off the book (a short's bid is a little below the mark), so the pre-trade
+        # liquidation check at the entry price still passes at a boundary leverage
+        sl_pct = 1.01 * float(self.cfg.exits.sl_atr_multiple) * float(plan.get("atr") or 0.0) / mark if mark > 0 else 0.0
         lev, got, note = trade_leverage(multiple=want, sl_pct=sl_pct, max_leverage=int(r.leverage),
                                         margin_use_pct=float(r.max_margin_use_pct),
                                         liq_multiple=float(r.liq_min_sl_multiple), inst=inst, notional=equity * want,
