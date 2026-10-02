@@ -3,6 +3,20 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.9 - 2026-10-02 (config 1.5.9) - owner: 10x isolated
+
+The owner chose 10x after the trade-offs were laid out. Sizing is by risk (5% at the 100% tier), so the size and
+the loss at the stop do not change: a full trade on 100 USDC is still ~0.0015 BTC (~$125) and ~$5 at the stop.
+
+- **Config 1.5.9:** `risk.leverage` 10 (was 3), still isolated. Margin per full trade ~$12.5 (was ~$42).
+- **Liquidation:** the estimate sits ~9% from entry (1/10 - 0.5/50 at BTC-USD's 50x maximum), the stop ~4% (1.5 ATR).
+  `liq_min_sl_multiple` 2 is unchanged: an entry whose liquidation would be nearer than 2 x the stop is refused, and
+  a fill whose exchange liquidation price is nearer is closed. At 83,066 that happens when ATR is above ~3% of the
+  price (~2,490), i.e. in volatile periods there are no entries at 10x. A gap through the stop beyond ~9% liquidates
+  the position: the loss is the isolated margin plus the liquidation fee, more than the planned 5%.
+- Tests keep 3x pinned for the rule tests; `test_sizing_v157.py` checks 10x and the liquidation guard at ATR 2,198 /
+  2,400 (entry allowed) and 2,600 (refused). **Tests:** 311 (+3).
+
 ## 1.5.8 - 2026-10-02 (config 1.5.8) - owner: 5% risk per trade
 
 The owner chose 5% at the 100% tier (the maximum the config allows) after the trade-offs were laid out: about $5 at

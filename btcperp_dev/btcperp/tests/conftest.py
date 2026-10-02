@@ -57,15 +57,16 @@ def as_daily(d: dict[str, Any]) -> dict[str, Any]:
 
 
 # The rule tests were written for the v1.5.6 sizing and kill switches (1.5% risk, 10 half-size ramp trades, 30%
-# notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills). v1.5.7 / v1.5.8 ship the
-# owner's more aggressive values; test_sizing_v157.py tests those.
+# notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills, 3x). v1.5.7 - v1.5.9 ship
+# the owner's more aggressive values; test_sizing_v157.py tests those.
 TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "notional_cap_pct_equity": 30,
-             "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8}
+             "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3}
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
                   ("notional_cap_pct_equity: 150 ", "notional_cap_pct_equity: 30 "),
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
                   ("kill_drawdown_pct: 25 ", "kill_drawdown_pct: 15 "),
-                  ("kill_losing_streak_pct: 20 ", "kill_losing_streak_pct: 8 "))
+                  ("kill_losing_streak_pct: 20 ", "kill_losing_streak_pct: 8 "),
+                  ("  leverage: 10 ", "  leverage: 3 "))
 
 
 def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:

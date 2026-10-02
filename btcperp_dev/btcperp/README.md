@@ -137,7 +137,7 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
 - Risk (v1.5.8, owner): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
-  minimum is raised to it if that risk stays within the 100%-tier budget; leverage 3x isolated
+  minimum is raised to it if that risk stays within the 100%-tier budget; leverage 10x isolated (v1.5.9)
   (checked/set before every entry; failure = no trade), notional <= 150% of equity,
   liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the
   exchange's value; a missing liquidation price fails the check).

@@ -8,7 +8,7 @@ import pytest
 
 from perpbot.config import config_from_dict
 from perpbot.exchange.mock import default_instrument
-from perpbot.risk import compute_size, min_order_qty, risk_pct_for_trade
+from perpbot.risk import compute_size, estimate_liquidation, liquidation_ok, min_order_qty, risk_pct_for_trade
 
 from conftest import shipped_config
 
@@ -42,6 +42,7 @@ def test_shipped_sizing_values():
     assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (75, 50)
     assert r.live_review_expectancy_floor_r == -0.196
     assert risk_pct_for_trade(r, 0) == (5.0, False)
+    assert r.leverage == 10 and r.cross_margin is False and r.liq_min_sl_multiple == 2.0
 
 
 def test_the_refused_1630_trade_would_have_been_placed():
@@ -72,3 +73,16 @@ def test_raise_to_minimum_stays_within_the_full_tier_budget():
     assert not tiny.ok and "below instrument min_notional" in tiny.reject_reason
     off = _size(cfg, 15.0, 0.25, raise_to_min=False)
     assert not off.ok
+
+
+@pytest.mark.parametrize("atr,ok", [(2_198.0, True), (2_400.0, True), (2_600.0, False)])
+def test_10x_liquidation_guard(atr, ok):
+    """v1.5.9, 10x isolated on BTC-USD (max 50x): the liquidation estimate sits ~9% away (1/10 - 0.5/50). The entry
+    needs it at least 2 x the stop (1.5 ATR) away, so in high volatility (stop above ~4.5%) the entry is refused."""
+    cfg = config_from_dict(shipped_config())
+    s = _size(cfg, 100.0, 1.0)
+    liq = estimate_liquidation(PRICE, 1, int(cfg.risk.leverage), _inst(), s.notional,
+                               float(cfg.risk.liq_estimate_mmr_divisor))
+    assert (PRICE - liq) / PRICE == pytest.approx(0.09, abs=1e-9)
+    assert liquidation_ok(PRICE, liq, float(cfg.exits.sl_atr_multiple) * atr,
+                          float(cfg.risk.liq_min_sl_multiple)) is ok

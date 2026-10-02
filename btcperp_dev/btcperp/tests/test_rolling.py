@@ -240,7 +240,7 @@ def test_shipped_config_is_rolling_and_validated(rolling_cfg_dict):
     from perpbot.config import ConfigError, config_from_dict
 
     cfg = config_from_dict(rolling_cfg_dict)
-    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.5.8"
+    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.5.9"
     assert len(cfg.schedule.decide_times_hkt) == 12 and len(cfg.schedule.manage_times_hkt) == 6
     bad = dict(rolling_cfg_dict, schedule=dict(rolling_cfg_dict["schedule"], decide_times_hkt=["08:30", "08:50"]))
     with pytest.raises(ConfigError, match="no decide time"):
