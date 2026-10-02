@@ -8,6 +8,8 @@ Cadence (strategy.cadence):
 - rolling_4h (v1.5.0, option B): one decision per 4-hour period starting at T (UTC 00/04/08/12/16/20), on daily
   candles that END at T (built from 4h candles). Same rules and parameters; the "day" simply ends at T instead of
   at 00:00 UTC. The 3-day rule counts 3 x 6 periods; a flip may need the opposite signal in consecutive periods.
+- rolling_1h (v1.9.0, owner): the same every hour, on daily candles ending at each UTC hour, built from 1h candles;
+  the 3-day rule counts 3 x 24 periods. The h4 gate uses the last 4h candle closed at T.
 """
 
 from __future__ import annotations
@@ -23,10 +25,16 @@ from perpbot.indicators import Candle, atr_wilder, clip, clv, ema, last_value, p
 from perpbot.timeutil import DAY_MS, HOUR_MS, MINUTE_MS, day_start_ms, from_ms, to_ms
 
 H4_MS = 4 * HOUR_MS
-CADENCES = ("daily", "rolling_4h")
-# Period length of each rolling cadence. rolling_2h (v1.6.0) exists in the backtest only (variant R2h_live): live
-# config accepts CADENCES, and the live engine decides every 4 hours.
-ROLLING_PERIOD_MS = {"rolling_4h": H4_MS, "rolling_2h": 2 * HOUR_MS}
+CADENCES = ("daily", "rolling_4h", "rolling_1h")
+# Period length of each rolling cadence. rolling_2h (v1.6.0) exists in the backtest only (variant R2h_live); live
+# config accepts CADENCES. rolling_1h (v1.9.0) is live and in the backtest (R1h_live).
+ROLLING_PERIOD_MS = {"rolling_4h": H4_MS, "rolling_2h": 2 * HOUR_MS, "rolling_1h": HOUR_MS}
+
+
+def base_bar_ms(cadence: str) -> int:
+    """Length of the candles the daily candles ending at a period boundary are built from: 4h candles when every
+    boundary is a 4h one, 1h candles otherwise."""
+    return H4_MS if ROLLING_PERIOD_MS[cadence] % H4_MS == 0 else HOUR_MS
 
 
 class InsufficientData(Exception):
@@ -80,8 +88,22 @@ def direction_of(score: float) -> int:
     return 0
 
 
+def size_table(s: Any) -> list[tuple[float, float]] | None:
+    """v1.9.0 `strategy.size_tiers`: [[from |score|, fraction], ...] ascending, first from 0; null = the 3 tiers."""
+    get = getattr(s, "get", None)
+    table = get("size_tiers") if callable(get) else getattr(s, "size_tiers", None)
+    return [(float(a), float(f)) for a, f in table] if table else None
+
+
 def tier_fraction(abs_score: float, s: Any) -> float:
-    """Size tier as a fraction of the risk budget. abs_score must be > 0."""
+    """Size tier as a fraction of the risk budget (or of the full-tier position). abs_score must be > 0."""
+    table = size_table(s)
+    if table:
+        frac = table[0][1]
+        for lo, f in table:
+            if abs_score >= lo:
+                frac = f
+        return frac
     if abs_score < s.tier_low_max:
         return float(s.tier_low_fraction)
     if abs_score <= s.tier_mid_max:
@@ -487,13 +509,13 @@ def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | N
 # ---------------------------------------------------------------- rolling 4h cadence (v1.5.0, option B)
 
 def period_key(t_ms: int) -> str:
-    """'YYYY-MM-DDTHH:00' (UTC) of a 4h boundary."""
+    """'YYYY-MM-DDTHH:00' (UTC) of a period boundary."""
     return from_ms(int(t_ms)).strftime("%Y-%m-%dT%H:00")
 
 
-def period_start(t_ms: int) -> int:
-    """The 4h boundary (UTC 00/04/08/12/16/20) at or before t_ms."""
-    return int(t_ms) // H4_MS * H4_MS
+def period_start(t_ms: int, period_ms: int = H4_MS) -> int:
+    """The period boundary at or before t_ms (4h: UTC 00/04/08/12/16/20; 1h: every UTC hour)."""
+    return int(t_ms) // int(period_ms) * int(period_ms)
 
 
 def key_ms(key: str) -> int:
@@ -606,17 +628,21 @@ def period_features(cfg: Any, t_ms: int, score_at: Any, h4: Sequence[Candle],
 
 
 def live_rolling_features(cfg: Any, t_ms: int, h4: Sequence[Candle], funding_records: Sequence[tuple[int, float]],
-                          events: list[dict[str, Any]]) -> DayFeatures:
-    """rolling_4h features at T from fetched 4h candles (live decide and preview); the backtest feeds
-    `period_features` from cached scores of the same shifted candles."""
+                          events: list[dict[str, Any]], *, cadence: str = "rolling_4h",
+                          base: Sequence[Candle] | None = None) -> DayFeatures:
+    """Rolling features at T from fetched candles (live decide and preview); the backtest feeds `period_features`
+    from cached scores of the same shifted candles. rolling_1h: `base` = the 1h candles the daily candles are built
+    from; `h4` = the 4h candles for the h4 gate."""
     h4s = sorted(h4, key=lambda c: c.open_ms)
+    bar = base_bar_ms(cadence)
+    bases = h4s if bar == H4_MS or base is None else sorted(base, key=lambda c: c.open_ms)
     n_days = int(cfg.binance.daily_candles_to_load)
     cache: dict[int, Any] = {}
 
     def score_at(ti: int) -> Any:
         if ti not in cache:
             try:
-                cache[ti] = rolling_score(shifted_daily(h4s, ti, n_days), ti, cfg.strategy)
+                cache[ti] = rolling_score(shifted_daily(bases, ti, n_days, bar_ms=bar), ti, cfg.strategy)
             except InsufficientData as e:
                 cache[ti] = e
         v = cache[ti]
@@ -625,7 +651,7 @@ def live_rolling_features(cfg: Any, t_ms: int, h4: Sequence[Candle], funding_rec
         return v
 
     gate = h4_gate_window(h4s, t_ms, int(cfg.binance.h4_candles_to_load))
-    return period_features(cfg, t_ms, score_at, gate, funding_records, events)
+    return period_features(cfg, t_ms, score_at, gate, funding_records, events, cadence=cadence)
 
 
 def sc_day(t_ms: int) -> date:

@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from perpbot import analysis
 from perpbot.calendar_events import EventCalendar
@@ -50,6 +50,7 @@ from perpbot.risk import (
     quantize_qty,
     risk_pct_for_trade,
     size_weighted_expectancy,
+    trade_leverage,
     validate_order,
     validate_price,
 )
@@ -59,6 +60,9 @@ from perpbot.strategy import (
     bracket_prices,
     compute_score,
     H4_MS,
+    HOUR_MS,
+    ROLLING_PERIOD_MS,
+    base_bar_ms,
     day_features,
     hold_for_bold,
     key_ms,
@@ -173,15 +177,20 @@ class Engine:
     # ---------------------------------------------------------------- decision periods (v1.5.0)
     @property
     def rolling(self) -> bool:
-        """strategy.cadence rolling_4h: one decision per 4-hour period instead of per UTC day."""
-        return str(self.cfg.strategy.cadence) == "rolling_4h"
+        """strategy.cadence rolling_4h / rolling_1h (v1.9.0): one decision per 4-hour / 1-hour period instead of
+        per UTC day."""
+        return str(self.cfg.strategy.cadence) in ROLLING_PERIOD_MS
+
+    @property
+    def period_ms(self) -> int:
+        return ROLLING_PERIOD_MS[str(self.cfg.strategy.cadence)] if self.rolling else DAY_MS
 
     def period(self, now: datetime | None = None) -> tuple[int, str, date]:
         """The decision period containing `now`: (start T in UTC ms, key, UTC day of T). Daily: T = 00:00 UTC and
         key 'YYYY-MM-DD'; rolling_4h: T = the 4h boundary and key 'YYYY-MM-DDTHH:00'."""
         now = now or self.now()
         if self.rolling:
-            t = period_start(to_ms(now))
+            t = period_start(to_ms(now), self.period_ms)
             return t, period_key(t), sc_day(t)
         d = utc_day(now)
         return day_start_ms(d), d.isoformat(), d
@@ -266,7 +275,7 @@ class Engine:
                 raise EngineError(f"cannot resolve BTC instrument from /v1/info/instruments "
                                   f"(symbols: {sorted(by_sym)[:20]})")
             chosen = cands[0]
-        if chosen.max_leverage < self.cfg.risk.leverage:
+        if chosen.max_leverage < self.cfg.risk.leverage and not self.per_trade_leverage:
             raise EngineError(f"instrument max_leverage {chosen.max_leverage} < configured {self.cfg.risk.leverage}")
         if chosen.isolated_only and self.cfg.risk.cross_margin:
             raise EngineError("instrument is isolated-only but config asks for cross margin")
@@ -870,8 +879,28 @@ class Engine:
             self.log_order(purpose, "cancel", coid, last.id, "cancel_requested", {"reason": "non-terminal after polling"})
         return last
 
-    def ensure_leverage(self, inst: Instrument) -> tuple[bool, str]:
-        lev, cross = int(self.cfg.risk.leverage), bool(self.cfg.risk.cross_margin)
+    @property
+    def per_trade_leverage(self) -> bool:
+        """v1.9.0: sizing by position (risk.notional_multiple_full_tier) picks the leverage for each trade;
+        risk.leverage is then the maximum. Risk-% sizing and bold mode use risk.leverage itself."""
+        return bool(self.cfg.risk.notional_multiple_full_tier) and not bool(self.cfg.bold.enabled)
+
+    def plan_trade_leverage(self, plan: dict[str, Any], inst: Instrument, equity: float) -> tuple[int, float, str | None]:
+        """(leverage, tier fraction to size with, note) for a position-sized entry (risk.trade_leverage)."""
+        r = self.cfg.risk
+        mult = float(r.notional_multiple_full_tier)
+        want = mult * float(plan.get("enter_fraction") or 0.0)
+        mark = float(plan.get("mark") or 0.0)
+        sl_pct = float(self.cfg.exits.sl_atr_multiple) * float(plan.get("atr") or 0.0) / mark if mark > 0 else 0.0
+        lev, got, note = trade_leverage(multiple=want, sl_pct=sl_pct, max_leverage=int(r.leverage),
+                                        margin_use_pct=float(r.max_margin_use_pct),
+                                        liq_multiple=float(r.liq_min_sl_multiple), inst=inst, notional=equity * want,
+                                        mmr_divisor=float(r.liq_estimate_mmr_divisor))
+        return lev, got / mult, note
+
+    def ensure_leverage(self, inst: Instrument, leverage: int | None = None) -> tuple[bool, str]:
+        lev = int(self.cfg.risk.leverage) if leverage is None else int(leverage)
+        cross = bool(self.cfg.risk.cross_margin)
         cfg = self.ex.get_account_config(inst.id)
         if cfg is not None and cfg.leverage == lev and cfg.cross == cross:
             return True, "already set"
@@ -1090,11 +1119,13 @@ class Engine:
     def open_position(self, day: str, plan: dict[str, Any], attempts_used: int) -> bool:
         inst = self.instrument()
         d = int(plan["enter_direction"])
-        ok, why = self.ensure_leverage(inst)
-        if not ok:
-            self.rec.intent_event(day, "entry", "failed", {"reason": why})
-            self.alert("entry blocked", f"account config is not {self.cfg.risk.leverage}x isolated and could not be set: {why}. No trade today.")
-            return False
+        per_trade = self.per_trade_leverage
+        if not per_trade:
+            ok, why = self.ensure_leverage(inst)
+            if not ok:
+                self.rec.intent_event(day, "entry", "failed", {"reason": why})
+                self.alert("entry blocked", f"account config is not {self.cfg.risk.leverage}x isolated and could not be set: {why}. No trade today.")
+                return False
         left = [o for o in self.ex.get_open_orders(inst.id) if o.is_active and (o.is_trigger or o.reduce_only)]
         if left:
             self.cancel_leftovers(inst, left)
@@ -1113,6 +1144,21 @@ class Engine:
             self.rec.intent_event(day, "entry", "blocked", {"reason": why, "equity": eq})
             self.alert("entry blocked", f"{why}; no new entry", dedupe_key=f"entry_blocked:{day}:{why}")
             return False
+        lev, fraction = int(self.cfg.risk.leverage), float(plan["enter_fraction"])
+        if per_trade:                                   # v1.9.0: the lowest leverage the position needs
+            lev, fraction, note = self.plan_trade_leverage(plan, inst, eq["equity"])
+            plan["trade_leverage"], plan["position_note"] = lev, note
+            if lev < 1:
+                self.rec.intent_event(day, "entry", "failed", {"reason": note})
+                self.alert("entry rejected", f"no position possible: {note}")
+                return False
+            ok, why = self.ensure_leverage(inst, lev)
+            if not ok:
+                self.rec.intent_event(day, "entry", "failed", {"reason": why})
+                self.alert("entry blocked", f"account config is not {lev}x isolated and could not be set: {why}. No trade.")
+                return False
+            if note:
+                self.rec.intent_event(day, "entry", "position_cut", {"note": note, "leverage": lev})
         n_prior = self.rec.live_trades_opened()
         risk_pct, ramp = risk_pct_for_trade(self.cfg.risk, n_prior)
         if n_prior == int(self.cfg.risk.ramp_trades) and int(self.cfg.risk.ramp_trades) > 0:
@@ -1143,10 +1189,10 @@ class Engine:
                     liq_buffer_pct=float(b.liq_buffer_pct), inst=inst,
                     mmr_divisor=float(self.cfg.risk.liq_estimate_mmr_divisor))
             else:
-                size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=float(plan["enter_fraction"]),
+                size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=fraction,
                                     price=ref, atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
                                     notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
-                                    leverage=int(self.cfg.risk.leverage), inst=inst,
+                                    leverage=lev, inst=inst,
                                     raise_to_min=bool(self.cfg.risk.raise_to_min_notional),
                                     notional_multiple=self.cfg.risk.notional_multiple_full_tier)
             if not size.ok:
@@ -1162,13 +1208,13 @@ class Engine:
                 validate_price(inst, limit)
                 validate_price(inst, sl_q)
                 validate_price(inst, tp_q)
-                validate_order(inst, qty=size.qty, price=float(limit), leverage=int(self.cfg.risk.leverage), market=False)
+                validate_order(inst, qty=size.qty, price=float(limit), leverage=lev, market=False)
             except Exception as e:  # noqa: BLE001
                 self.rec.intent_event(day, "entry", "failed", {"reason": str(e)})
                 self.alert("entry rejected", f"order violates instrument rules: {e}")
                 return False
             if not bold:
-                liq_est = estimate_liquidation(ref, d, int(self.cfg.risk.leverage), inst, size.notional,
+                liq_est = estimate_liquidation(ref, d, lev, inst, size.notional,
                                                float(self.cfg.risk.liq_estimate_mmr_divisor))
             if not bold and not liquidation_ok(ref, liq_est, size.sl_distance, float(self.cfg.risk.liq_min_sl_multiple)):
                 self.rec.intent_event(day, "entry", "failed", {"reason": "liquidation check (estimate)", "liq_est": liq_est})
@@ -1181,7 +1227,8 @@ class Engine:
             self.rec.set_state(position_state="pending_entry", note=f"entry attempt {attempt}")
             req = {"side": side, "quantity": _fmt_dec(size.qty), "tif": "fok", "price": _fmt_dec(limit), "tp": tp_s,
                    "sl": sl_s, "ref_price": ref, "decision_mark": plan.get("mark"), "size": size.to_dict(),
-                   "risk_pct_budget": risk_pct, "ramp": ramp, "equity": eq, "attempt": attempt, "liq_estimate": liq_est}
+                   "risk_pct_budget": risk_pct, "ramp": ramp, "equity": eq, "attempt": attempt, "liq_estimate": liq_est,
+                   "leverage": lev}
             self.log_order("entry", "request", coid, None, None, req)
             res = self.ex.place_order(instrument_id=inst.id, side=side, quantity=_fmt_dec(size.qty), tif="fok",
                                       price=_fmt_dec(limit), reduce_only=False, client_order_id=coid,
@@ -1308,13 +1355,18 @@ class Engine:
                         "decision_to_fill_s": trade["decision_to_fill_s"]})
         bold = bool(self.cfg.bold.enabled)
         mult = self.cfg.risk.notional_multiple_full_tier
+        t_lev, t_note = plan.get("trade_leverage"), plan.get("position_note")
         risk_txt = (f"BOLD all-in: {float(self.cfg.bold.max_loss_fraction) * 100:.0f}% of equity at the SL, "
                     f"x{float(self.cfg.bold.target_multiple):g} at the TP" if bold else
                     f"risk {trade['initial_risk_usd']:.2f} ({size.risk_pct_used:.3f}% equity)"
-                    f"{f', position x{size.effective_leverage:.2f} equity' if mult else ''}{' [ramp]' if ramp and not mult else ''}")
+                    f"{f', position x{size.effective_leverage:.2f} equity' if mult else ''}"
+                    f"{f' at {t_lev}x' if t_lev else ''}{f' ({t_note})' if t_note else ''}"
+                    f"{' [ramp]' if ramp and not mult else ''}")
         self.alert("open", f"{'LONG' if d > 0 else 'SHORT'} {qty} {inst.symbol} @ {entry_price:.2f} | SL {sl_s} TP {tp_s} | "
                    f"{risk_txt} | score {plan.get('score')}")
         liq_mult = float(self.cfg.risk.liq_min_sl_multiple)
+        if self.per_trade_leverage and self.cfg.risk.liq_after_fill_sl_multiple is not None:
+            liq_mult = float(self.cfg.risk.liq_after_fill_sl_multiple)    # v1.9.0: the plan used liq_min_sl_multiple
         if bold and sl_dist > 0:      # v1.7.0: the exchange's liquidation must lie beyond the SL by liq_buffer_pct
             liq_mult = (sl_dist + entry_price * float(self.cfg.bold.liq_buffer_pct) / 100.0) / sl_dist
         if pos is not None and not liquidation_ok(entry_price, pos.liquidation_price, sl_dist, liq_mult,
@@ -1333,17 +1385,22 @@ class Engine:
         now_ms = to_ms(self.now())
         inst = self.instrument()
         day_d = per[2]
+        h1: list[Candle] = []
         if self.rolling:
             # daily candles ending at T are built from 4h candles: 1,000 days plus the 3-day-rule history
             days = int(cfg.binance.daily_candles_to_load) + int(cfg.strategy.opposite_days_rule) + 2
-            h4 = self.bn.klines_range("4h", per[0] - days * DAY_MS, now_ms)
+            if base_bar_ms(str(cfg.strategy.cadence)) == HOUR_MS:     # v1.9.0 rolling_1h: from 1h candles (~25 pages)
+                h1 = self.bn.klines_range("1h", per[0] - days * DAY_MS, now_ms)
+                h4 = self.bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
+            else:
+                h4 = self.bn.klines_range("4h", per[0] - days * DAY_MS, now_ms)
             daily: list[Candle] = []
         else:
             daily = self.bn.klines("1d", int(cfg.binance.daily_candles_to_load), now_ms)
             h4 = self.bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
         fstart = day_start_ms(day_d) - int(cfg.binance.funding_days_to_load) * DAY_MS
         funding = self.bn.funding(fstart, now_ms)
-        self.store_binance(daily, h4, funding)
+        self.store_binance(daily, h4, funding, h1)
         ticker = self.ex.get_ticker(inst.id)
         book = self.ex.get_book(inst.id, int(cfg.polymarket.book_depth))
         ok, dev = mark_vs_book(ticker.mark, book, inst.price_bounds)
@@ -1360,15 +1417,19 @@ class Engine:
             geo = {k: raw_geo.get(k) for k in ("blocked", "country", "region")}
         except ExchangeError as e:
             geo = {"error": str(e)}
-        return {"daily": daily, "h4": h4, "funding": funding, "ticker": ticker, "book": book, "pm_funding": pm_funding,
-                "geoblock": geo}
+        return {"daily": daily, "h4": h4, "h1": h1, "funding": funding, "ticker": ticker, "book": book,
+                "pm_funding": pm_funding, "geoblock": geo}
 
-    def store_binance(self, daily: list[Candle], h4: list[Candle], funding: list[tuple[int, float, float]]) -> None:
+    def store_binance(self, daily: list[Candle], h4: list[Candle], funding: list[tuple[int, float, float]],
+                      h1: Sequence[Candle] = ()) -> None:
         self.store.insert_many_ignore("bn_klines_1d", ({"open_ms": c.open_ms, "open": c.open, "high": c.high, "low": c.low,
                                                         "close": c.close, "volume": c.volume} for c in daily))
         self.store.insert_many_ignore("bn_klines_4h", ({"open_ms": c.open_ms, "open": c.open, "high": c.high, "low": c.low,
                                                         "close": c.close, "volume": c.volume} for c in h4))
         self.store.insert_many_ignore("bn_funding", ({"fund_ts_ms": ts, "rate": r, "mark": m} for ts, r, m in funding))
+        if h1:
+            self.store.insert_many_ignore("bn_klines_1h", ({"open_ms": c.open_ms, "open": c.open, "high": c.high,
+                                                            "low": c.low, "close": c.close, "volume": c.volume} for c in h1))
 
     def decision_blocks(self, day_d: Any) -> list[str]:
         """Reasons that block NEW positions today but still allow closes (review v1.2.0 items 9 and 15)."""
@@ -1403,7 +1464,7 @@ class Engine:
 
     def next_decision_hkt(self, per: tuple[int, str, date]) -> str:
         if self.rolling:
-            return fmt_hkt(from_ms(per[0] + H4_MS + int(self.cfg.schedule.period_entry_start_minutes) * MINUTE_MS))[:16]
+            return fmt_hkt(from_ms(per[0] + self.period_ms + int(self.cfg.schedule.period_entry_start_minutes) * MINUTE_MS))[:16]
         return fmt_hkt(hkt_at(per[2] + timedelta(days=1), self.cfg.schedule.entry_window_start_hkt))[:16]
 
     def make_decision(self, per: tuple[int, str, date], inputs: dict[str, Any], rr: ReconcileResult, *,
@@ -1420,7 +1481,8 @@ class Engine:
                     "window_end_utc": fmt_utc(en), "note": e.note} for e, st, en in active]
         funding = [(ts, r) for ts, r, _ in inputs["funding"]]
         if self.rolling:
-            f = live_rolling_features(cfg, t_ms, inputs["h4"], funding, ev_list)
+            f = live_rolling_features(cfg, t_ms, inputs["h4"], funding, ev_list, cadence=str(cfg.strategy.cadence),
+                                      base=inputs.get("h1"))
         else:
             f = day_features(cfg, day_d, inputs["daily"], inputs["h4"], funding, ev_list)
         sc, fstat, dirs = f.score, f.funding, f.directions
@@ -1444,7 +1506,9 @@ class Engine:
         if bool(cfg.bold.enabled) and bool(cfg.bold.hold_until_tp_sl):
             hold_for_bold(plan, pos_dir)                 # v1.7.0: an open bet ends only at its TP or SL
         if self.rolling:
-            used = shifted_daily(sorted(inputs["h4"], key=lambda c: c.open_ms), t_ms, 3)
+            bar = base_bar_ms(str(cfg.strategy.cadence))
+            src = inputs.get("h1") if bar == HOUR_MS else inputs["h4"]
+            used = shifted_daily(sorted(src or [], key=lambda c: c.open_ms), t_ms, 3, bar_ms=bar)
         else:
             used = [c for c in inputs["daily"] if c.open_ms <= sc.candle_open_ms]
         g_regime, g_h4, g_fund, g_event = f.g_regime, f.g_h4, f.g_funding, f.g_event
@@ -1460,6 +1524,14 @@ class Engine:
             "funding_percentile": fstat.percentile, "event_active": g_event.triggered, "late": late,
             "entry_blocks": blocks, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t_ms)),
         })
+        if self.per_trade_leverage and plan.enter_direction:     # v1.9.0: shown in the analysis; re-planned at entry
+            try:
+                lev, frac, note = self.plan_trade_leverage(plan_d, self.instrument(),
+                                                           float((rr.equity or {}).get("equity") or 0.0))
+                plan_d["sizing"] = {"multiple": frac * float(cfg.risk.notional_multiple_full_tier), "leverage": lev,
+                                    "note": note}
+            except Exception:  # noqa: BLE001 - display only
+                log.warning("sizing preview failed", exc_info=True)
         spread = book.best_ask - book.best_bid if (book.bids and book.asks) else None
         decision = {
             "utc_day": day, "decision_hkt": fmt_hkt(now), "decision_utc": fmt_utc(now),
@@ -1467,7 +1539,7 @@ class Engine:
             "inputs": {
                 "daily_candles_used": [[c.open_ms, c.open, c.high, c.low, c.close] for c in used],
                 "daily_candles_count": sc.candles_used, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t_ms)),
-                "h4_candles_fetched": len(inputs["h4"]),
+                "h4_candles_fetched": len(inputs["h4"]), "h1_candles_fetched": len(inputs.get("h1") or []),
                 "C": sc.close, "H": sc.high, "L": sc.low, "prev_H": sc.prev_high, "prev_L": sc.prev_low,
                 "ema50": sc.ema_trend, "ema200": sc.ema_regime, "atr14": sc.atr, "clv": sc.clv,
                 "h4_ema20": e_fast, "h4_ema50": e_slow, "h4_candle_open_ms": h4_open,
@@ -1494,7 +1566,8 @@ class Engine:
             ramp = self.rec.live_trades_opened() < int(cfg.risk.ramp_trades)
             decision["analysis"] = analysis.render(decision, cfg, equity=(rr.equity or {}).get("equity"), ramp=ramp,
                                                    next_hkt=self.next_decision_hkt(per), position=trade)
-            if bool(cfg.notifications.analysis_toast) and not late:
+            quiet = bool(cfg.notifications.analysis_toast_only_actions) and plan.action in ("hold", "none", "paused")
+            if bool(cfg.notifications.analysis_toast) and not late and not quiet:   # v1.9.0: hourly = quiet holds
                 self.notify("分析", analysis.short_line(decision))
         except Exception:  # noqa: BLE001 - the analysis text must never stop a decision
             log.warning("analysis text failed", exc_info=True)

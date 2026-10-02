@@ -35,7 +35,7 @@ other copy of the folder.
 
 | Command | What it does |
 |---|---|
-| `decide` | Every 4 h (rolling_4h, default): HH:30 / HH:50 HKT after each UTC 4h close, one entry per 4h period, entry window HH:30-HH+1:30. Daily cadence: 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
+| `decide` | Every hour (rolling_1h, v1.9.0): HH:30 / HH:50 HKT, one entry per hour, entry window HH:30-HH+1:00 (rolling_4h: after each UTC 4h close, window HH:30-HH+1:30). Daily cadence: 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
 | `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. If no decision was made in today's window and a position is open, runs the late close-only decision. Never opens. |
 | `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Reports printed and saved in `data/reports/`; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
 | `alerts` | Print every unread alert once (`PING OWNER ...`) and mark it read (same list as the dashboard). |
@@ -116,9 +116,10 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 
 ## Strategy (all numbers in `config/config.yaml`)
 
-- Cadence (`strategy.cadence`): `rolling_4h` (v1.5.0 default, the owner's option B) decides every 4 hours on daily
-  candles that END at the decision time (built from Binance 4h candles), one entry per 4h period, 3-day rule =
-  18 periods; `daily` decides once a day on candles closed at 00:00 UTC. Everything below applies to both.
+- Cadence (`strategy.cadence`): `rolling_1h` (v1.9.0, owner) decides every hour on daily candles that END at the
+  decision time (built from Binance 1h candles; the h4 gate uses the last closed 4h candle), one entry per hour,
+  3-day rule = 72 periods; `rolling_4h` (v1.5.0 - v1.8.1) the same every 4 hours from 4h candles (18 periods);
+  `daily` once a day on candles closed at 00:00 UTC. Everything below applies to all three.
 
 - Score = Trend (50 x clip((C - EMA50) / (2 x ATR14), -1, 1)) + Structure (+/-25 breakout of previous
   day high/low, + 25 x CLV; CLV = 0 if H = L), from closed UTC 00:00 daily candles (Binance BTCUSDT).
@@ -142,10 +143,12 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
   price, and closed after the fill if the exchange's liquidation price is not. While a bet is open, flips, the
   3-day rule and the funding / flat rules are ignored: it ends only at its TP or SL. Kill switches 95%, floors 5%,
   live review line off: the bot keeps betting until the owner pauses it. The rules below apply when bold mode is off.
-- **Position by score (v1.8.0, owner):** no new position below |score| 20; position = equity x 10
-  (`risk.notional_multiple_full_tier`) x the tier fraction: 20-40 -> 0.15 (x1.5), 40-70 -> 0.50 (x5), above 70 -> 1.00
-  (x10), capped at 0.50 by a gate against the trade. 12x isolated; the liquidation must be >= 1.5 x the stop away
-  (entries stop when ATR is above ~3.3% of the price). A position is never added to.
+- **Position by score (v1.8.0 / v1.9.0, owner):** no new position below |score| 20; position = equity x 20
+  (`risk.notional_multiple_full_tier`) x the `strategy.size_tiers` fraction: 20-40 -> 0.15 (x3), 40-50 -> 0.30 (x6),
+  50-75 -> 0.50 (x10), 75 and above -> 1.00 (x20), capped at 0.50 (x10) by a gate against the trade. Each trade uses
+  the lowest isolated leverage whose margin fits in 92% of equity (x3 4x, x6 7x, x10 11x, x20 22x; at most 25x);
+  if the liquidation estimate at that leverage is not 1.3 x the stop away, the position is cut until it is
+  (volatility cap); after the fill the exchange's liquidation price must be 1.15 x the stop away. Never added to.
 - Risk (v1.5.8, owner; used when `notional_multiple_full_tier` is null): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
   minimum is raised to it if that risk stays within the 100%-tier budget; leverage 10x isolated (v1.5.9)
   (checked/set before every entry; failure = no trade), notional <= 150% of equity,

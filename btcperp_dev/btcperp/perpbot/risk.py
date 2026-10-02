@@ -120,6 +120,31 @@ def compute_size(*, equity: float, risk_pct: float, fraction: float, price: floa
     return res
 
 
+def trade_leverage(*, multiple: float, sl_pct: float, max_leverage: int, margin_use_pct: float, liq_multiple: float,
+                   inst: Instrument, notional: float, mmr_divisor: float) -> tuple[int, float, str | None]:
+    """v1.9.0 (owner: positions up to 20 x equity): the isolated leverage for ONE trade of `multiple` x equity. The
+    profit and loss do not depend on it; it only sets the margin (multiple / leverage of equity) and the liquidation
+    distance (1 / leverage - maintenance margin). Take the LOWEST leverage whose margin fits in margin_use_pct of
+    equity, so the liquidation lies as far away as possible. If even that leverage puts the liquidation estimate
+    closer than liq_multiple x the stop distance (sl_pct of the price), the position is cut to the largest multiple
+    that keeps it far enough (volatility cap). Returns (leverage, multiple, note); leverage 0 = no position."""
+    tier_max = max_leverage_for_notional(inst, notional)
+    mmr = 1.0 / (mmr_divisor * tier_max)
+    lev_cap = min(int(max_leverage), int(inst.max_leverage), tier_max)
+    lev_liq = int(math.floor(1.0 / (liq_multiple * sl_pct + mmr))) if sl_pct > 0 else lev_cap
+    lev_max = min(lev_cap, lev_liq)
+    use = float(margin_use_pct) / 100.0
+    need = max(1, math.ceil(float(multiple) / use - 1e-9))
+    if need <= lev_max:
+        return need, float(multiple), None
+    if lev_max < 1:
+        return 0, 0.0, f"stop {sl_pct * 100:.1f}% away: no leverage keeps the liquidation {liq_multiple:g} x beyond it"
+    cut = lev_max * use
+    why = (f"volatility: the stop is {sl_pct * 100:.1f}% away, so at most {lev_max}x keeps the liquidation "
+           f"{liq_multiple:g} x beyond it" if lev_liq < lev_cap else f"leverage limit {lev_max}x")
+    return lev_max, cut, f"position cut from x{float(multiple):g} to x{cut:.1f} equity ({why})"
+
+
 def bold_plan(*, equity: float, price: float, direction: int, notional_multiple: float, leverage: int,
               target_multiple: float, max_loss_fraction: float, fee_rate: float, liq_buffer_pct: float,
               inst: Instrument, mmr_divisor: float) -> tuple[SizeResult, float, float, float]:

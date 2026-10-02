@@ -297,11 +297,12 @@ class Reporter:
                                 [start_d.isoformat(), end_d.isoformat()])
         on_time = {r["utc_day"] for r in rows if isinstance(r["data"], dict) and not (r["data"].get("plan") or {}).get("late")}
         limit = int(self.cfg.reports.max_missed_decision_days)
-        if str(self.cfg.strategy.cadence) == "rolling_4h":
-            keys = [f"{d.isoformat()}T{h:02d}:00" for d in days for h in range(0, 24, 4)]
+        step = {"rolling_4h": 4, "rolling_1h": 1}.get(str(self.cfg.strategy.cadence))
+        if step:                                        # v1.9.0: rolling_1h counts hours, limit x 24
+            keys = [f"{d.isoformat()}T{h:02d}:00" for d in days for h in range(0, 24, step)]
             missed = [k for k in keys if k not in on_time]
-            incomplete = len(missed) > limit * 6
-            what = f"{len(missed)} four-hour periods"
+            incomplete = len(missed) > limit * (24 // step)
+            what = f"{len(missed)} {'four-hour' if step == 4 else 'one-hour'} periods"
         else:
             missed = [d.isoformat() for d in days if d.isoformat() not in on_time]
             incomplete = len(missed) > limit

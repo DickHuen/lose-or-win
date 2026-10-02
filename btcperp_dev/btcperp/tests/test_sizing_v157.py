@@ -79,7 +79,8 @@ def test_10x_liquidation_guard(atr, ok):
     """v1.5.9, 10x isolated on BTC-USD (max 50x): the liquidation estimate sits ~9% away (1/10 - 0.5/50). The entry
     needs it at least 2 x the stop (1.5 ATR) away, so in high volatility (stop above ~4.5%) the entry is refused.
     (v1.7.0 ships 20x for bold mode, which checks its own liquidation buffer: test_bold_v170.py.)"""
-    cfg = config_from_dict(dict(shipped_config(), risk=dict(shipped_config()["risk"], leverage=10, liq_min_sl_multiple=2.0)))
+    cfg = config_from_dict(dict(shipped_config(), risk=dict(shipped_config()["risk"], leverage=10, liq_min_sl_multiple=2.0,
+                                                             notional_multiple_full_tier=None)))
     s = _size(cfg, 100.0, 1.0)
     liq = estimate_liquidation(PRICE, 1, int(cfg.risk.leverage), _inst(), s.notional,
                                float(cfg.risk.liq_estimate_mmr_divisor))

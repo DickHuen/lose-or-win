@@ -105,8 +105,9 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("strategy.flip_min_abs_score", _NUM, None),
     ("strategy.opposite_days_rule", int, lambda v: v >= 1),
     ("strategy.tighten_sl_on_same_direction", bool, None),
-    ("strategy.cadence", str, lambda v: v in ("daily", "rolling_4h")),
+    ("strategy.cadence", str, lambda v: v in ("daily", "rolling_4h", "rolling_1h")),
     ("notifications.analysis_toast", bool, None),
+    ("notifications.analysis_toast_only_actions", bool, None),
     ("strategy.flip_confirm_periods", int, lambda v: 1 <= v <= 6),
     ("schedule.period_entry_start_minutes", int, lambda v: 0 <= v < 240),
     ("schedule.period_entry_end_minutes", int, lambda v: 0 < v <= 240),
@@ -132,11 +133,12 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("risk.risk_per_trade_pct", _NUM, lambda v: 0 < v <= 5),
     ("risk.ramp_trades", int, lambda v: v >= 0),
     ("risk.ramp_factor", _NUM, lambda v: 0 < v <= 1),
-    ("risk.leverage", int, lambda v: 1 <= v <= 20),
+    ("risk.leverage", int, lambda v: 1 <= v <= 50),        # v1.9.0: the per-trade maximum when sizing by position
     ("risk.cross_margin", bool, None),
     ("risk.notional_cap_pct_equity", _NUM, lambda v: 0 < v <= 300),
     ("risk.raise_to_min_notional", bool, None),
     ("risk.liq_min_sl_multiple", _NUM, lambda v: v >= 1),
+    ("risk.max_margin_use_pct", _NUM, lambda v: 10 <= v <= 95),
     ("risk.liq_estimate_mmr_divisor", _NUM, lambda v: v > 0),
     ("risk.kill_drawdown_pct", _NUM, lambda v: 0 < v < 100),
     ("risk.kill_losing_streak_pct", _NUM, lambda v: 0 < v < 100),
@@ -242,6 +244,24 @@ def validate(data: dict[str, Any]) -> None:
         errors.append("missing config key: risk.permanent_floor_lowered_in")
     elif pl is not None and not isinstance(pl, str):
         errors.append("config key risk.permanent_floor_lowered_in: must be null or a config_version string")
+    la = (data.get("risk") or {}).get("liq_after_fill_sl_multiple", "missing")
+    if la == "missing":
+        errors.append("missing config key: risk.liq_after_fill_sl_multiple")
+    elif la is not None and (isinstance(la, bool) or not isinstance(la, (int, float)) or la < 1):
+        errors.append("config key risk.liq_after_fill_sl_multiple: must be null or a number >= 1")
+    st = (data.get("strategy") or {}).get("size_tiers", "missing")
+    if st == "missing":
+        errors.append("missing config key: strategy.size_tiers")
+    elif st is not None:
+        ok = isinstance(st, list) and len(st) >= 1 and all(
+            isinstance(r, list) and len(r) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in r)
+            for r in st)
+        if ok:
+            ok = (st[0][0] == 0 and all(0 < r[1] <= 1 for r in st)
+                  and all(a[0] < b[0] and a[1] <= b[1] for a, b in zip(st, st[1:])))
+        if not ok:
+            errors.append("config key strategy.size_tiers: null or [[0, f], [score, f], ...] with ascending scores "
+                          "from 0 and non-decreasing fractions in (0, 1]")
     nm = (data.get("risk") or {}).get("notional_multiple_full_tier", "missing")
     if nm == "missing":
         errors.append("missing config key: risk.notional_multiple_full_tier")
@@ -249,8 +269,12 @@ def validate(data: dict[str, Any]) -> None:
         lev = (data.get("risk") or {}).get("leverage")
         if isinstance(nm, bool) or not isinstance(nm, (int, float)) or nm <= 0:
             errors.append("config key risk.notional_multiple_full_tier: must be null or a positive number")
-        elif isinstance(lev, int) and nm > lev:
-            errors.append(f"config key risk.notional_multiple_full_tier: {nm} needs more than risk.leverage {lev}")
+        else:
+            mu = (data.get("risk") or {}).get("max_margin_use_pct")
+            room = lev * float(mu) / 100.0 if isinstance(lev, int) and isinstance(mu, (int, float)) else None
+            if room is not None and nm > room:
+                errors.append(f"config key risk.notional_multiple_full_tier: {nm} needs more than risk.leverage {lev} "
+                              f"with margin up to risk.max_margin_use_pct {mu}% of equity")
     lr = (data.get("risk") or {}).get("live_review_expectancy_floor_r", "missing")
     if lr == "missing":
         errors.append("missing config key: risk.live_review_expectancy_floor_r")
@@ -268,16 +292,21 @@ def validate(data: dict[str, Any]) -> None:
         sc = data["schedule"]
         if not sc["period_entry_start_minutes"] < sc["period_entry_end_minutes"]:
             errors.append("schedule.period_entry_start_minutes must be < schedule.period_entry_end_minutes")
-        if s["cadence"] == "rolling_4h":
+        step = {"rolling_4h": 4, "rolling_1h": 1}.get(s["cadence"])
+        if step:
+            if sc["period_entry_end_minutes"] > step * 60:
+                errors.append(f"schedule.period_entry_end_minutes must be <= {step * 60} (the {s['cadence']} period): "
+                              f"entry windows of consecutive periods may not overlap")
             mins = []
             for x in sc["decide_times_hkt"]:
                 hh, mm = str(x).split(":")
                 mins.append((int(hh) * 60 + int(mm) - 8 * 60) % 1440)      # minutes after 00:00 UTC
-            for h in range(0, 24, 4):
+            for h in range(0, 24, step):
                 lo, hi = h * 60 + sc["period_entry_start_minutes"], h * 60 + sc["period_entry_end_minutes"]
                 if not any(lo <= m <= hi for m in mins):
                     errors.append(f"schedule.decide_times_hkt: no decide time in the entry window of the "
-                                  f"{h:02d}:00 UTC period (strategy.cadence rolling_4h decides every 4 hours)")
+                                  f"{h:02d}:00 UTC period (strategy.cadence {s['cadence']} decides every {step} hour"
+                                  f"{'s' if step > 1 else ''})")
                     break
     except (KeyError, TypeError):
         pass

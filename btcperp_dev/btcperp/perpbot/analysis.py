@@ -60,7 +60,11 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
     inp = decision.get("inputs") or {}
     gates = decision.get("gates") or {}
     plan = decision.get("plan") or {}
-    rolling = plan.get("cadence") == "rolling_4h" or inp.get("cadence") == "rolling_4h"
+    bold = getattr(cfg, "bold", None)
+    bold = bold if bold is not None and bool(bold.enabled) else None
+    cadence = str(plan.get("cadence") or inp.get("cadence") or "daily")
+    hours = {"rolling_4h": 4, "rolling_2h": 2, "rolling_1h": 1}.get(cadence)
+    rolling = hours is not None
     period = str(plan.get("period_utc") or inp.get("period_utc") or decision.get("utc_day") or "")
     if period.endswith("Z"):                                  # 2026-10-05T04:00:00Z -> 2026-10-05 04:00
         period = period[:16].replace("T", " ")
@@ -68,11 +72,13 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
     atr = sc.get("atr")
     close = sc.get("close")
     out = [f"【{title}】{decision.get('decision_hkt', '')}｜時段 {period} UTC"
-           f"（{'每 4 小時' if rolling else '每日'}）"]
+           f"（{f'每 {hours} 小時' if rolling else '每日'}）"]
     out.append(f"價格：Polymarket 標記價 {_p(mark)}" + (f"｜日線收市 {_p(close)}" if close is not None else ""))
     score = float(sc.get("score") or 0.0)
     tier = float(sc.get("tier_fraction") or 0.0)
-    out.append(f"分數 {score:+.1f} → {_dir(sc.get('direction'))}，注碼級別 {tier * 100:.0f}%")
+    full = getattr(cfg.risk, "notional_multiple_full_tier", None) if bold is None else None
+    out.append(f"分數 {score:+.1f} → {_dir(sc.get('direction'))}，"
+               + (f"倉位級別 本金 ×{tier * float(full):g}" if full else f"注碼級別 {tier * 100:.0f}%"))
     ema50, ema200 = sc.get("ema_trend"), sc.get("ema_regime")
     if ema50 is not None and atr:
         gap = (float(close) - float(ema50)) / float(atr)
@@ -126,8 +132,6 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
         line += f"（原因：{CLOSE_ZH.get(plan['close_reason'], plan['close_reason'])}）"
     out.append(line)
     enter = int(plan.get("enter_direction") or 0)
-    bold = getattr(cfg, "bold", None)
-    bold = bold if bold is not None and bool(bold.enabled) else None
     if enter and mark and bold is not None:
         # v1.7.0 bold mode: the same numbers as risk.bold_plan, before rounding to the instrument's steps
         mult = float(bold.notional_multiple)
@@ -155,12 +159,17 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
                    f"｜止賺約 {_p(tp)}（{(tp - m) / m * 100:+.1f}%）")
         mult = getattr(cfg.risk, "notional_multiple_full_tier", None)
         if mult:            # v1.8.0: position = equity x multiple x tier; the loss follows from the stop distance
-            pos_x = float(mult) * float(plan.get("enter_fraction") or 0.0)
-            line = (f"  注碼：倉位 = 本金 ×{pos_x:g}（{int(cfg.risk.leverage)} 倍逐倉）；中止損約蝕本金 "
+            sizing = plan.get("sizing") or {}       # v1.9.0: the per-trade leverage (and a volatility cut)
+            pos_x = float(sizing.get("multiple") or float(mult) * float(plan.get("enter_fraction") or 0.0))
+            lev = int(sizing.get("leverage") or cfg.risk.leverage)
+            line = (f"  注碼：倉位 = 本金 ×{pos_x:.3g}（{lev} 倍逐倉）；中止損約蝕本金 "
                     f"{pos_x * abs(sl - m) / m * 100:.0f}%，中止賺約賺 {pos_x * abs(tp - m) / m * 100:.0f}%")
             if equity:
                 line += f"（倉位約 ${float(equity) * pos_x:,.0f}）"
             out.append(line)
+            if sizing.get("note"):
+                out.append(f"  備註：波動大，倉位由 ×{float(mult) * float(plan.get('enter_fraction') or 0):g} "
+                           f"減到 ×{pos_x:.3g}，等爆倉價離止損夠遠")
         else:
             risk_line = f"  注碼：打中止損最多蝕權益 {risk_pct:.2f}%"
             if equity:

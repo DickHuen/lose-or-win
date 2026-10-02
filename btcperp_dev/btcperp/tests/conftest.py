@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import re
 import shutil
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -47,6 +48,19 @@ DAILY_DECIDE = ["08:30", "08:50"]
 DAILY_MANAGE = ["12:30", "16:30", "20:30", "00:30", "04:30"]
 
 
+R4H_DECIDE = ["00:30", "00:50", "04:30", "04:50", "08:30", "08:50", "12:30", "12:50", "16:30", "16:50", "20:30", "20:50"]
+R4H_MANAGE = ["02:30", "06:30", "10:30", "14:30", "18:30", "22:30"]
+
+
+def as_rolling_4h(d: dict[str, Any]) -> dict[str, Any]:
+    """The v1.5 - v1.8 rolling_4h cadence (test_rolling.py). v1.9.0 ships rolling_1h (test_hourly_v190.py)."""
+    d["strategy"]["cadence"] = "rolling_4h"
+    d["schedule"]["decide_times_hkt"] = list(R4H_DECIDE)
+    d["schedule"]["manage_times_hkt"] = list(R4H_MANAGE)
+    d["schedule"]["period_entry_end_minutes"] = 90
+    return d
+
+
 def as_daily(d: dict[str, Any]) -> dict[str, Any]:
     """The v1.4 daily cadence. Most tests exercise the daily rules; the rolling_4h tests (test_rolling.py) use
     the shipped config (strategy.cadence rolling_4h) through `rolling_cfg_dict`."""
@@ -64,9 +78,9 @@ TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "
              "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3,
              "equity_floor_pct_of_net_funded": 75, "permanent_floor_pct_of_cumulative_funded": 50,
              "permanent_floor_lowered_in": None, "live_review_expectancy_floor_r": -0.196,
-             "notional_multiple_full_tier": None, "liq_min_sl_multiple": 2.0}
+             "notional_multiple_full_tier": None, "liq_min_sl_multiple": 2.0, "liq_after_fill_sl_multiple": None}
 TEST_STRATEGY = {"min_entry_abs_score": 0, "tier_low_max": 30, "tier_mid_max": 50, "tier_low_fraction": 0.25,
-                 "tier_mid_fraction": 0.50, "tier_high_fraction": 1.00}
+                 "tier_mid_fraction": 0.50, "tier_high_fraction": 1.00, "size_tiers": None}
 TEST_BOLD = {"enabled": False}
 TEST_EXITS = {"sl_atr_multiple": 1.5, "tp_atr_multiple": 3.0}         # v1.8.1 ships 1.0 / 1.5
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
@@ -74,16 +88,19 @@ TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ra
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
                   ("kill_drawdown_pct: 95 ", "kill_drawdown_pct: 15 "),
                   ("kill_losing_streak_pct: 95 ", "kill_losing_streak_pct: 8 "),
-                  ("  leverage: 12 ", "  leverage: 3 "),
-                  ("liq_min_sl_multiple: 1.5 ", "liq_min_sl_multiple: 2.0 "),
+                  ("  leverage: 25\n", "  leverage: 3\n"),
+                  ("liq_min_sl_multiple: 1.3 ", "liq_min_sl_multiple: 2.0 "),
+                  ("liq_after_fill_sl_multiple: 1.15 ", "liq_after_fill_sl_multiple: null "),
+                  ("size_tiers: [[0, 0.15], [40, 0.30], [50, 0.50], [75, 1.00]]", "size_tiers: null"),
                   ("equity_floor_pct_of_net_funded: 5 ", "equity_floor_pct_of_net_funded: 75 "),
                   ("permanent_floor_pct_of_cumulative_funded: 5 ", "permanent_floor_pct_of_cumulative_funded: 50 "),
-                  ('permanent_floor_lowered_in: "1.8.1"', "permanent_floor_lowered_in: null"),
+                  ('permanent_floor_lowered_in: "1.9.0"', "permanent_floor_lowered_in: null"),
                   ("sl_atr_multiple: 1.0", "sl_atr_multiple: 1.5"), ("tp_atr_multiple: 1.5", "tp_atr_multiple: 3.0"),
-                  ("notional_multiple_full_tier: 10", "notional_multiple_full_tier: null"),
+                  ("notional_multiple_full_tier: 20", "notional_multiple_full_tier: null"),
                   ("live_review_expectancy_floor_r: null", "live_review_expectancy_floor_r: -0.196"),
                   ("min_entry_abs_score: 20", "min_entry_abs_score: 0"), ("tier_low_max: 40", "tier_low_max: 30"),
-                  ("tier_mid_max: 70", "tier_mid_max: 50"), ("tier_low_fraction: 0.15", "tier_low_fraction: 0.25"))
+                  ("tier_mid_max: 70", "tier_mid_max: 50"), ("tier_low_fraction: 0.15", "tier_low_fraction: 0.25"),
+                  ("analysis_toast_only_actions: true ", "analysis_toast_only_actions: false "))
 
 
 def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +108,7 @@ def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
     d["strategy"].update(TEST_STRATEGY)
     d["bold"].update(TEST_BOLD)
     d["exits"].update(TEST_EXITS)
+    d["notifications"]["analysis_toast_only_actions"] = False       # v1.9.0 ships true
     return d
 
 
@@ -107,6 +125,11 @@ def cfg_dict() -> dict[str, Any]:
 
 @pytest.fixture
 def rolling_cfg_dict() -> dict[str, Any]:
+    return with_test_risk(as_rolling_4h(shipped_config()))
+
+
+@pytest.fixture
+def hourly_cfg_dict() -> dict[str, Any]:
     return with_test_risk(shipped_config())
 
 
@@ -123,6 +146,8 @@ class FakeBinance:
         self.h4: dict[int, Candle] = {}
         self.fund: dict[int, float] = {}
         start = end_day - timedelta(days=days)
+        self._span = (start, end_day + timedelta(days=30))
+        self._h1: dict[int, Candle] | None = None             # v1.9.0 rolling_1h: built on first use
         d = start
         while d <= end_day + timedelta(days=30):
             o = day_start_ms(d)
@@ -160,13 +185,38 @@ class FakeBinance:
     def set_funding(self, decision_day: date, rate: float) -> None:
         self.fund[day_start_ms(decision_day)] = rate
 
+    @property
+    def h1(self) -> dict[int, Candle]:
+        """1h candles, flat at P with the daily range (+/- A), so daily candles built from them match `daily`."""
+        if self._h1 is None:
+            self._h1 = {}
+            d, end = self._span
+            while d <= end:
+                o = day_start_ms(d)
+                for h in range(24):
+                    ho = o + h * 3_600_000
+                    self._h1[ho] = Candle(ho, P, P + A, P - A, P, 1.0, ho + 3_600_000)
+                d += timedelta(days=1)
+        return self._h1
+
+    def signal_1h(self, t_ms: int, kind: str) -> None:
+        """rolling_1h: shape the 1h candle that closes at t_ms, so the daily candle ending at t_ms gives the signal."""
+        o = t_ms - 3_600_000
+        shapes = {"strong_long": (P, P + 3 * A, P - A / 3, P + 3 * A), "strong_short": (P, P + A / 3, P - 3 * A, P - 3 * A),
+                  "weak_long": (P, P + A, P - A, P + 0.4 * A), "flat": (P, P + A, P - A, P)}
+        op, hi, lo, cl = shapes[kind]
+        self.h1[o] = Candle(o, op, hi, lo, cl, 1.0, t_ms)
+
+    def _src(self, interval: str) -> dict[int, Candle]:
+        return {"1d": self.daily, "1h": self.h1}.get(interval, self.h4)
+
     # BinanceData interface ---------------------------------------------------
     def klines(self, interval: str, limit: int, now_ms: int) -> list[Candle]:
         if self.fail:
             from perpbot.datasources.binance import DataSourceError
 
             raise DataSourceError("binance down (test)")
-        src = self.daily if interval == "1d" else self.h4
+        src = self._src(interval)
         closed = [c for k, c in sorted(src.items()) if c.close_ms <= now_ms]
         return closed[-limit:]
 
@@ -175,7 +225,7 @@ class FakeBinance:
             from perpbot.datasources.binance import DataSourceError
 
             raise DataSourceError("binance down (test)")
-        src = self.daily if interval == "1d" else self.h4
+        src = self._src(interval)
         return [c for k, c in sorted(src.items()) if start_ms <= c.open_ms and c.close_ms <= end_ms]
 
     def signal_4h(self, t_ms: int, kind: str) -> None:
@@ -285,11 +335,11 @@ def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "btcperp"
     (root / "config").mkdir(parents=True)
     text = (ROOT / "config" / "config.yaml").read_text(encoding="utf-8")
-    for a, b in (('cadence: "rolling_4h"', 'cadence: "daily"'),
-                 ('decide_times_hkt: ["00:30", "00:50", "04:30", "04:50", "08:30", "08:50", "12:30", "12:50", "16:30", '
-                  '"16:50",\n                     "20:30", "20:50"]', 'decide_times_hkt: ["08:30", "08:50"]'),
-                 ('manage_times_hkt: ["02:30", "06:30", "10:30", "14:30", "18:30", "22:30"]',
-                  'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]')) + TEST_RISK_YAML:
+    text, n1 = re.subn(r'decide_times_hkt: \[[^\]]*\]', 'decide_times_hkt: ["08:30", "08:50"]', text)
+    text, n2 = re.subn(r'manage_times_hkt: \[[^\]]*\]', 'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]',
+                       text)
+    assert n1 == 1 and n2 == 1
+    for a, b in (('cadence: "rolling_1h"', 'cadence: "daily"'),) + TEST_RISK_YAML:
         assert a in text, a
         text = text.replace(a, b)
     (root / "config" / "config.yaml").write_text(text, encoding="utf-8")     # daily cadence, like cfg_dict

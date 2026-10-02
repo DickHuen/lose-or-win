@@ -3,6 +3,43 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.9.0 - 2026-10-02 (config 1.9.0) - owner: decide every hour, positions up to x20
+
+The owner asked for both in one version: a bigger map by score (below 20 no entry, 20-40 x3, 40-50 x6, 50-75 x10,
+75 and above x20 equity) and a decision every hour.
+
+- **Hourly decisions** (`strategy.cadence` rolling_1h): HH:30 HKT every hour, retry HH:50, entry window HH:30 to
+  HH+1:00, one entry per hour. The daily candles ending at each UTC hour are built from Binance 1h candles (~25
+  requests per run, stored once in the new `bn_klines_1h` table); the h4 gate uses the last 4h candle closed then;
+  the 3-day rule counts 72 hours. 48 decide tasks; the 6 manage runs move to HH:10 (02:10, 06:10, ...) and only keep
+  the manage heartbeat and the SL check. Config refuses an entry window longer than the period or an hour without
+  a decide time. Preview, the analysis text ("每 1 小時"), the missed-period count in reports and the next decision
+  time follow the cadence. A full hourly decision computes in ~0.7 s on 1,000 days of 1h candles.
+- **Analysis popups** only when a decision opens, closes or flips (`notifications.analysis_toast_only_actions`);
+  every hour would be 24 popups a day. Trade alerts are unchanged.
+- **Position map** (`strategy.size_tiers`, fractions of `risk.notional_multiple_full_tier` 20): [[0, 0.15],
+  [40, 0.30], [50, 0.50], [75, 1.00]] = x3 / x6 / x10 / x20; a gate against the trade caps at x10; below 20 no
+  entry as before. Validated: ascending scores from 0, non-decreasing fractions in (0, 1].
+- **Leverage per trade** (`risk.trade_leverage`): x20 does not fit at a fixed leverage - at 25x the liquidation
+  (~3%) would sit next to the ~2.6% stop. Each trade uses the LOWEST isolated leverage whose margin fits in
+  `risk.max_margin_use_pct` 92% of equity: x3 -> 4x, x6 -> 7x, x10 -> 11x, x20 -> 22x (`risk.leverage` 25 is now the
+  maximum). If at that leverage the liquidation estimate is not `liq_min_sl_multiple` 1.3 x the stop away, the
+  position is cut until it is (volatility cap: x20 at ATR 2.6%; ~x18 at 3%, ~x15 at 4%), with an alert and a line
+  in the analysis. After the fill the exchange's liquidation price must be `liq_after_fill_sl_multiple` 1.15 x the
+  stop away, or the position is closed. P&L does not depend on the leverage; only the margin and the liquidation
+  distance do.
+- On 100 USDC with ATR 2.6%: x20 = ~$2,000, ~-53% at the 1.0 ATR stop, ~+79% at the 1.5 ATR target; x10 ~-26% /
+  +39%; x6 ~-16% / +24%; x3 ~-8% / +12%. Round-trip fees ~0.08% of the position (x20: ~1.6% of equity).
+- **Backtest:** variant `R1h_live` (+ stress twin) decides every hour; the primary stays `R4h_live`. A synthetic
+  full run takes longer (~+40%). Backtest.bat asks for CONFIRM again (code and config changed).
+- Open alert names the leverage ("position x20.00 equity at 22x"); the instrument check no longer requires the
+  exchange maximum to reach `risk.leverage` when the leverage is chosen per trade (it only caps the trade).
+- Tests: rule tests pin the 4h / daily schedules, 3 tiers, risk sizing and 1.5 / 3 ATR (conftest); the fake
+  Binance serves 1h candles. `test_sizing_v190.py` (replaces test_sizing_v180.py: the map, per-trade leverage, the
+  volatility cut, the engine entry) and `test_hourly_v190.py` (schedule, validation, 1h = 4h at shared
+  boundaries, 72-period rule, R1h stepping, engine hourly entry / hold / flip / missed hour, quiet popups).
+  **Tests:** 374.
+
 ## 1.8.1 - 2026-10-02 (config 1.8.1) - owner: take profit halved, stop loss a third closer
 
 - **Brackets:** `exits.tp_atr_multiple` 1.5 (was 3.0), `exits.sl_atr_multiple` 1.0 (was 1.5). Reward : risk 1.5 : 1

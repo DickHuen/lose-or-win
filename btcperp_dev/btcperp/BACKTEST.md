@@ -86,6 +86,7 @@ decide once a day at 00:30 UTC (v1.4). A test checks the rolling backtest decisi
 | `R4h_live` | Live rules on the 4h cadence (option B) | **primary: live uses it** |
 | `R4h_confirm` | R4h_live, but a flip needs the opposite signal in two consecutive periods | candidate |
 | `R2h_live` | v1.6.0: the same rules decided every 2 hours (UTC 00, 02, 04, ...), daily candles ending then built from 1h candles; the h4 gate uses the last closed 4h candle. Backtest only: live cannot decide every 2 h | candidate (I8: R2h_live minus R4h_live, total R) |
+| `R1h_live` | v1.9.0: the same rules decided every hour (what live does since 1.9.0), daily candles ending then built from 1h candles; the h4 gate uses the last closed 4h candle. The primary variant stays `R4h_live` (criteria confirmed for it) | candidate (compare with `R4h_live`) |
 | `A_live` | v1.4 daily: hybrid score, no breakeven move (V0), crowded funding closes the position | candidate; I1 comparison |
 | `B_breakeven` | A plus a one-time SL move to breakeven at +1 ATR (V2) | candidate |
 | `C_control` | A, but \|score\| < 30 means flat (no entry; close an open position) | candidate |
