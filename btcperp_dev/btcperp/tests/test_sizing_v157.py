@@ -28,7 +28,7 @@ def _inst():
 def _size(cfg, equity, fraction, trades_before=0, raise_to_min=None):
     pct, _ramp = risk_pct_for_trade(cfg.risk, trades_before)
     return compute_size(equity=equity, risk_pct=pct, fraction=fraction, price=PRICE, atr=ATR,
-                        sl_atr_multiple=float(cfg.exits.sl_atr_multiple),
+                        sl_atr_multiple=1.5,                      # the v1.5.7 brackets (v1.8.1 ships 1.0 ATR)
                         notional_cap_pct=float(cfg.risk.notional_cap_pct_equity), leverage=int(cfg.risk.leverage),
                         inst=_inst(),
                         raise_to_min=bool(cfg.risk.raise_to_min_notional) if raise_to_min is None else raise_to_min)
@@ -84,5 +84,5 @@ def test_10x_liquidation_guard(atr, ok):
     liq = estimate_liquidation(PRICE, 1, int(cfg.risk.leverage), _inst(), s.notional,
                                float(cfg.risk.liq_estimate_mmr_divisor))
     assert (PRICE - liq) / PRICE == pytest.approx(0.09, abs=1e-9)
-    assert liquidation_ok(PRICE, liq, float(cfg.exits.sl_atr_multiple) * atr,
+    assert liquidation_ok(PRICE, liq, 1.5 * atr,
                           float(cfg.risk.liq_min_sl_multiple)) is ok

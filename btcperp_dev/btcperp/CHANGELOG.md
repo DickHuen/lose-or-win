@@ -3,6 +3,21 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.8.1 - 2026-10-02 (config 1.8.1) - owner: take profit halved, stop loss a third closer
+
+- **Brackets:** `exits.tp_atr_multiple` 1.5 (was 3.0), `exits.sl_atr_multiple` 1.0 (was 1.5). Reward : risk 1.5 : 1
+  (was 2 : 1), so the break-even win rate rises from ~33% to ~40% before fees. On 100 USDC with ATR 2,281 at 86,841
+  (2.6%): x10 loses ~26% at the stop and makes ~39% at the target (were ~39% / ~79%); x5 ~13% / ~20%; x1.5 ~4% / ~6%.
+  Round-trip fees (~0.08% of the position) are now ~3% of the loss at the stop. The backtest and shadow use the same.
+- With the closer stop the 12x liquidation guard (liquidation >= 1.5 x the stop away) refuses entries only when ATR
+  is above ~4.9% of the price (was ~3.3%).
+- `risk.permanent_floor_lowered_in` "1.8.1": an install that skips 1.8.0 can still lower the 50% floor once; one that
+  ran 1.7.x or 1.8.0 already holds 5% and nothing changes.
+- The owner's live install was 1.7.1 (bold mode) with the old long (0.0002 BTC from 83,954) open: bold mode holds it
+  to its own TP / SL; 1.8.1 keeps it as well (no top-up), and new entries follow the score map.
+- Tests: the rule tests pin 1.5 / 3 ATR (conftest); `test_sizing_v180.py` checks 1.0 / 1.5 and the new guard limit.
+  **Tests:** 354.
+
 ## 1.8.0 - 2026-10-02 (config 1.8.0) - owner: the analysis rules again, positions by score
 
 The owner went back to the analysis rules (bold mode off) and asked for bigger positions when the score is high:

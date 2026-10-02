@@ -58,7 +58,7 @@ def as_daily(d: dict[str, Any]) -> dict[str, Any]:
 
 # The rule tests were written for the v1.5.6 sizing and kill switches (1.5% risk, 10 half-size ramp trades, 30%
 # notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills, 3x, 2 x SL liquidation
-# distance) and the v1.4 score tiers (30 / 50 -> 25% / 50% / 100%, entry at any score). Later versions ship the owner's
+# distance), the 1.5 / 3 ATR brackets and the v1.4 score tiers (30 / 50 -> 25% / 50% / 100%, entry at any score). Later versions ship the owner's
 # values: test_sizing_v157.py, test_bold_v170.py and test_sizing_v180.py test those.
 TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "notional_cap_pct_equity": 30,
              "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3,
@@ -68,6 +68,7 @@ TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "
 TEST_STRATEGY = {"min_entry_abs_score": 0, "tier_low_max": 30, "tier_mid_max": 50, "tier_low_fraction": 0.25,
                  "tier_mid_fraction": 0.50, "tier_high_fraction": 1.00}
 TEST_BOLD = {"enabled": False}
+TEST_EXITS = {"sl_atr_multiple": 1.5, "tp_atr_multiple": 3.0}         # v1.8.1 ships 1.0 / 1.5
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
                   ("notional_cap_pct_equity: 150 ", "notional_cap_pct_equity: 30 "),
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
@@ -77,7 +78,8 @@ TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ra
                   ("liq_min_sl_multiple: 1.5 ", "liq_min_sl_multiple: 2.0 "),
                   ("equity_floor_pct_of_net_funded: 5 ", "equity_floor_pct_of_net_funded: 75 "),
                   ("permanent_floor_pct_of_cumulative_funded: 5 ", "permanent_floor_pct_of_cumulative_funded: 50 "),
-                  ('permanent_floor_lowered_in: "1.8.0"', "permanent_floor_lowered_in: null"),
+                  ('permanent_floor_lowered_in: "1.8.1"', "permanent_floor_lowered_in: null"),
+                  ("sl_atr_multiple: 1.0", "sl_atr_multiple: 1.5"), ("tp_atr_multiple: 1.5", "tp_atr_multiple: 3.0"),
                   ("notional_multiple_full_tier: 10", "notional_multiple_full_tier: null"),
                   ("live_review_expectancy_floor_r: null", "live_review_expectancy_floor_r: -0.196"),
                   ("min_entry_abs_score: 20", "min_entry_abs_score: 0"), ("tier_low_max: 40", "tier_low_max: 30"),
@@ -88,6 +90,7 @@ def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
     d["risk"].update(TEST_RISK)
     d["strategy"].update(TEST_STRATEGY)
     d["bold"].update(TEST_BOLD)
+    d["exits"].update(TEST_EXITS)
     return d
 
 

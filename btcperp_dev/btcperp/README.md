@@ -133,7 +133,7 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
   re-enter per today's signal and gates; crowded side of extreme funding -> close and re-enter per gates.
 - One entry per UTC day. Entry window 08:30-09:30 HKT; after that "missed", no late entry (the day's close
   rules are still evaluated late on the same data, close part only).
-- Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
+- Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.0 x ATR / TP 1.5 x ATR (v1.8.1; were 1.5 / 3) (mark-triggered,
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
 - **Bold mode (v1.7.0; off since v1.8.0, `bold.enabled` false):** every entry is one all-in bet: position = equity x 19 at
