@@ -3,6 +3,35 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.8.0 - 2026-10-02 (config 1.8.0) - owner: the analysis rules again, positions by score
+
+The owner went back to the analysis rules (bold mode off) and asked for bigger positions when the score is high:
+the live long at score +73.8 (entered under the v1.5.7 sizing, ~0.0003 BTC) made under $1 on +2,887 points.
+The owner's map: below 20 no entry, 20-40 x1.5, 40-70 x5, above 70 x10 equity. Positions are not added to while
+held (owner's choice).
+
+- **Position sizing by score:** new `risk.notional_multiple_full_tier` (10): position = equity x 10 x the tier
+  fraction. Tiers: `strategy.tier_low_max` 40 / `tier_mid_max` 70 (were 30 / 50), fractions 0.15 / 0.50 / 1.00
+  (were 0.25 / 0.50 / 1.00). The gate caps (200-day line, 4h trend against the trade) still cap at 0.50 = x5.
+  null = the v1.5.x sizing by risk %. While set, `risk_per_trade_pct` and `notional_cap_pct_equity` are not used.
+  On 100 USDC at 86,841 with ATR 2,281: x10 = 0.01151 BTC, ~$39 at the 1.5 ATR stop, ~$79 at the 3 ATR target.
+- **Entry threshold:** new `strategy.min_entry_abs_score` 20: no new position below it (closes, flips and the
+  3-day rule are unchanged; a flip's re-entry needs it too). The backtest and shadow use the same rule.
+- **12x isolated** (was 20x in bold mode, 10x before): the margin for x10 (~83% of equity) plus fees must fit, and
+  the liquidation (~7.3% from entry at 12x on BTC-USD's max 50x) must lie beyond the stop; at 20x it (~4%) would sit
+  inside the ~4% stop. `risk.liq_min_sl_multiple` 1.5 (was 2.0): entries stop when ATR is above ~3.3% of the price.
+  Config refuses a multiple above the leverage.
+- **Bold mode off** (`bold.enabled` false; its code and values stay). Kill switches 95%, floors 5%, live review
+  line off as in 1.7.0 (owner: no automatic stop). `risk.permanent_floor_lowered_in` "1.8.0": an install that never
+  ran 1.7.0 still holds the 50% floor and lowers it once with this config.
+- Open alert: risk at the stop in $ and % of equity, and the position as a multiple of equity. The analysis text
+  shows "倉位 = 本金 ×N（12 倍逐倉）" with the loss / gain at the stop / target, and "分數未到入場門檻" below 20.
+  An entry recovered after a crash is checked against the full-tier position's loss at its stop.
+- The backtest still sizes by risk % (its R results do not depend on the size); it uses the new tiers and threshold.
+- Tests: the rule tests pin the v1.4 tiers and v1.5.6 risk lines (conftest); `test_sizing_v180.py` (+20) covers the
+  map, the 100 USDC sizes, the leverage cap, the 12x liquidation guard, the engine entry, no entry below 20, no
+  top-up and crash recovery. **Tests:** 354.
+
 ## 1.7.1 - 2026-10-02 (config 1.7.0) - docs: how to stop bold mode without Telegram
 
 Docs only; the code and config are the same as 1.7.0 (config stays 1.7.0, the version that may lower the permanent

@@ -57,30 +57,36 @@ def as_daily(d: dict[str, Any]) -> dict[str, Any]:
 
 
 # The rule tests were written for the v1.5.6 sizing and kill switches (1.5% risk, 10 half-size ramp trades, 30%
-# notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills, 3x). v1.5.7 - v1.5.9 ship
-# the owner's more aggressive values; test_sizing_v157.py tests those. v1.7.0 ships bold mode (20x all-in, floors
-# 5%, kill switches 95%, live review off); the rule tests run with bold mode off and the v1.5.6 lines, and
-# test_bold_v170.py tests the shipped bold config.
+# notional cap, no raise to the exchange minimum, 15% drawdown / 8% losing-streak kills, 3x, 2 x SL liquidation
+# distance) and the v1.4 score tiers (30 / 50 -> 25% / 50% / 100%, entry at any score). Later versions ship the owner's
+# values: test_sizing_v157.py, test_bold_v170.py and test_sizing_v180.py test those.
 TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "notional_cap_pct_equity": 30,
              "raise_to_min_notional": False, "kill_drawdown_pct": 15, "kill_losing_streak_pct": 8, "leverage": 3,
              "equity_floor_pct_of_net_funded": 75, "permanent_floor_pct_of_cumulative_funded": 50,
-             "permanent_floor_lowered_in": None, "live_review_expectancy_floor_r": -0.196}
+             "permanent_floor_lowered_in": None, "live_review_expectancy_floor_r": -0.196,
+             "notional_multiple_full_tier": None, "liq_min_sl_multiple": 2.0}
+TEST_STRATEGY = {"min_entry_abs_score": 0, "tier_low_max": 30, "tier_mid_max": 50, "tier_low_fraction": 0.25,
+                 "tier_mid_fraction": 0.50, "tier_high_fraction": 1.00}
 TEST_BOLD = {"enabled": False}
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
                   ("notional_cap_pct_equity: 150 ", "notional_cap_pct_equity: 30 "),
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
                   ("kill_drawdown_pct: 95 ", "kill_drawdown_pct: 15 "),
                   ("kill_losing_streak_pct: 95 ", "kill_losing_streak_pct: 8 "),
-                  ("  leverage: 20 ", "  leverage: 3 "),
+                  ("  leverage: 12 ", "  leverage: 3 "),
+                  ("liq_min_sl_multiple: 1.5 ", "liq_min_sl_multiple: 2.0 "),
                   ("equity_floor_pct_of_net_funded: 5 ", "equity_floor_pct_of_net_funded: 75 "),
                   ("permanent_floor_pct_of_cumulative_funded: 5 ", "permanent_floor_pct_of_cumulative_funded: 50 "),
-                  ('permanent_floor_lowered_in: "1.7.0"', "permanent_floor_lowered_in: null"),
+                  ('permanent_floor_lowered_in: "1.8.0"', "permanent_floor_lowered_in: null"),
+                  ("notional_multiple_full_tier: 10", "notional_multiple_full_tier: null"),
                   ("live_review_expectancy_floor_r: null", "live_review_expectancy_floor_r: -0.196"),
-                  ("enabled: true                  # v1.7.0 bold mode", "enabled: false"))
+                  ("min_entry_abs_score: 20", "min_entry_abs_score: 0"), ("tier_low_max: 40", "tier_low_max: 30"),
+                  ("tier_mid_max: 70", "tier_mid_max: 50"), ("tier_low_fraction: 0.15", "tier_low_fraction: 0.25"))
 
 
 def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
     d["risk"].update(TEST_RISK)
+    d["strategy"].update(TEST_STRATEGY)
     d["bold"].update(TEST_BOLD)
     return d
 

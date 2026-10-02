@@ -348,7 +348,7 @@ def test_e_parameters_decided_by_the_owner():
     assert cfg.risk.kill_losing_streak_pct == 95 and cfg.risk.kill_drawdown_pct == 95
     assert cfg.risk.equity_floor_pct_of_net_funded == 5
     assert cfg.risk.permanent_floor_pct_of_cumulative_funded == 5
-    assert cfg.risk.permanent_floor_lowered_in == cfg.config_version == "1.7.0"
+    assert cfg.risk.permanent_floor_lowered_in == cfg.config_version == "1.8.0"
     text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(encoding="utf-8")
     assert "PENDING USER DECISION" not in text and "committee" not in text
 

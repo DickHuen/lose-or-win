@@ -41,7 +41,7 @@ def test_shipped_sizing_values():
     r = cfg.risk
     assert (r.risk_per_trade_pct, r.ramp_trades, r.notional_cap_pct_equity, r.raise_to_min_notional) == (5.0, 0, 150, True)
     assert risk_pct_for_trade(r, 0) == (5.0, False)
-    assert r.cross_margin is False and r.liq_min_sl_multiple == 2.0
+    assert r.cross_margin is False
 
 
 def test_the_refused_1630_trade_would_have_been_placed():
@@ -79,7 +79,7 @@ def test_10x_liquidation_guard(atr, ok):
     """v1.5.9, 10x isolated on BTC-USD (max 50x): the liquidation estimate sits ~9% away (1/10 - 0.5/50). The entry
     needs it at least 2 x the stop (1.5 ATR) away, so in high volatility (stop above ~4.5%) the entry is refused.
     (v1.7.0 ships 20x for bold mode, which checks its own liquidation buffer: test_bold_v170.py.)"""
-    cfg = config_from_dict(dict(shipped_config(), risk=dict(shipped_config()["risk"], leverage=10)))
+    cfg = config_from_dict(dict(shipped_config(), risk=dict(shipped_config()["risk"], leverage=10, liq_min_sl_multiple=2.0)))
     s = _size(cfg, 100.0, 1.0)
     liq = estimate_liquidation(PRICE, 1, int(cfg.risk.leverage), _inst(), s.notional,
                                float(cfg.risk.liq_estimate_mmr_divisor))

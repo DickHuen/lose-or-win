@@ -34,7 +34,7 @@ def _plan(equity=100.0, price=83_066.0, direction=1, inst=None, **kw):
     cfg = config_from_dict(shipped_config())
     b = cfg.bold
     args = dict(equity=equity, price=price, direction=direction, notional_multiple=float(b.notional_multiple),
-                leverage=int(cfg.risk.leverage), target_multiple=float(b.target_multiple),
+                leverage=20, target_multiple=float(b.target_multiple),
                 max_loss_fraction=float(b.max_loss_fraction), fee_rate=FEE, liq_buffer_pct=float(b.liq_buffer_pct),
                 inst=inst or _inst(), mmr_divisor=float(cfg.risk.liq_estimate_mmr_divisor))
     args.update(kw)
@@ -42,14 +42,14 @@ def _plan(equity=100.0, price=83_066.0, direction=1, inst=None, **kw):
 
 
 def test_shipped_bold_config():
+    """v1.8.0: bold mode is off (the owner went back to the analysis rules); its values stay for a later switch."""
     cfg = config_from_dict(shipped_config())
     b, r = cfg.bold, cfg.risk
-    assert b.enabled is True and b.hold_until_tp_sl is True
+    assert b.enabled is False and b.hold_until_tp_sl is True
     assert (b.notional_multiple, b.target_multiple, b.max_loss_fraction, b.liq_buffer_pct) == (19, 2.0, 0.70, 0.3)
-    assert r.leverage == 20 and r.cross_margin is False
+    assert r.cross_margin is False
     assert (r.kill_drawdown_pct, r.kill_losing_streak_pct) == (95, 95)
     assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (5, 5)
-    assert r.permanent_floor_lowered_in == cfg.config_version == "1.7.0"
     assert r.live_review_expectancy_floor_r is None
 
 

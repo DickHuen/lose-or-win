@@ -153,7 +153,8 @@ def simulate_variant(variant: str, days: list[dict[str, Any]], candles: list[dic
             event_active=False if ungated else bool(plan.get("event_active")), position_dir=pos_dir,
             opposite_streak=_streak(dirs, pos_dir, t.entry_day, day) if t else 0, entered_today=False,
             paused_reason=None, flip_min_abs_score=float(s.flip_min_abs_score),
-            opposite_days_rule=int(s.opposite_days_rule), event_allows_rule_closes=bool(g.event_allows_rule_closes))
+            opposite_days_rule=int(s.opposite_days_rule), event_allows_rule_closes=bool(g.event_allows_rule_closes),
+            min_entry_abs_score=float(s.min_entry_abs_score))
         p = decide_plan(ctx)
         close_reason, enter_dir, frac = p.close_reason, p.enter_direction, p.enter_fraction
         if variant == "flat_allowed" and float(sc["abs_score"]) < float(s.tier_low_max):

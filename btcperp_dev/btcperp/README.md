@@ -136,13 +136,17 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
-- **Bold mode (v1.7.0, owner, `bold.enabled` true):** every entry is one all-in bet: position = equity x 19 at
+- **Bold mode (v1.7.0; off since v1.8.0, `bold.enabled` false):** every entry is one all-in bet: position = equity x 19 at
   20x isolated; TP where equity doubles after both taker fees (~+5.4%), SL where the loss incl. fees is 70% of
   equity (~-3.6%); refused if the liquidation estimate (~4% at 20x on max 50x) is not beyond the SL by 0.3% of the
   price, and closed after the fill if the exchange's liquidation price is not. While a bet is open, flips, the
   3-day rule and the funding / flat rules are ignored: it ends only at its TP or SL. Kill switches 95%, floors 5%,
   live review line off: the bot keeps betting until the owner pauses it. The rules below apply when bold mode is off.
-- Risk (v1.5.8, owner): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
+- **Position by score (v1.8.0, owner):** no new position below |score| 20; position = equity x 10
+  (`risk.notional_multiple_full_tier`) x the tier fraction: 20-40 -> 0.15 (x1.5), 40-70 -> 0.50 (x5), above 70 -> 1.00
+  (x10), capped at 0.50 by a gate against the trade. 12x isolated; the liquidation must be >= 1.5 x the stop away
+  (entries stop when ATR is above ~3.3% of the price). A position is never added to.
+- Risk (v1.5.8, owner; used when `notional_multiple_full_tier` is null): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
   minimum is raised to it if that risk stays within the 100%-tier budget; leverage 10x isolated (v1.5.9)
   (checked/set before every entry; failure = no trade), notional <= 150% of equity,
   liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the

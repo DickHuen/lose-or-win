@@ -76,20 +76,27 @@ def min_order_qty(inst: Instrument, price: float) -> Decimal:
 
 def compute_size(*, equity: float, risk_pct: float, fraction: float, price: float, atr: float,
                  sl_atr_multiple: float, notional_cap_pct: float, leverage: int,
-                 inst: Instrument, raise_to_min: bool = False) -> SizeResult:
+                 inst: Instrument, raise_to_min: bool = False, notional_multiple: float | None = None) -> SizeResult:
     """`raise_to_min` (v1.5.7, owner: small capital must still trade): a size below the exchange minimum is raised
     to the minimum, but only if that trade's risk at the stop stays within the FULL-tier budget (equity x risk_pct)
-    and within the notional and leverage caps. Otherwise the entry is refused, as before."""
+    and within the notional and leverage caps. Otherwise the entry is refused, as before.
+    `notional_multiple` (v1.8.0, owner: "30% of capital x 20"): size by position instead of by risk: notional =
+    equity x notional_multiple x fraction, so the loss at the stop is that multiple x the stop distance. The
+    notional cap is the full-tier position (equity x notional_multiple); the leverage cap still applies."""
     sl_distance = sl_atr_multiple * atr
     if equity <= 0 or price <= 0 or sl_distance <= 0 or fraction <= 0:
         return SizeResult(False, Decimal(0), 0, 0, 0, sl_distance, 0, reject_reason="non-positive equity/price/ATR/fraction")
-    risk_usd = equity * risk_pct / 100.0 * fraction
-    qty = risk_usd / sl_distance
     capped: list[str] = []
-    notional_cap = equity * notional_cap_pct / 100.0
-    if qty * price > notional_cap:
-        qty = notional_cap / price
-        capped.append(f"notional cap {notional_cap_pct}% of equity")
+    if notional_multiple:
+        notional_cap = equity * float(notional_multiple)
+        qty = notional_cap * fraction / price
+    else:
+        risk_usd = equity * risk_pct / 100.0 * fraction
+        qty = risk_usd / sl_distance
+        notional_cap = equity * notional_cap_pct / 100.0
+        if qty * price > notional_cap:
+            qty = notional_cap / price
+            capped.append(f"notional cap {notional_cap_pct}% of equity")
     lev_cap_notional = equity * leverage
     if qty * price > lev_cap_notional:
         qty = lev_cap_notional / price
@@ -97,12 +104,13 @@ def compute_size(*, equity: float, risk_pct: float, fraction: float, price: floa
     q = quantize_qty(qty, inst.quantity_decimals)
     if raise_to_min and float(q) * price < inst.min_notional:
         q_min = min_order_qty(inst, price)
-        if (float(q_min) * sl_distance <= equity * risk_pct / 100.0 and float(q_min) * price <= notional_cap
-                and float(q_min) * price <= lev_cap_notional):
+        within_risk = notional_multiple or float(q_min) * sl_distance <= equity * risk_pct / 100.0
+        if within_risk and float(q_min) * price <= notional_cap and float(q_min) * price <= lev_cap_notional:
             q = q_min
             capped.append(f"raised to the exchange minimum ({inst.min_notional:g} notional)")
     notional = float(q) * price
-    res = SizeResult(True, q, notional, float(q) * sl_distance, risk_pct * fraction, sl_distance,
+    risk_used = float(q) * sl_distance / equity * 100.0 if notional_multiple else risk_pct * fraction
+    res = SizeResult(True, q, notional, float(q) * sl_distance, risk_used, sl_distance,
                      notional / equity if equity else 0.0, capped)
     try:
         validate_order(inst, qty=q, price=price, leverage=leverage, market=False)

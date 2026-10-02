@@ -15,6 +15,7 @@ CLOSE_ZH = {"flip": "反方向強訊號（反手）", "three_day_rule": "連續 
 GATE_ZH = {"ema200_regime": "200 日線", "h4_trend": "4 小時趨勢", "extreme_funding": "資金費", "event_window": "經濟數據"}
 NOTE_ZH = (
     ("bold mode: TP/SL only", "孤注模式：只等止賺或止損，策略平倉／反手唔執行"),
+    ("below the entry threshold", "分數未到入場門檻：唔開新倉"),
     ("same direction: hold", "同方向：繼續持有"),
     ("weak opposite signal", "反方向但訊號弱：繼續持有，止損止賺不變"),
     ("score 0", "分數係 0：不變"),
@@ -152,11 +153,21 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
         m = float(mark)
         out.append(f"  {_dir(enter)}：入場約 {_p(m)}｜止損約 {_p(sl)}（{(sl - m) / m * 100:+.1f}%）"
                    f"｜止賺約 {_p(tp)}（{(tp - m) / m * 100:+.1f}%）")
-        risk_line = f"  注碼：打中止損最多蝕權益 {risk_pct:.2f}%"
-        if equity:
-            risk_line += f" ≈ ${float(equity) * risk_pct / 100.0:,.2f}"
-        risk_line += f"；倉位最多權益 {float(cfg.risk.notional_cap_pct_equity):.0f}%" + ("（頭 10 筆減半）" if ramp else "")
-        out.append(risk_line)
+        mult = getattr(cfg.risk, "notional_multiple_full_tier", None)
+        if mult:            # v1.8.0: position = equity x multiple x tier; the loss follows from the stop distance
+            pos_x = float(mult) * float(plan.get("enter_fraction") or 0.0)
+            line = (f"  注碼：倉位 = 本金 ×{pos_x:g}（{int(cfg.risk.leverage)} 倍逐倉）；中止損約蝕本金 "
+                    f"{pos_x * abs(sl - m) / m * 100:.0f}%，中止賺約賺 {pos_x * abs(tp - m) / m * 100:.0f}%")
+            if equity:
+                line += f"（倉位約 ${float(equity) * pos_x:,.0f}）"
+            out.append(line)
+        else:
+            risk_line = f"  注碼：打中止損最多蝕權益 {risk_pct:.2f}%"
+            if equity:
+                risk_line += f" ≈ ${float(equity) * risk_pct / 100.0:,.2f}"
+            risk_line += (f"；倉位最多權益 {float(cfg.risk.notional_cap_pct_equity):.0f}%"
+                          + ("（頭 10 筆減半）" if ramp else ""))
+            out.append(risk_line)
     notes = [zh_note(n) for n in (plan.get("notes") or []) + (plan.get("entry_blocked") or [])]
     for n in dict.fromkeys(notes):
         out.append(f"  備註：{n}")

@@ -529,6 +529,11 @@ class Engine:
             base = (eq - float(pos.unrealized_pnl or 0.0)) if eq else 0.0
             budget = base * float(self.cfg.bold.max_loss_fraction)
             budget_txt = f"{float(self.cfg.bold.max_loss_fraction) * 100:.0f}% of equity, bold mode"
+        elif self.cfg.risk.notional_multiple_full_tier:   # v1.8.0: the full-tier position's loss at this stop
+            mult = float(self.cfg.risk.notional_multiple_full_tier)
+            base = (eq - float(pos.unrealized_pnl or 0.0)) if eq else 0.0
+            budget = base * mult * sl_dist / pos.entry_price if pos.entry_price else 0.0
+            budget_txt = f"position x{mult:g} equity at this stop"
         else:
             budget = eq * float(self.cfg.risk.risk_per_trade_pct) / 100.0 if eq else 0.0
             budget_txt = f"{self.cfg.risk.risk_per_trade_pct}% of equity"
@@ -1142,7 +1147,8 @@ class Engine:
                                     price=ref, atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
                                     notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
                                     leverage=int(self.cfg.risk.leverage), inst=inst,
-                                    raise_to_min=bool(self.cfg.risk.raise_to_min_notional))
+                                    raise_to_min=bool(self.cfg.risk.raise_to_min_notional),
+                                    notional_multiple=self.cfg.risk.notional_multiple_full_tier)
             if not size.ok:
                 self.rec.intent_event(day, "entry", "failed", {"reason": size.reject_reason, "size": size.to_dict()})
                 self.alert("entry rejected", f"order violates limits: {size.reject_reason}")
@@ -1301,10 +1307,11 @@ class Engine:
                         "slippage_bps_vs_decision_mark": trade["slippage_bps_vs_decision_mark"],
                         "decision_to_fill_s": trade["decision_to_fill_s"]})
         bold = bool(self.cfg.bold.enabled)
+        mult = self.cfg.risk.notional_multiple_full_tier
         risk_txt = (f"BOLD all-in: {float(self.cfg.bold.max_loss_fraction) * 100:.0f}% of equity at the SL, "
                     f"x{float(self.cfg.bold.target_multiple):g} at the TP" if bold else
-                    f"risk {trade['initial_risk_usd']:.2f} ({risk_pct * float(plan.get('enter_fraction') or 0):.3f}% equity)"
-                    f"{' [ramp]' if ramp else ''}")
+                    f"risk {trade['initial_risk_usd']:.2f} ({size.risk_pct_used:.3f}% equity)"
+                    f"{f', position x{size.effective_leverage:.2f} equity' if mult else ''}{' [ramp]' if ramp and not mult else ''}")
         self.alert("open", f"{'LONG' if d > 0 else 'SHORT'} {qty} {inst.symbol} @ {entry_price:.2f} | SL {sl_s} TP {tp_s} | "
                    f"{risk_txt} | score {plan.get('score')}")
         liq_mult = float(self.cfg.risk.liq_min_sl_multiple)

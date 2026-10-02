@@ -20,10 +20,9 @@ H2 = 2 * HOUR_MS
 
 @pytest.fixture(scope="module")
 def setup():
-    from conftest import TEST_RISK, as_daily
+    from conftest import as_daily, with_test_risk
 
-    d = as_daily(shipped_config())
-    d["risk"].update(TEST_RISK)
+    d = with_test_risk(as_daily(shipped_config()))
     cfg = config_from_dict(d)
     ds = synthetic_dataset(date(2020, 1, 1), 440, seed=4)
     cal = bt.merged_calendar(cfg, _root(), _cal())

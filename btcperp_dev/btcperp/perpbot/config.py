@@ -101,6 +101,7 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("strategy.tier_low_fraction", _NUM, lambda v: 0 < v <= 1),
     ("strategy.tier_mid_fraction", _NUM, lambda v: 0 < v <= 1),
     ("strategy.tier_high_fraction", _NUM, lambda v: 0 < v <= 1),
+    ("strategy.min_entry_abs_score", _NUM, lambda v: 0 <= v < 100),
     ("strategy.flip_min_abs_score", _NUM, None),
     ("strategy.opposite_days_rule", int, lambda v: v >= 1),
     ("strategy.tighten_sl_on_same_direction", bool, None),
@@ -241,6 +242,15 @@ def validate(data: dict[str, Any]) -> None:
         errors.append("missing config key: risk.permanent_floor_lowered_in")
     elif pl is not None and not isinstance(pl, str):
         errors.append("config key risk.permanent_floor_lowered_in: must be null or a config_version string")
+    nm = (data.get("risk") or {}).get("notional_multiple_full_tier", "missing")
+    if nm == "missing":
+        errors.append("missing config key: risk.notional_multiple_full_tier")
+    elif nm is not None:
+        lev = (data.get("risk") or {}).get("leverage")
+        if isinstance(nm, bool) or not isinstance(nm, (int, float)) or nm <= 0:
+            errors.append("config key risk.notional_multiple_full_tier: must be null or a positive number")
+        elif isinstance(lev, int) and nm > lev:
+            errors.append(f"config key risk.notional_multiple_full_tier: {nm} needs more than risk.leverage {lev}")
     lr = (data.get("risk") or {}).get("live_review_expectancy_floor_r", "missing")
     if lr == "missing":
         errors.append("missing config key: risk.live_review_expectancy_floor_r")

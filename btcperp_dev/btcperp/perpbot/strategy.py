@@ -269,6 +269,7 @@ class DecisionContext:
     funding_rule_closes: bool = True       # backtest variant: False = crowded funding blocks entries but never closes
     flip_confirmed: bool = True            # rolling_4h with flip_confirm_periods > 1: earlier periods agree
     period_word: str = "UTC day"           # for messages
+    min_entry_abs_score: float = 0.0       # v1.8.0 owner: no new position below this |score|
 
 
 @dataclass
@@ -296,6 +297,8 @@ def evaluate_entry(ctx: DecisionContext) -> tuple[int, float, list[str]]:
     blocked: list[str] = []
     if ctx.direction == 0:
         return 0, 0.0, ["score is exactly 0 (no signal)"]
+    if ctx.abs_score < ctx.min_entry_abs_score:
+        blocked.append(f"score {ctx.abs_score:.1f} below the entry threshold {ctx.min_entry_abs_score:g}")
     if ctx.entered_today:
         blocked.append(f"already entered this {ctx.period_word} (max one entry per {ctx.period_word})")
     if ctx.entry_block:
@@ -476,7 +479,8 @@ def plan_for(f: DayFeatures, cfg: Any, *, position_dir: int, entry_day: date | N
         flip_min_abs_score=float(s.flip_min_abs_score), opposite_days_rule=rule,
         event_allows_rule_closes=bool(g.event_allows_rule_closes), entry_block=entry_block,
         funding_rule_closes=funding_rule_closes, flip_confirmed=confirmed,
-        period_word=f"{ROLLING_PERIOD_MS[f.cadence] // HOUR_MS}-hour period" if rolling else "UTC day")
+        period_word=f"{ROLLING_PERIOD_MS[f.cadence] // HOUR_MS}-hour period" if rolling else "UTC day",
+        min_entry_abs_score=float(s.min_entry_abs_score))
     return decide_plan(ctx), ctx
 
 
