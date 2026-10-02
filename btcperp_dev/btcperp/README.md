@@ -101,8 +101,8 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 4. `cumulative_funding` is recorded; fills and funding payments are synced.
 5. (Only if Telegram is enabled in config: /pause, /kill, /status from the configured chat id.)
 6. Equity log and kill switches. Equity = the exchange's `total_account_value` for both peak and current
-   (wallet + uPnL is a cross-check; disagreement blocks new entries). Drawdown 15% from peak (confirmed
-   deposits/withdrawals adjust the peak) -> close and pause; losing streak with cumulative loss of 8% of equity
+   (wallet + uPnL is a cross-check; disagreement blocks new entries). Drawdown 25% from peak (v1.5.8; confirmed
+   deposits/withdrawals adjust the peak) -> close and pause; losing streak with cumulative loss of 20% of equity (v1.5.8)
    (a trade within +/-0.1% of equity at entry is a tie: it neither ends nor extends the streak, review D11)
    -> pause, keep SL/TP; equity below 75% of net funded capital -> close and hard stop (`resume` cannot clear
    it; only a new config version that states the new baseline and the trigger date); equity below 50% of all
@@ -110,7 +110,7 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
    after 30 live trades, a rolling 30-trade expectancy below the backtest's review line (S9) -> pause new entries;
    a failed kill close is retried every run; pending deposits/withdrawals skip
    the drawdown/floor checks and block entries; 25-trade size-weighted expectancy < 0 -> warning.
-   Proxy key expiry alert 5 days ahead. (8%, 75% and 50% confirmed by the owner 2026-09-30; notional cap 60% since v1.5.7.)
+   Proxy key expiry alert 5 days ahead. (75% and 50% confirmed by the owner 2026-09-30; v1.5.8: 5% risk, 150% notional cap, 25% / 20% kills.)
 7. A missing position on one read is not trusted: closes are booked and leftover orders cancelled only with
    evidence (exit fills, fired trigger, or two reads apart).
 
@@ -136,9 +136,9 @@ curve with peak, statistics, trades, alerts, runs (last result per command, miss
 - Entry: FOK limit at best bid/ask +/- 10 bps with bracket SL 1.5 x ATR / TP 3 x ATR (mark-triggered,
   full size); `exits.entry_attempts` = 1 until the smoketest has recorded the real "FOK not filled" status; then no
   entry that day.
-- Risk (v1.5.7, owner): 2% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
+- Risk (v1.5.8, owner): 5% of equity at SL for the 100% tier (no half-size ramp); a size below the exchange
   minimum is raised to it if that risk stays within the 100%-tier budget; leverage 3x isolated
-  (checked/set before every entry; failure = no trade), notional <= 60% of equity,
+  (checked/set before every entry; failure = no trade), notional <= 150% of equity,
   liquidation price must be >= 2 x SL distance away (pre-trade estimate and post-fill check on the
   exchange's value; a missing liquidation price fails the check).
 - A rejected or unknown FOK is never retried in the same run (the SDK reports a whole bracket as rejected

@@ -1,5 +1,6 @@
-"""v1.5.7: the owner's more aggressive sizing (2026-10-02). Live 2026-09-30 16:30: score +37.17 (LONG, 50% tier)
-was refused because 100 USDC x 1.5% x 0.5 ramp x 0.5 tier = $0.375 risk -> 0.00011 BTC = $9.1 < the $10 minimum."""
+"""v1.5.7 / v1.5.8: the owner's more aggressive sizing (2026-10-02; 5% at the 100% tier since v1.5.8). Live
+2026-09-30 16:30: score +37.17 (LONG, 50% tier) was refused because 100 USDC x 1.5% x 0.5 ramp x 0.5 tier = $0.375
+risk -> 0.00011 BTC = $9.1 < the $10 minimum."""
 
 from decimal import Decimal
 
@@ -36,9 +37,11 @@ def _size(cfg, equity, fraction, trades_before=0, raise_to_min=None):
 def test_shipped_sizing_values():
     cfg = config_from_dict(shipped_config())
     r = cfg.risk
-    assert (r.risk_per_trade_pct, r.ramp_trades, r.notional_cap_pct_equity, r.raise_to_min_notional) == (2.0, 0, 60, True)
+    assert (r.risk_per_trade_pct, r.ramp_trades, r.notional_cap_pct_equity, r.raise_to_min_notional) == (5.0, 0, 150, True)
+    assert (r.kill_drawdown_pct, r.kill_losing_streak_pct) == (25, 20)
+    assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (75, 50)
     assert r.live_review_expectancy_floor_r == -0.196
-    assert risk_pct_for_trade(r, 0) == (2.0, False)
+    assert risk_pct_for_trade(r, 0) == (5.0, False)
 
 
 def test_the_refused_1630_trade_would_have_been_placed():
@@ -48,24 +51,24 @@ def test_the_refused_1630_trade_would_have_been_placed():
     refused = _size(old, 100.0, 0.5)
     assert not refused.ok and "below instrument min_notional" in refused.reject_reason
     new = _size(config_from_dict(shipped_config()), 100.0, 0.5)
-    assert new.ok and new.qty == Decimal("0.0003") and new.risk_usd == pytest.approx(0.989, abs=0.01)
+    assert new.ok and new.qty == Decimal("0.00075") and new.risk_usd == pytest.approx(2.47, abs=0.01)
 
 
-@pytest.mark.parametrize("fraction,qty,risk_max", [(0.25, "0.00015", 0.50), (0.5, "0.0003", 1.00),
-                                                   (1.0, "0.0006", 2.00)])
+@pytest.mark.parametrize("fraction,qty,risk_max", [(0.25, "0.00037", 1.25), (0.5, "0.00075", 2.50),
+                                                   (1.0, "0.00151", 5.00)])
 def test_every_tier_trades_with_100_usdc(fraction, qty, risk_max):
     s = _size(config_from_dict(shipped_config()), 100.0, fraction)
     assert s.ok and s.qty == Decimal(qty) and s.notional >= 10.0 and s.risk_usd <= risk_max + 1e-9
-    assert s.notional <= 60.0                                # the 60% notional cap
+    assert s.notional <= 150.0                               # the 150% notional cap
 
 
 def test_raise_to_minimum_stays_within_the_full_tier_budget():
     cfg = config_from_dict(shipped_config())
     assert min_order_qty(_inst(), PRICE) == Decimal("0.00013")          # 0.00012 x 83,066 = 9.97 < 10
-    s = _size(cfg, 40.0, 0.25)                               # $0.20 budget -> 0.00006 BTC: below the minimum
+    s = _size(cfg, 15.0, 0.25)                               # $0.19 budget -> 0.00005 BTC: below the minimum
     assert s.ok and s.qty == Decimal("0.00013") and any("exchange minimum" in c for c in s.capped_by)
-    assert s.risk_usd <= 40.0 * 2.0 / 100                     # within the 100%-tier risk ($0.80)
-    tiny = _size(cfg, 15.0, 0.25)                            # the minimum would risk $0.43 > $0.30 full budget
+    assert s.risk_usd <= 15.0 * 5.0 / 100                     # within the 100%-tier risk ($0.75)
+    tiny = _size(cfg, 8.0, 0.25)                             # the minimum would risk $0.43 > $0.40 full budget
     assert not tiny.ok and "below instrument min_notional" in tiny.reject_reason
-    off = _size(cfg, 40.0, 0.25, raise_to_min=False)
+    off = _size(cfg, 15.0, 0.25, raise_to_min=False)
     assert not off.ok

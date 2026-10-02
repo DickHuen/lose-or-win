@@ -3,6 +3,21 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.5.8 - 2026-10-02 (config 1.5.8) - owner: 5% risk per trade
+
+The owner chose 5% at the 100% tier (the maximum the config allows) after the trade-offs were laid out: about $5 at
+the stop per full trade on 100 USDC, and backtest run #1's max drawdown of 10.9% at 1.5% risk scales to about 36%.
+
+- **Config 1.5.8:** `risk_per_trade_pct` 5 (was 2 in 1.5.7, 1.5 before); `notional_cap_pct_equity` 150 (was 60) so a
+  full-tier trade is not cut down (3x isolated allows up to 300%); `kill_drawdown_pct` 25 (was 15) and
+  `kill_losing_streak_pct` 20 (was 8): at 5% the old lines would trip after three or two full losses.
+- **Unchanged:** the 75% equity floor (hard stop: about $25 lost on 100 USDC) and the 50% permanent floor; 3x
+  isolated; SL 1.5 ATR / TP 3 ATR; no ramp; raise-to-minimum; tie rule +/-0.1%; live review line -0.196 R.
+- With 100 USDC at BTC 83,066 and ATR 2,198: 25% tier 0.00037 BTC (~$31, risk ~$1.22), 50% tier 0.00075 BTC
+  (~$62, ~$2.47), 100% tier 0.00151 BTC (~$125, ~$4.98; isolated margin ~$42).
+- Tests keep the v1.5.6 sizing and kills (pinned in conftest); `test_sizing_v157.py` covers the shipped values.
+  **Tests:** 308.
+
 ## 1.5.7 - 2026-10-02 (config 1.5.7) - owner: more aggressive sizing so a small account trades
 
 First live decision (2026-09-30 16:30 HKT): score +37.17, LONG, 50% tier, all gates clear - but no order: 100 USDC x
