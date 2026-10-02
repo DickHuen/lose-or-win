@@ -3,6 +3,14 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.7.1 - 2026-10-02 (config 1.7.0) - docs: how to stop bold mode without Telegram
+
+Docs only; the code and config are the same as 1.7.0 (config stays 1.7.0, the version that may lower the permanent
+floor). The owner does not use Telegram (it is off by default). START_HERE and this changelog named a `Pause.bat`
+and Telegram `/pause`, neither of which the owner has: the stop buttons are `Pause_New_Entries.bat` (no new bets;
+an open bet keeps its TP/SL) and `Kill_Close_Position.bat` (close now and pause). Alerts arrive as Windows
+notifications, on the dashboard and in `Alerts.bat`.
+
 ## 1.7.0 - 2026-10-02 (config 1.7.0) - owner: bold mode (all-in bets at 20x)
 
 The owner: "I want to gamble", high return, small capital, "keep going until I say stop". After the numbers were
@@ -20,7 +28,8 @@ as before; the strategy picks the direction.
   rules are ignored (`strategy.hold_for_bold`, logged as a note). Pause / kill still work.
 - **No automatic stop (owner):** drawdown and losing-streak kills 95% (were 25 / 20), equity floor 5% of net funded
   (was 75), permanent floor 5% (was 50), live review line off (was -0.196R). 100 USDC -> ~30 after one loss -> ~9
-  after two: the bot still bets. Pause.bat or Telegram /pause stops it.
+  after two: the bot still bets. `Pause_New_Entries.bat` stops new bets (an open bet keeps its TP/SL);
+  `Kill_Close_Position.bat` closes it and stops.
 - **Permanent floor lowered once:** the bot refuses any config that lowers the permanent floor (review v1.3.0 F1).
   New `risk.permanent_floor_lowered_in`: the ONE config version allowed to lower it (here "1.7.0"); the lower value
   becomes the new maximum and a later config cannot reuse the name. An alert records it.
