@@ -395,6 +395,36 @@ def bracket_prices(direction: int, ref_price: float, atr: float, sl_mult: float,
     return sl, tp
 
 
+def _opt(section: Any, name: str, default: Any) -> Any:
+    get = getattr(section, "get", None)
+    v = get(name) if callable(get) else getattr(section, name, None)
+    return default if v is None else v
+
+
+def exit_distances(cfg: Any, mark: float, daily_atr: float, h1: Sequence[Candle] | None = None,
+                   t_ms: int | None = None, opens: Sequence[int] | None = None) -> dict[str, Any]:
+    """SL / TP distances in price for an entry at `mark` (v1.10.0, owner: "the target is too far for the swings").
+    exits.atr_source "1h": the multiples apply to the Wilder ATR of the 1h candles closed at t_ms (the period start),
+    so the brackets follow the current hourly swings; "daily" (before v1.10.0): to the daily ATR of the score.
+    Then at least exits.sl_min_pct / tp_min_pct of the price (the round-trip fees must be covered). Falls back to the
+    daily ATR when there are not enough 1h candles. `h1` sorted by open time; `opens` = their open times."""
+    ex = cfg.exits
+    src = str(_opt(ex, "atr_source", "daily"))
+    atr, used = float(daily_atr), "daily"
+    if src == "1h" and h1:
+        period = int(ex.atr_1h_period)
+        op = opens if opens is not None else [c.open_ms for c in h1]
+        end = bisect_right(op, int(t_ms) - HOUR_MS) if t_ms is not None else len(h1)   # closed by t_ms
+        window = list(h1[max(0, end - period * period):end])        # Wilder warm-up: (13/14)^182 ~ 0
+        a = last_value(atr_wilder(window, period)) if len(window) > period else None
+        if a:
+            atr, used = float(a), "1h"
+    sl = max(float(ex.sl_atr_multiple) * atr, float(_opt(ex, "sl_min_pct", 0.0)) / 100.0 * float(mark))
+    tp = max(float(ex.tp_atr_multiple) * atr, float(_opt(ex, "tp_min_pct", 0.0)) / 100.0 * float(mark))
+    return {"source": used, "atr": atr, "sl_dist": sl, "tp_dist": tp,
+            "sl_pct": sl / float(mark) * 100.0 if mark else None, "tp_pct": tp / float(mark) * 100.0 if mark else None}
+
+
 def restrict_to_close(plan: Plan, reason: str, position_dir: int) -> Plan:
     """Drop the entry part of a plan (region blocked, late decision): closes still happen."""
     if plan.enter_direction:

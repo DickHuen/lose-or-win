@@ -3,6 +3,31 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 1.10.0 - 2026-10-04 (config 1.10.0) - owner: SL / TP follow the hourly swings
+
+The owner sent the 2026-10-02/03 trades and decisions: a x10 long from 84,574 (2026-10-03 01:30 HKT) had its TP at
+88,089 (+4.2%, 1.5 x the daily ATR of ~2,340) while BTC moved between 84,122 and 84,943 (+/-0.5%) in the next 30
+hours - "the target is too far, the smaller swings are missed". The owner chose brackets that follow the hourly
+volatility.
+
+- **Exits** (`exits.atr_source` "1h", new): SL = 2 x, TP = 3 x the Wilder ATR(`exits.atr_1h_period` 14) of the 1h
+  candles closed at the decision period's start, at least `exits.sl_min_pct` 0.5% / `exits.tp_min_pct` 0.8% of the
+  price (the round-trip fees, ~0.08% of the position = ~1.6% of equity at x20, must be covered). Quiet market (1h
+  ATR ~0.3%): SL ~0.6%, TP ~0.9%; busy market: wider. Without enough 1h candles: the daily ATR (logged as such).
+  "daily" keeps the v1.8.1 behaviour (multiples of the score's daily ATR).
+- One function (`strategy.exit_distances`) decides the distances for live, Preview and the backtest; the decision
+  stores them (`plan.exit`), and the entry, the sizing (loss at the stop), the per-trade leverage plan and the
+  analysis text use them ("止損止賺跟 1 小時波幅：ATR ..."). Cadences other than rolling_1h fetch the last 1h candles.
+- Trade-off: at x20 a TP of ~0.9% makes ~+16% of equity after fees and an SL of ~0.6% loses ~-14%: the strategy needs
+  to be right about half the time (was ~40% with 1.5 : 1 on the daily ATR). After a TP the next hour can enter again
+  if the score still allows it.
+- With the closer stop the per-trade leverage rarely needs a volatility cut (x20 -> 22x).
+- Shadow variants (daily cadence only) are skipped while the exits use the 1h ATR.
+- An open position keeps the SL / TP it was opened with (the owner's x10 long from 84,574 keeps 82,230 / 88,089).
+- Tests: the rule tests pin the daily-ATR brackets (conftest); `test_exits_v1100.py` (+11): distances, floors, only
+  candles closed at the period start, daily fallback, validation, live entry brackets, backtest = live.
+  **Tests:** 385.
+
 ## 1.9.0 - 2026-10-02 (config 1.9.0) - owner: decide every hour, positions up to x20
 
 The owner asked for both in one version: a bigger map by score (below 20 no entry, 20-40 x3, 40-50 x6, 50-75 x10,

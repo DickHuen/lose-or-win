@@ -43,10 +43,10 @@ def test_shipped_v190_values():
     assert s.min_entry_abs_score == 20 and s.size_tiers == [[0, 0.15], [40, 0.30], [50, 0.50], [75, 1.00]]
     assert (r.notional_multiple_full_tier, r.leverage, r.max_margin_use_pct) == (20, 25, 92)
     assert (r.liq_min_sl_multiple, r.liq_after_fill_sl_multiple, r.cross_margin) == (1.3, 1.15, False)
-    assert (cfg.exits.sl_atr_multiple, cfg.exits.tp_atr_multiple) == (1.0, 1.5)
+    assert (cfg.exits.sl_atr_multiple, cfg.exits.tp_atr_multiple, cfg.exits.atr_source) == (2.0, 3.0, "1h")   # v1.10.0
     assert (r.kill_drawdown_pct, r.kill_losing_streak_pct) == (95, 95)
     assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (5, 5)
-    assert r.permanent_floor_lowered_in == cfg.config_version == "1.9.0"
+    assert r.permanent_floor_lowered_in == cfg.config_version == "1.10.0"
     assert r.live_review_expectancy_floor_r is None
 
 

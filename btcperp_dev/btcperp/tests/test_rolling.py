@@ -240,7 +240,7 @@ def test_shipped_config_is_rolling_and_validated(rolling_cfg_dict):
     from perpbot.config import ConfigError, config_from_dict
 
     cfg = config_from_dict(rolling_cfg_dict)
-    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.9.0"
+    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.10.0"
     assert len(cfg.schedule.decide_times_hkt) == 12 and len(cfg.schedule.manage_times_hkt) == 6
     bad = dict(rolling_cfg_dict, schedule=dict(rolling_cfg_dict["schedule"], decide_times_hkt=["08:30", "08:50"]))
     with pytest.raises(ConfigError, match="no decide time"):
@@ -347,7 +347,8 @@ def test_preview_is_read_only_and_explains_the_rolling_decision(tmp_root, capsys
     assert "預覽：如果而家決定" in out and "做多" in out and "行動：開倉" in out
     import re
     m = re.search(r"倉位 = 本金 ×([0-9.]+)（([0-9]+) 倍逐倉）", out)               # v1.9.0: per-trade leverage
-    assert m and float(m.group(1)) in (10.0, 20.0) and int(m.group(2)) == {10.0: 11, 20.0: 22}[float(m.group(1))]
+    assert m and 0 < float(m.group(1)) <= 20 and 1 <= int(m.group(2)) <= 25
+    assert "止損止賺跟 1 小時波幅" in out                                         # v1.10.0 (fake 1h swings: +/-1%)
     assert "每 1 小時" in out and "唔落單" in out and "下一次決定：2026-10-05 13:30" in out
     assert not (tmp_root / "data" / "btcperp.sqlite3").exists()          # nothing written
 

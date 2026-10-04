@@ -14,6 +14,7 @@ from perpbot.strategy import (
     ROLLING_PERIOD_MS,
     base_bar_ms,
     day_features,
+    exit_distances,
     live_rolling_features,
     period_key,
     period_start,
@@ -43,11 +44,11 @@ def preview_decision(cfg: Any, calendar: Any, now: datetime, bn: Any,
     fstart = day_start_ms(day_d) - int(cfg.binance.funding_days_to_load) * DAY_MS
     funding = [(ts, r) for ts, r, _ in bn.funding(fstart, now_ms)]
     active = calendar.active_windows(now, cfg.gates.event_anchor_hkt, float(cfg.gates.event_post_release_hours))
+    h1: list = []
     events = [{"type": e.type, "release_utc": fmt_utc(e.release_utc), "window_start_utc": fmt_utc(s),
                "window_end_utc": fmt_utc(en), "note": e.note} for e, s, en in active]
     if rolling:
         days = int(cfg.binance.daily_candles_to_load) + int(cfg.strategy.opposite_days_rule) + 2
-        h1 = []
         if base_bar_ms(cadence) == HOUR_MS:                     # v1.9.0 rolling_1h
             h1 = bn.klines_range("1h", t - days * DAY_MS, now_ms)
             h4 = bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
@@ -76,10 +77,13 @@ def preview_decision(cfg: Any, calendar: Any, now: datetime, bn: Any,
                    "caps": f.caps, "gates_triggered": f.gates_triggered(), "atr": sc.atr, "mark": mark,
                    "position_dir_at_decision": pos_dir, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t)),
                    "late": False})
+    if not h1 and str(cfg.exits.atr_source) == "1h":            # v1.10.0: the exits follow the 1h ATR
+        h1 = bn.klines("1h", 6 * int(cfg.exits.atr_1h_period) + 5, now_ms)
+    plan_d["exit"] = exit_distances(cfg, float(mark), float(sc.atr), sorted(h1, key=lambda c: c.open_ms), t)
     if cfg.risk.notional_multiple_full_tier and not bool(cfg.bold.enabled) and plan.enter_direction and mark:
         mult = float(cfg.risk.notional_multiple_full_tier)          # v1.9.0: the per-trade leverage live would use
         lev, got, note = trade_leverage(
-            multiple=mult * float(plan.enter_fraction), sl_pct=float(cfg.exits.sl_atr_multiple) * float(sc.atr) / float(mark),
+            multiple=mult * float(plan.enter_fraction), sl_pct=1.01 * plan_d["exit"]["sl_dist"] / float(mark),
             max_leverage=int(cfg.risk.leverage), margin_use_pct=float(cfg.risk.max_margin_use_pct),
             liq_multiple=float(cfg.risk.liq_min_sl_multiple), inst=BTC_USD_ASSUMED, notional=0.0,
             mmr_divisor=float(cfg.risk.liq_estimate_mmr_divisor))

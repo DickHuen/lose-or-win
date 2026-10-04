@@ -40,6 +40,7 @@ from perpbot.strategy import (
     DayFeatures,
     InsufficientData,
     day_features,
+    exit_distances,
     h4_gate_window,
     period_features,
     period_key,
@@ -566,8 +567,9 @@ class Simulator:
                 if enter_dir and trade is None and pause_reason is None:
                     price = _slipped(mark, enter_dir, cfg)
                     pct, _ = risk_pct_for_trade(rk, opened)
-                    size = compute_size(equity=eq[0], risk_pct=pct, fraction=frac, price=price, atr=f.score.atr,
-                                        sl_atr_multiple=float(cfg.exits.sl_atr_multiple),
+                    ex = exit_distances(cfg, price, f.score.atr, self.h1, t_now, opens=self.h1_open)   # as live
+                    size = compute_size(equity=eq[0], risk_pct=pct, fraction=frac, price=price, atr=ex["sl_dist"],
+                                        sl_atr_multiple=1.0,
                                         notional_cap_pct=float(rk.notional_cap_pct_equity), leverage=int(rk.leverage),
                                         inst=self.inst, raise_to_min=bool(rk.raise_to_min_notional))
                     if not size.ok or size.qty <= Decimal(0):
@@ -576,7 +578,7 @@ class Simulator:
                     else:
                         qty = float(size.qty)
                         atr = f.score.atr
-                        sl_d, tp_d = float(cfg.exits.sl_atr_multiple) * atr, float(cfg.exits.tp_atr_multiple) * atr
+                        sl_d, tp_d = float(ex["sl_dist"]), float(ex["tp_dist"])
                         trade = BtTrade(key, enter_dir, qty, price, fill_ms, atr, price - enter_dir * sl_d,
                                         price + enter_dir * tp_d, frac, qty * sl_d, eq[0],
                                         any("notional" in c for c in size.capped_by), f.score.score, f.gates_triggered())

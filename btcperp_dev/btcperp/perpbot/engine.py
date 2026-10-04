@@ -64,6 +64,7 @@ from perpbot.strategy import (
     ROLLING_PERIOD_MS,
     base_bar_ms,
     day_features,
+    exit_distances,
     hold_for_bold,
     key_ms,
     live_rolling_features,
@@ -893,7 +894,9 @@ class Engine:
         mark = float(plan.get("mark") or 0.0)
         # +1%: the entry is priced off the book (a short's bid is a little below the mark), so the pre-trade
         # liquidation check at the entry price still passes at a boundary leverage
-        sl_pct = 1.01 * float(self.cfg.exits.sl_atr_multiple) * float(plan.get("atr") or 0.0) / mark if mark > 0 else 0.0
+        ex = plan.get("exit") or {}
+        sl_dist = float(ex["sl_dist"]) if ex.get("sl_dist") else float(self.cfg.exits.sl_atr_multiple) * float(plan.get("atr") or 0.0)
+        sl_pct = 1.01 * sl_dist / mark if mark > 0 else 0.0
         lev, got, note = trade_leverage(multiple=want, sl_pct=sl_pct, max_leverage=int(r.leverage),
                                         margin_use_pct=float(r.max_margin_use_pct),
                                         liq_multiple=float(r.liq_min_sl_multiple), inst=inst, notional=equity * want,
@@ -1168,6 +1171,9 @@ class Engine:
                        f"risk ({self.cfg.risk.risk_per_trade_pct}% at the 100% tier) from this trade",
                        dedupe_key="ramp_complete")
         atr = float(plan["atr"])
+        ex_plan = plan.get("exit") or {}                 # v1.10.0: SL / TP distances decided with the plan
+        sl_dist_plan = float(ex_plan.get("sl_dist") or float(self.cfg.exits.sl_atr_multiple) * atr)
+        tp_dist_plan = float(ex_plan.get("tp_dist") or float(self.cfg.exits.tp_atr_multiple) * atr)
         slip = float(self.cfg.exits.entry_slippage_bps) / 1e4
         side = "BUY" if d > 0 else "SELL"
         filled: Order | None = None
@@ -1192,7 +1198,7 @@ class Engine:
                     mmr_divisor=float(self.cfg.risk.liq_estimate_mmr_divisor))
             else:
                 size = compute_size(equity=eq["equity"], risk_pct=risk_pct, fraction=fraction,
-                                    price=ref, atr=atr, sl_atr_multiple=float(self.cfg.exits.sl_atr_multiple),
+                                    price=ref, atr=sl_dist_plan, sl_atr_multiple=1.0,
                                     notional_cap_pct=float(self.cfg.risk.notional_cap_pct_equity),
                                     leverage=lev, inst=inst,
                                     raise_to_min=bool(self.cfg.risk.raise_to_min_notional),
@@ -1202,8 +1208,7 @@ class Engine:
                 self.alert("entry rejected", f"order violates limits: {size.reject_reason}")
                 return False
             if not bold:
-                sl_p, tp_p = bracket_prices(d, ref, atr, float(self.cfg.exits.sl_atr_multiple),
-                                            float(self.cfg.exits.tp_atr_multiple))
+                sl_p, tp_p = bracket_prices(d, ref, 1.0, sl_dist_plan, tp_dist_plan)
             sl_q = quantize_price(sl_p, inst.price_decimals, "nearest")
             tp_q = quantize_price(tp_p, inst.price_decimals, "nearest")
             try:
@@ -1400,6 +1405,8 @@ class Engine:
         else:
             daily = self.bn.klines("1d", int(cfg.binance.daily_candles_to_load), now_ms)
             h4 = self.bn.klines("4h", int(cfg.binance.h4_candles_to_load), now_ms)
+        if not h1 and str(cfg.exits.atr_source) == "1h":            # v1.10.0: the exits follow the 1h ATR
+            h1 = self.bn.klines("1h", 6 * int(cfg.exits.atr_1h_period) + 5, now_ms)
         fstart = day_start_ms(day_d) - int(cfg.binance.funding_days_to_load) * DAY_MS
         funding = self.bn.funding(fstart, now_ms)
         self.store_binance(daily, h4, funding, h1)
@@ -1526,6 +1533,8 @@ class Engine:
             "funding_percentile": fstat.percentile, "event_active": g_event.triggered, "late": late,
             "entry_blocks": blocks, "cadence": f.cadence, "period_utc": fmt_utc(from_ms(t_ms)),
         })
+        h1s = sorted(inputs.get("h1") or [], key=lambda c: c.open_ms)
+        plan_d["exit"] = exit_distances(cfg, float(ticker.mark), float(sc.atr), h1s, t_ms)    # v1.10.0
         if self.per_trade_leverage and plan.enter_direction:     # v1.9.0: shown in the analysis; re-planned at entry
             try:
                 lev, frac, note = self.plan_trade_leverage(plan_d, self.instrument(),
@@ -2003,6 +2012,8 @@ class Engine:
     # ================================================================ shadow
     def update_shadow(self) -> None:
         if not bool(self.cfg.shadow.enabled) or self.rolling:      # shadow variants replay daily decisions only
+            return
+        if str(self.cfg.exits.atr_source) != "daily":                # v1.10.0: shadow brackets use the daily ATR
             return
         try:
             from perpbot.shadow import update_shadow

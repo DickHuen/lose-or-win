@@ -126,6 +126,10 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("gates.event_allows_rule_closes", bool, None),
     ("exits.sl_atr_multiple", _NUM, lambda v: v > 0),
     ("exits.tp_atr_multiple", _NUM, lambda v: v > 0),
+    ("exits.atr_source", str, lambda v: v in ("daily", "1h")),     # v1.10.0
+    ("exits.atr_1h_period", int, lambda v: 2 <= v <= 200),
+    ("exits.sl_min_pct", _NUM, lambda v: 0 <= v < 50),
+    ("exits.tp_min_pct", _NUM, lambda v: 0 <= v < 50),
     ("exits.entry_slippage_bps", _NUM, lambda v: 0 <= v <= 500),
     ("exits.entry_attempts", int, lambda v: 1 <= v <= 5),
     ("exits.close_slippage_bps", _NUM, lambda v: 0 <= v <= 2000),

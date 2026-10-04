@@ -82,7 +82,8 @@ TEST_RISK = {"risk_per_trade_pct": 1.5, "ramp_trades": 10, "ramp_factor": 0.5, "
 TEST_STRATEGY = {"min_entry_abs_score": 0, "tier_low_max": 30, "tier_mid_max": 50, "tier_low_fraction": 0.25,
                  "tier_mid_fraction": 0.50, "tier_high_fraction": 1.00, "size_tiers": None}
 TEST_BOLD = {"enabled": False}
-TEST_EXITS = {"sl_atr_multiple": 1.5, "tp_atr_multiple": 3.0}         # v1.8.1 ships 1.0 / 1.5
+TEST_EXITS = {"sl_atr_multiple": 1.5, "tp_atr_multiple": 3.0,        # v1.10.0 ships 2 / 3 x the 1h ATR
+              "atr_source": "daily", "sl_min_pct": 0, "tp_min_pct": 0}
 TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ramp_trades: 0 ", "ramp_trades: 10 "),
                   ("notional_cap_pct_equity: 150 ", "notional_cap_pct_equity: 30 "),
                   ("raise_to_min_notional: true ", "raise_to_min_notional: false "),
@@ -94,8 +95,10 @@ TEST_RISK_YAML = (("risk_per_trade_pct: 5.0 ", "risk_per_trade_pct: 1.5 "), ("ra
                   ("size_tiers: [[0, 0.15], [40, 0.30], [50, 0.50], [75, 1.00]]", "size_tiers: null"),
                   ("equity_floor_pct_of_net_funded: 5 ", "equity_floor_pct_of_net_funded: 75 "),
                   ("permanent_floor_pct_of_cumulative_funded: 5 ", "permanent_floor_pct_of_cumulative_funded: 50 "),
-                  ('permanent_floor_lowered_in: "1.9.0"', "permanent_floor_lowered_in: null"),
-                  ("sl_atr_multiple: 1.0", "sl_atr_multiple: 1.5"), ("tp_atr_multiple: 1.5", "tp_atr_multiple: 3.0"),
+                  ('permanent_floor_lowered_in: "1.10.0"', "permanent_floor_lowered_in: null"),
+                  ("sl_atr_multiple: 2.0", "sl_atr_multiple: 1.5"), ("tp_atr_multiple: 3.0", "tp_atr_multiple: 3.0"),
+                  ('atr_source: "1h"', 'atr_source: "daily"'), ("sl_min_pct: 0.5", "sl_min_pct: 0"),
+                  ("tp_min_pct: 0.8", "tp_min_pct: 0"),
                   ("notional_multiple_full_tier: 20", "notional_multiple_full_tier: null"),
                   ("live_review_expectancy_floor_r: null", "live_review_expectancy_floor_r: -0.196"),
                   ("min_entry_abs_score: 20", "min_entry_abs_score: 0"), ("tier_low_max: 40", "tier_low_max: 30"),

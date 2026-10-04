@@ -148,15 +148,19 @@ def render(decision: dict[str, Any], cfg: Any, *, equity: float | None = None, r
             line += f"（倉位約 ${float(equity) * mult:,.0f}）"
         out.append(line)
     elif enter and mark and atr:
-        sl_m, tp_m = float(cfg.exits.sl_atr_multiple), float(cfg.exits.tp_atr_multiple)
-        sl = float(mark) - enter * sl_m * float(atr)
-        tp = float(mark) + enter * tp_m * float(atr)
+        ex = plan.get("exit") or {}            # v1.10.0: the distances decided with the plan (1h or daily ATR)
+        sl_d = float(ex.get("sl_dist") or float(cfg.exits.sl_atr_multiple) * float(atr))
+        tp_d = float(ex.get("tp_dist") or float(cfg.exits.tp_atr_multiple) * float(atr))
+        sl = float(mark) - enter * sl_d
+        tp = float(mark) + enter * tp_d
         risk_pct = float(cfg.risk.risk_per_trade_pct) * float(plan.get("enter_fraction") or 0.0)
         if ramp:
             risk_pct *= float(cfg.risk.ramp_factor)
         m = float(mark)
         out.append(f"  {_dir(enter)}：入場約 {_p(m)}｜止損約 {_p(sl)}（{(sl - m) / m * 100:+.1f}%）"
                    f"｜止賺約 {_p(tp)}（{(tp - m) / m * 100:+.1f}%）")
+        if ex.get("source") == "1h":
+            out.append(f"  止損止賺跟 1 小時波幅：ATR {_p(ex.get('atr'))}（≈ {float(ex['atr']) / m * 100:.2f}%）")
         mult = getattr(cfg.risk, "notional_multiple_full_tier", None)
         if mult:            # v1.8.0: position = equity x multiple x tier; the loss follows from the stop distance
             sizing = plan.get("sizing") or {}       # v1.9.0: the per-trade leverage (and a volatility cut)
