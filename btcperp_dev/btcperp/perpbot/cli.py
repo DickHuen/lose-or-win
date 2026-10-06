@@ -7,6 +7,8 @@
   proxykey new --owner 0x.. [--days N<=30] [--offline | --phone [--host IP]] | proxykey finish [--signature 0x..] | proxykey status
   backtest download | criteria | confirm | run   (offline from downloaded Binance data; see BACKTEST.md)
   preview [--equity USD]   (read-only: what the strategy would decide now; public data, no keys, no orders)
+  intraday-backtest download|run [--days N]   (v2.0.0: the 15-minute rules on Binance history; never trades)
+  intraday-replay [--days N]   (v2.0.0: recompute the stored live 15-minute decisions from the cached candles)
 
 Every bot command: exclusive file lock, full logging, non-zero exit code on error.
 Alerts (including errors) are stored and shown on the dashboard; Windows notifications (and Telegram,
@@ -49,7 +51,7 @@ log = logging.getLogger("perpbot.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_LOCK, EXIT_SELFTEST, EXIT_CONFIRM = 0, 1, 3, 4, 5, 6
 NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch", "snapshot"}
-NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest", "preview"}
+NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest", "preview", "intraday-backtest", "intraday-replay"}
 QUIET = {"snapshot"}              # dashboard convenience read: failures are logged, never alerted
 SNAPSHOT_LOCK_WAIT_SECONDS = 5.0  # a snapshot never queues behind a real run
 NEEDS_BINANCE = {"decide", "manage", "smoketest"}
@@ -57,7 +59,7 @@ TRADING = {"decide", "manage", "kill", "smoketest"}
 HEARTBEAT = {"decide", "manage"}
 # manual commands refused in a copy that is not the folder the scheduled tasks run in (review v1.2.0 item 16)
 GUARDED = {"pause", "unpause", "kill", "resume", "reasons", "status", "alerts", "smoketest", "flowwatch", "snapshot",
-           "dashboard", "proxykey", "backtest"}
+           "dashboard", "proxykey", "backtest", "intraday-replay"}
 NOTIFY_WAIT_SECONDS = 15.0
 
 
@@ -118,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--equity", type=float, default=None, help="equity for the size example (default: last recorded)")
     bt = sub.add_parser("backtest", help="backtest on downloaded Binance history (never trades)")
     bt.add_argument("action", choices=["download", "criteria", "confirm", "run"])
+    ib = sub.add_parser("intraday-backtest", help="v2.0.0: the 15-minute rules on Binance history (never trades)")
+    ib.add_argument("action", choices=["download", "run"])
+    ib.add_argument("--days", type=int, default=60, help="test period in days ending now (default 60)")
+    ib.add_argument("--equity", type=float, default=100.0, help="start equity per run (default 100)")
+    rp = sub.add_parser("intraday-replay", help="v2.0.0: recompute stored live 15-minute decisions (read-only)")
+    rp.add_argument("--days", type=float, default=3.0, help="how many days back (default 3)")
     return p
 
 
@@ -412,6 +420,10 @@ def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any
             return _run_preview(args, paths, cfg, calendar, clock, factories)
         if command == "backtest":
             return _run_backtest(args, paths, cfg, calendar, clock, factories, secrets)
+        if command == "intraday-backtest":
+            return _run_intraday_backtest(args, paths, cfg, calendar, clock, factories)
+        if command == "intraday-replay":
+            return _run_intraday_replay(args, paths, cfg, clock)
         from perpbot import winsched
 
         if args.action == "show":
@@ -550,6 +562,22 @@ def _run_preview(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock,
         finally:
             store.close()
     bn = (factories.binance or _default_binance)(cfg)
+    idy = cfg.get("intraday")
+    if idy is not None and idy.get("enabled"):                   # v2.0.0: the 15-minute rules
+        from perpbot.preview import preview_intraday
+
+        try:
+            record, nxt = preview_intraday(cfg, calendar, clock.now(), bn, equity, trade)
+        except Exception as e:  # noqa: BLE001
+            print(f"PREVIEW FAILED: {type(e).__name__}: {e}")
+            return EXIT_ERROR
+        finally:
+            bn.close()
+        for line in analysis.render_intraday(record, cfg, equity=equity, position=trade, title="預覽：如果而家決定"):
+            print(line)
+        print(f"下次決定：{nxt} HKT。（預覽只用公開數據同設定內嘅費用估算，唔落單；實際決定會讀交易所盤口、帳戶費率，"
+              f"仲會檢查暫停、時鐘、地區同數據完整性，所以有機會唔同。）")
+        return EXIT_OK
     try:
         decision, nxt = preview_decision(cfg, calendar, clock.now(), bn, trade)
     except Exception as e:  # noqa: BLE001
@@ -677,6 +705,69 @@ def _run_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock
         store.close()
 
 
+def _run_intraday_backtest(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock, factories: Factories) -> int:
+    """v2.0.0: download Binance 5m / 15m / 1h / 4h history, then run the live 15-minute rules over it under four cost
+    scenarios and two sizings. No lock: it never trades. Results: data/backtest_intraday/results_<time>/."""
+    from perpbot import backtest as old_bt
+    from perpbot import intraday_bt as ibt
+    from perpbot.timeutil import to_ms
+
+    data_dir = paths.data_dir / "backtest_intraday"
+    end_ms = to_ms(clock.now()) // ibt.M15 * ibt.M15
+    start_ms = end_ms - int(args.days) * ibt.DAY
+    try:
+        if args.action == "download":
+            bn = (factories.binance or _default_binance)(cfg)
+            try:
+                meta = ibt.download(bn, data_dir, start_ms, end_ms)
+            finally:
+                bn.close()
+            print(f"downloaded into {data_dir}: {meta['counts']}")
+            return EXIT_OK
+        data, meta = ibt.load(data_dir)
+        start_ms = max(start_ms, int(meta["start_ms"]))
+        end_ms = min(end_ms, int(meta["end_ms"]))
+        try:
+            cal = old_bt.merged_calendar(cfg, paths.root, calendar)
+        except Exception as e:  # noqa: BLE001 - the history file is optional for this backtest
+            log.warning("historical calendar unavailable (%s); live calendar only", e)
+            cal = calendar
+        data.releases = [int(e.release_utc.timestamp() * 1000) for e in cal.events]
+        rep = ibt.run_all(cfg, data, start_ms, end_ms, float(args.equity))
+        out = data_dir / f"results_{clock.now().strftime('%Y%m%d_%H%M%S')}_{int(args.days)}d"
+        out.mkdir(parents=True, exist_ok=True)
+        trades = rep.pop("trades")
+        (out / "summary.json").write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+        (out / "trades.json").write_text(json.dumps(trades, default=str), encoding="utf-8")
+        text = ibt.summary_md(rep, cfg)
+        (out / "summary.md").write_text(text, encoding="utf-8")
+        print(text)
+        print(f"results: {out}\nSend summary.md and summary.json for review (never .env).")
+        return EXIT_OK
+    except ibt.BacktestError as e:
+        print(f"BACKTEST ERROR: {e}")
+        return EXIT_ERROR
+
+
+def _run_intraday_replay(args: Any, paths: Paths, cfg: Any, clock: Clock) -> int:
+    from perpbot import intraday_bt as ibt
+    from perpbot.timeutil import to_ms
+
+    if not paths.db_file.exists():
+        print("no database yet")
+        return EXIT_OK
+    store = Store(paths.db_file, clock, cfg.config_version, code_version())
+    try:
+        res = ibt.replay(store, cfg, to_ms(clock.now()) - int(float(args.days) * ibt.DAY))
+    finally:
+        store.close()
+    print(f"live 15-minute decisions checked: {res['checked']}, identical on replay: {res['same']}, "
+          f"skipped (data incomplete / older format): {res['skipped']}, DIFFERENT: {len(res['different'])}")
+    for d in res["different"][:50]:
+        print(f"  {d['key']}: {d['diff']}")
+    return EXIT_OK if not res["different"] else EXIT_ERROR
+
+
 def _redacted_tail(path: Any, redactor: Any) -> str:
     return redactor.redact(tail(path, 25))[-3000:]
 
@@ -715,7 +806,9 @@ def _missed_run_alerts(engine: Any, cfg: Any, store: Store, clock: Clock) -> Non
     from datetime import timedelta
 
     now = clock.now()
-    first = store.query("SELECT MIN(ts_ms) AS t FROM runs WHERE event='start' AND command IN ('decide', 'manage')")
+    # v2.0.0: only since this config version first ran (a new schedule is not audited against the old one's runs)
+    first = store.query("SELECT MIN(ts_ms) AS t FROM runs WHERE event='start' AND command IN ('decide', 'manage') "
+                        "AND config_version = ?", [cfg.config_version])
     if not first or first[0]["t"] is None:
         return
     from perpbot.timeutil import from_ms

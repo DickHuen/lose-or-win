@@ -193,6 +193,62 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("bold.max_loss_fraction", _NUM, lambda v: 0 < v < 1),
     ("bold.liq_buffer_pct", _NUM, lambda v: v >= 0),
     ("bold.hold_until_tp_sl", bool, None),
+    # v2.0.0 intraday (owner 2026-10-06)
+    ("schedule.intraday_every_minutes", int, lambda v: v == 15),
+    ("schedule.intraday_offset_minutes", int, lambda v: 0 <= v < 15),
+    ("intraday.enabled", bool, None),
+    ("intraday.cache_backfill_days", _NUM, lambda v: 10 <= v <= 60),
+    ("intraday.entry_max_delay_minutes", _NUM, lambda v: 1 <= v <= 14),
+    ("intraday.swing_k", int, lambda v: 1 <= v <= 5),
+    ("intraday.structure_lookback_hours", int, lambda v: 24 <= v <= 168),
+    ("intraday.atr_period", int, lambda v: 2 <= v <= 100),
+    ("intraday.er_hours", int, lambda v: 2 <= v <= 168),
+    ("intraday.ctx_ema_fast", int, lambda v: v >= 2),
+    ("intraday.ctx_ema_slow", int, lambda v: v >= 3),
+    ("intraday.ctx_slope_bars", int, lambda v: 1 <= v <= 20),
+    ("intraday.leg_min_atr", _NUM, lambda v: v > 0),
+    ("intraday.retrace_min", _NUM, lambda v: 0 < v < 1),
+    ("intraday.retrace_max", _NUM, lambda v: 0 < v < 1),
+    ("intraday.pullback_max_bars", int, lambda v: 1 <= v <= 48),
+    ("intraday.trigger_clv_min", _NUM, lambda v: -1 <= v < 1),
+    ("intraday.reversal_window_hours", int, lambda v: 1 <= v <= 48),
+    ("intraday.retest_zone_atr", _NUM, lambda v: v >= 0),
+    ("intraday.reclaim_atr", _NUM, lambda v: v >= 0),
+    ("intraday.stop_buffer_atr15", _NUM, lambda v: v >= 0),
+    ("intraday.sl_min_atr1h", _NUM, lambda v: v >= 0),
+    ("intraday.sl_min_pct", _NUM, lambda v: 0 <= v < 10),
+    ("intraday.max_cost_r", _NUM, lambda v: 0 < v < 1),
+    ("intraday.sl_max_atr1h", _NUM, lambda v: v > 0),
+    ("intraday.sl_max_pct", _NUM, lambda v: 0 < v <= 10),
+    ("intraday.tp1_r", _NUM, lambda v: v > 0),
+    ("intraday.tp1_fraction", _NUM, lambda v: 0 < v < 1),
+    ("intraday.tp2_r", _NUM, lambda v: v > 0),
+    ("intraday.room_recent_bars", int, lambda v: 1 <= v <= 96),
+    ("intraday.open_room_atr", _NUM, lambda v: v > 0),
+    ("intraday.invalidation_timeframe", str, lambda v: v in ("15m", "1h")),
+    ("intraday.trail_atr1h", _NUM, lambda v: v > 0),
+    ("intraday.trail_min_step_atr15", _NUM, lambda v: v >= 0),
+    ("intraday.be_trigger_r", _NUM, lambda v: v > 0),
+    ("intraday.max_hold_hours", _NUM, lambda v: 0 < v <= 72),
+    ("intraday.no_progress_hours", _NUM, lambda v: v > 0),
+    ("intraday.no_progress_mfe_r", _NUM, lambda v: v >= 0),
+    ("intraday.cooldown_bars", int, lambda v: 0 <= v <= 96),
+    ("intraday.max_entries_per_day", int, lambda v: 1 <= v <= 96),
+    ("intraday.score_base_continuation", _NUM, lambda v: v >= 0),
+    ("intraday.score_base_reversal", _NUM, lambda v: v >= 0),
+    ("intraday.score_trend", _NUM, lambda v: v >= 0),
+    ("intraday.score_ctx_aligned", _NUM, lambda v: v >= 0),
+    ("intraday.score_ctx_neutral", _NUM, lambda v: v >= 0),
+    ("intraday.score_room", _NUM, lambda v: v >= 0),
+    ("intraday.score_room_full_r", _NUM, lambda v: v > 0),
+    ("intraday.score_cost", _NUM, lambda v: v >= 0),
+    ("intraday.break_full_atr", _NUM, lambda v: v > 0),
+    ("intraday.stop_slippage_bps", _NUM, lambda v: 0 <= v <= 200),
+    ("intraday.funding_hold_hours", _NUM, lambda v: v >= 0),
+    ("intraday.fee_min_fills", int, lambda v: v >= 1),
+    ("intraday.cost_book_depth", int, lambda v: v in (10, 100, 500, 1000)),
+    ("intraday.event_block_before_minutes", _NUM, lambda v: v >= 0),
+    ("intraday.event_block_after_minutes", _NUM, lambda v: v >= 0),
 ]
 
 
@@ -296,8 +352,28 @@ def validate(data: dict[str, Any]) -> None:
         sc = data["schedule"]
         if not sc["period_entry_start_minutes"] < sc["period_entry_end_minutes"]:
             errors.append("schedule.period_entry_start_minutes must be < schedule.period_entry_end_minutes")
+        idy = data.get("intraday") or {}
+        if idy:
+            if not idy["retrace_min"] < idy["retrace_max"]:
+                errors.append("intraday.retrace_min must be < intraday.retrace_max")
+            if not idy["ctx_ema_fast"] < idy["ctx_ema_slow"]:
+                errors.append("intraday.ctx_ema_fast must be < intraday.ctx_ema_slow")
+            if not idy["tp1_r"] < idy["tp2_r"]:
+                errors.append("intraday.tp1_r must be < intraday.tp2_r")
+            if not idy["tp1_r"] < idy["score_room_full_r"]:
+                errors.append("intraday.score_room_full_r must be > intraday.tp1_r")
+            if not idy["sl_min_atr1h"] < idy["sl_max_atr1h"] or not idy["sl_min_pct"] < idy["sl_max_pct"]:
+                errors.append("intraday stop minimums must be below the maximums (sl_min_* < sl_max_*)")
+            if idy["no_progress_hours"] > idy["max_hold_hours"]:
+                errors.append("intraday.no_progress_hours must be <= intraday.max_hold_hours")
+            need_days = (idy["ctx_ema_slow"] + idy["ctx_slope_bars"] + 2) * 4 / 24.0 + 1
+            if idy["cache_backfill_days"] < need_days:
+                errors.append(f"intraday.cache_backfill_days must be >= {need_days:.1f} (the 4h background needs it)")
+            if idy["enabled"] and (sc["decide_times_hkt"] or sc["manage_times_hkt"]):
+                errors.append("schedule.decide_times_hkt / manage_times_hkt must be empty while intraday.enabled "
+                              "(one 15-minute task runs everything)")
         step = {"rolling_4h": 4, "rolling_1h": 1}.get(s["cadence"])
-        if step:
+        if step and not idy.get("enabled"):
             if sc["period_entry_end_minutes"] > step * 60:
                 errors.append(f"schedule.period_entry_end_minutes must be <= {step * 60} (the {s['cadence']} period): "
                               f"entry windows of consecutive periods may not overlap")

@@ -10,9 +10,18 @@ from perpbot.timeutil import HKT, hkt_at, hkt_date, to_ms
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
+def intraday_times(cfg: Any) -> list[str]:
+    """v2.0.0: HH:MM HKT of the 15-minute intraday runs (empty when intraday is off)."""
+    sec = cfg.get("intraday") if hasattr(cfg, "get") else None
+    if sec is None or not sec.get("enabled"):
+        return []
+    every, off = int(cfg.schedule.intraday_every_minutes), int(cfg.schedule.intraday_offset_minutes)
+    return [f"{m // 60:02d}:{m % 60:02d}" for m in range(off, 24 * 60, every)]
+
+
 def slots_for_day(cfg: Any, d: date) -> list[tuple[str, datetime]]:
     sc = cfg.schedule
-    out = [("decide", hkt_at(d, t)) for t in sc.decide_times_hkt]
+    out = [("decide", hkt_at(d, t)) for t in list(sc.decide_times_hkt) + intraday_times(cfg)]
     out += [("manage", hkt_at(d, t)) for t in sc.manage_times_hkt]
     out.append(("report_daily", hkt_at(d, sc.report_daily_time_hkt)))
     out.append(("backup", hkt_at(d, sc.backup_time_hkt)))

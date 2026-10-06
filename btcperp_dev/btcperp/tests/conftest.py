@@ -115,10 +115,32 @@ def with_test_risk(d: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
-def shipped_config() -> dict[str, Any]:
+H1_DECIDE = [f"{h:02d}:{m}" for h in range(24) for m in ("30", "50")]
+H1_MANAGE = ["02:10", "06:10", "10:10", "14:10", "18:10", "22:10"]
+
+
+def legacy(d: dict[str, Any]) -> dict[str, Any]:
+    """v2.0.0 ships the 15-minute intraday rules. The v1.x score tests run the score path: intraday off and the
+    v1.9.0 hourly schedule back."""
+    d["intraday"]["enabled"] = False
+    d["schedule"]["missed_tolerance_minutes"] = 30           # v1.x value (v2.0.0: 12, below the 15-minute step)
+    d["schedule"]["late_tolerance_minutes"] = 10
+    if not d["schedule"]["decide_times_hkt"]:
+        d["schedule"]["decide_times_hkt"] = list(H1_DECIDE)
+        d["schedule"]["manage_times_hkt"] = list(H1_MANAGE)
+    return d
+
+
+def shipped_intraday_config() -> dict[str, Any]:
+    """The config exactly as shipped (v2.0.0: intraday on)."""
     import yaml
 
     return yaml.safe_load((ROOT / "config" / "config.yaml").read_text(encoding="utf-8"))
+
+
+def shipped_config() -> dict[str, Any]:
+    """The shipped config on the v1.x score path (see `legacy`); v2.0.0 tests use shipped_intraday_config()."""
+    return legacy(shipped_intraday_config())
 
 
 @pytest.fixture
@@ -338,6 +360,10 @@ def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "btcperp"
     (root / "config").mkdir(parents=True)
     text = (ROOT / "config" / "config.yaml").read_text(encoding="utf-8")
+    text, n0 = re.subn(r'(\nintraday:\n(?:  #.*\n)*  enabled: )true', r'\1false', text)
+    text, n3 = re.subn(r'missed_tolerance_minutes: 12', 'missed_tolerance_minutes: 30', text)
+    text, n4 = re.subn(r'late_tolerance_minutes: 5 ', 'late_tolerance_minutes: 10 ', text)
+    assert n0 == 1 and n3 == 1 and n4 == 1
     text, n1 = re.subn(r'decide_times_hkt: \[[^\]]*\]', 'decide_times_hkt: ["08:30", "08:50"]', text)
     text, n2 = re.subn(r'manage_times_hkt: \[[^\]]*\]', 'manage_times_hkt: ["12:30", "16:30", "20:30", "00:30", "04:30"]',
                        text)

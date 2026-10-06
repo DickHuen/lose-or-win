@@ -1,5 +1,13 @@
 # btcperp - BTC-PERP bot for Polymarket Perps
 
+**v2.0.0: intraday rules every 15 minutes** (`intraday.enabled`; `INTRADAY.md` in Chinese, `perpbot/intraday.py`):
+direction from closed 1h swing structure (long / short mirror-symmetric; continuation pullbacks and failed-retest
+reversals; ranges skipped), structure stops at least as wide as max(1 ATR1h, 0.5%, cost / 0.20), two legs (TP1 1 R
+then break-even + ATR trail, TP2 3 R), 1h-close invalidation, 12 h time stop, a cost gate from the real order book
+and the account's fee rate, an incremental Binance candle cache with integrity checks and Retry-After handling, one
+15-minute scheduled task, and a backtest / replay that call the same functions. The daily-score strategy below is
+the v1.x path (intraday.enabled false).
+
 Daily hybrid trend/structure strategy on BTC-PERP with exchange-side bracket stop-loss/take-profit,
 fixed-risk sizing, gates, kill switches, full append-only logging, a local dashboard and Windows
 desktop notifications. It runs on the owner's Windows PC from Windows Task Scheduler; see `START_HERE.md`
@@ -14,7 +22,9 @@ desktop notifications. It runs on the owner's Windows PC from Windows Task Sched
 | `Proxy_Key.bat` | Proxy key; the main wallet only signs (P: phone MetaMask on the same Wi-Fi; N: hardware wallet only, asks for `HARDWARE`; O: another computer) |
 | `Edit_Secrets.bat` | Open .env in Notepad |
 | `2_Smoketest.bat` | Smoketest: YES / W (+ withdrawal probe) / R |
-| `Backtest.bat` | Backtest (asks for `CONFIRM` on the criteria the first time) |
+| `Backtest.bat` | Backtest of the v1.x score strategy (asks for `CONFIRM` on the criteria the first time) |
+| `Backtest_Intraday.bat` | v2.0.0: download 365 days of Binance 5m/15m/1h/4h candles and run the live 15-minute rules over 60 and 365 days, 4 cost scenarios |
+| `Replay_Check.bat` | v2.0.0: recompute the last 3 days of live 15-minute decisions from the cached candles (expects `DIFFERENT: 0`) |
 | `3_Schedule_Install.bat` | Go live (asks for `GO`; needs a passing full smoketest) |
 | `Dashboard.bat` | Open the dashboard |
 | `Status.bat` | Status |
@@ -35,8 +45,10 @@ other copy of the folder.
 
 | Command | What it does |
 |---|---|
-| `decide` | Every hour (rolling_1h, v1.9.0): HH:30 / HH:50 HKT, one entry per hour, entry window HH:30-HH+1:00 (rolling_4h: after each UTC 4h close, window HH:30-HH+1:30). Daily cadence: 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
+| `decide` | v2.0.0 (intraday.enabled): every 15 minutes at HH:01/16/31/46 HKT from one repeating task: reconcile, update the candle cache, manage the open intraday position (TP1 -> break-even -> trail, invalidation, time / no-progress exits), then decide (entry only within 10 minutes of the candle close). v1.x: Every hour (rolling_1h, v1.9.0): HH:30 / HH:50 HKT, one entry per hour, entry window HH:30-HH+1:00 (rolling_4h: after each UTC 4h close, window HH:30-HH+1:30). Daily cadence: 08:30 / 08:50 HKT. Reconcile, then (only inside 08:30-09:30 HKT) compute the score from closed UTC daily candles, apply gates, log the decision and intent, and enter/flip/close. Idempotent: the second run completes or skips. New positions are blocked when the clock differs from the exchange by more than 30 s, or when the economic calendar's coverage has ended (closes still run). After the window with a position open and no decision yet: a late decision on the same data runs the close rules only. |
 | `manage` | 12:30, 16:30, 20:30, 00:30, 04:30 HKT. Reconcile, complete a planned close, log position/market data. If no decision was made in today's window and a position is open, runs the late close-only decision. Never opens. |
+| `intraday-backtest download\|run [--days N]` | v2.0.0: Binance history, then the live 15-minute functions under 4 cost scenarios x 2 sizings; `data/backtest_intraday/results_*/summary.md`. Never trades, no lock. |
+| `intraday-replay [--days N]` | v2.0.0: recompute stored live 15-minute decisions from the cached candles and their logged inputs; exit code 1 if any differs. Read-only. |
 | `report daily` / `weekly` / `monthly [--month YYYY-MM] [--only-first-sunday]` | Reports printed and saved in `data/reports/`; daily CSV export; weekly zipped CSV of all logs; monthly statistics file. |
 | `alerts` | Print every unread alert once (`PING OWNER ...`) and mark it read (same list as the dashboard). |
 | `snapshot` | Read-only exchange read for the dashboard (position, SL/TP, mark, equity). No orders, no state changes, no kill checks. Waits at most 5 s for the lock (skips if a run is busy); failures are logged, never alerted. |

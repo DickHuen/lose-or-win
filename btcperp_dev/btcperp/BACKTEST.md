@@ -1,4 +1,32 @@
-# Backtest (review B3): pre-registered design, v1.5.0
+# Backtest
+
+## v2.0.0 intraday backtest (`windows\Backtest_Intraday.bat`, `run.py intraday-backtest download|run --days N`)
+
+中文摘要：
+- 用實盤同一套函數。
+- 4 個成本情景：零、樂觀、基準、壓力。
+- 2 種倉位：你嘅 ×3–×20，同每單 3% 風險／最多 10 倍。
+- 結果會分開報告：全期、前 2/3、後 1/3、多／空、形態、出場原因。
+- 係近似，唔係 Polymarket 實際成交重播；每份報告開頭都會列出近似之處。
+- 呢個版本發佈時**未用真實數據跑過**：開發環境攞唔到 Binance。
+
+- Data: Binance BTCUSDT spot 5m / 15m / 1h / 4h candles (+15 days warm-up) and USD-M funding, downloaded into
+  `data/backtest_intraday/`; gaps are counted and every decision runs the same integrity check as live.
+- Decisions: `intraday.evaluate` 1 minute after each 15-minute close, on candles closed by then; the same history
+  rules (one entry per leg, cooldown, 6 per day), event blackout and score threshold as live.
+- Sizing: `intraday.position_size` (owner map, per-trade leverage with the volatility cut, quantity rounded down to
+  0.00001 BTC, $10 minimum) and `intraday.split_legs`; or 3% risk at the stop with the position <= 10 x equity.
+- Execution: market fills at the next 5m open +/- the scenario's slippage; exchange stop / TP1 / TP2 on the 5m path,
+  stop first when both are inside one candle, a candle opening beyond the stop fills at its open, beyond the
+  estimated liquidation = liquidation; management at every run with `intraday.exit_signal` / `next_stop`; funding =
+  Binance 8h rate / 8 per hour. Without 5m data the path uses 15m candles and the report says so.
+- Costs per side (fee, slippage): zero 0 / 0, optimistic 2 / 1 bps, base 4 / 5 bps, stress 8 / 15 bps (Codex's four).
+  The cost gate uses the scenario's own cost, so a costlier scenario also takes fewer trades.
+- Output: `summary.md`, `summary.json`, `trades.json` (per trade: setup, score, legs, exits with labels, fees,
+  funding, R, MFE / MAE in R).
+- Live vs replay: `run.py intraday-replay` recomputes the stored live decisions from the cached candles.
+
+## v1.x score backtest (review B3): pre-registered design, v1.5.0
 
 中文摘要：
 - 回測喺你部電腦跑。佢會下載 Binance BTCUSDT 由 2017 年開始嘅公開數據，用同實盤一模一樣嘅決策代碼逐日重播。

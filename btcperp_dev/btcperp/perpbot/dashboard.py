@@ -67,7 +67,8 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
     snap_run = store.latest("runs", "command='snapshot' AND event='end'")
     snap_error = (f"{snap_run['ts_hkt']}: {snap_run['error']}"
                   if snap_run and snap_run["status"] == "error" and (not snap or snap_run["ts_ms"] > snap["ts_ms"]) else None)
-    first = store.query("SELECT MIN(ts_ms) AS t FROM runs WHERE event='start' AND command IN ('decide','manage')")
+    first = store.query("SELECT MIN(ts_ms) AS t FROM runs WHERE event='start' AND command IN ('decide','manage') "
+                        "AND config_version = ?", [cfg.config_version])
     audit_rows: list[dict[str, Any]] = []
     if first and first[0]["t"]:
         start = max(now - timedelta(hours=48), from_ms(int(first[0]["t"])))
@@ -117,7 +118,8 @@ def build_summary(store: Store, cfg: Any, calendar: Any, now: datetime) -> dict[
                        if open_t else None),
         "decision": ({"utc_day": dec["utc_day"], "ts_hkt": dec["ts_hkt"], "score": dec["data"].get("score"),
                       "gates": dec["data"].get("gates"), "plan": dec["data"].get("plan"), "action": dec["action"],
-                      "reason": dec["reason"], "analysis": dec["data"].get("analysis")} if dec else None),
+                      "reason": dec["reason"], "analysis": dec["data"].get("analysis"),
+                      "intraday": bool(dec["data"].get("intraday"))} if dec else None),
         "last_decision_row": ({"utc_day": last_dec["utc_day"], "action": last_dec["action"], "reason": last_dec["reason"],
                                "ts_hkt": last_dec["ts_hkt"]} if last_dec else None),
         "equity_series": series,
@@ -351,7 +353,10 @@ function render(d){
   h+="<div>資料來源</div><div class='mut'>"+esc(P.source)+" "+esc(P.ts_hkt)+"</div>";}
  else h="<div>倉位</div><div>空倉 flat</div>"+(P?"<div>標記價</div><div>"+f(P.mark)+"</div><div>資料時間</div><div class='mut'>"+esc(P.source)+" "+esc(P.ts_hkt)+"</div>":"");
  $("pos").innerHTML=h;
- const D=d.decision;if(D&&D.score){const s=D.score,pl=D.plan||{},gs=D.gates||{};
+ const D=d.decision;if(D&&D.intraday){
+  $("dec").innerHTML="<div class='kv'><div>15 分鐘K (UTC)</div><div>"+esc(D.utc_day)+" <span class='mut'>"+esc(D.ts_hkt)+"</span></div><div>行動</div><div><b>"+esc(D.action)+"</b></div></div>"+
+   "<div class='mut'>"+esc(D.reason)+"</div>"+(D.analysis?"<pre class='ana'>"+esc(D.analysis.join("\n"))+"</pre>":"");}
+ else if(D&&D.score){const s=D.score,pl=D.plan||{},gs=D.gates||{};
   const comp=(n,v,m)=>"<div class='kv'><div>"+n+"</div><div>"+f(v)+"</div></div><div class='bar'><i style='width:"+Math.min(100,Math.abs(v)/m*100)+"%;background:"+(v>=0?"var(--up)":"var(--down)")+"'></i></div>";
   $("dec").innerHTML="<div class='kv'><div>決定時段 (UTC)</div><div>"+esc(D.utc_day)+" <span class='mut'>"+esc(D.ts_hkt)+"</span></div><div>分數</div><div class='big "+(s.score>0?"up":s.score<0?"down":"")+"'>"+f(s.score)+"</div>"+
    "<div>方向 / 注碼級別</div><div>"+dir(s.direction)+" ・ "+f(s.tier_fraction*100,0)+"%</div><div>行動</div><div><b>"+esc(D.action)+"</b></div></div>"+

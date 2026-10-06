@@ -6,7 +6,7 @@ echo UPGRADE btcperp in %CD%
 echo Put the new btcperp_vX.Y.Z.zip in your Downloads folder first (do NOT unzip it).
 echo The upgrade stops the scheduled bot, waits for a running command to finish, installs the new
 echo version, runs the tests and then restarts the scheduled bot. data\, logs\ and .env are kept.
-echo Avoid the decision times: HKT 00:30, 04:30, 08:30, 12:30, 16:30, 20:30 (about 30 min either side).
+echo From v2.0.0 the bot runs every 15 minutes (HH:01, HH:16, HH:31, HH:46 HKT); the upgrade waits for a running one.
 echo.
 set "PY="
 where py >nul 2>nul && set "PY=py -3"

@@ -87,7 +87,13 @@ class Reporter:
                                 [day.isoformat(), (day + timedelta(days=1)).isoformat()]) or \
             self.store.latest("decisions", "score IS NOT NULL")
         lines = [f"BTC-PERP daily report - {hkt_date(now).isoformat()} (HKT)"]
-        if dec:
+        if dec and isinstance(dec["data"], dict) and dec["data"].get("intraday"):
+            lines.append(f"Last 15-minute decision {dec['utc_day']}: {dec['action']} - {dec['reason'][:300]}")
+            lines += [f"  {x}" for x in (dec["data"].get("analysis") or [])[:12]]
+            n_enter = self.store.count("decisions", "utc_day >= ? AND utc_day < ? AND action='enter'",
+                                       [day.isoformat(), (day + timedelta(days=1)).isoformat()])
+            lines.append(f"Entries decided today (UTC): {n_enter}")
+        elif dec:
             d = dec["data"]
             sc = d.get("score", {})
             lines.append(f"Decision {dec['utc_day']}: score {_fmt(sc.get('score'))} "
@@ -298,7 +304,16 @@ class Reporter:
         on_time = {r["utc_day"] for r in rows if isinstance(r["data"], dict) and not (r["data"].get("plan") or {}).get("late")}
         limit = int(self.cfg.reports.max_missed_decision_days)
         step = {"rolling_4h": 4, "rolling_1h": 1}.get(str(self.cfg.strategy.cadence))
-        if step:                                        # v1.9.0: rolling_1h counts hours, limit x 24
+        idy = self.cfg.get("intraday")
+        if idy is not None and idy.get("enabled"):       # v2.0.0: 15-minute candles, limit x 96
+            f15 = self.store.query("SELECT MIN(utc_day) AS k FROM decisions WHERE utc_day LIKE '%/15m'")
+            k0 = f15[0]["k"] if f15 and f15[0]["k"] else "9999"          # counted from the first 15-minute decision
+            keys = [k for k in (f"{d.isoformat()}T{m // 60:02d}:{m % 60:02d}/15m" for d in days for m in range(0, 1440, 15))
+                    if k >= k0]
+            missed = [k for k in keys if k not in on_time]
+            incomplete = len(missed) > limit * 96
+            what = f"{len(missed)} fifteen-minute candles"
+        elif step:                                      # v1.9.0: rolling_1h counts hours, limit x 24
             keys = [f"{d.isoformat()}T{h:02d}:00" for d in days for h in range(0, 24, step)]
             missed = [k for k in keys if k not in on_time]
             incomplete = len(missed) > limit * (24 // step)

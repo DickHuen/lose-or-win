@@ -32,15 +32,33 @@ MONTHS = ("January", "February", "March", "April", "May", "June", "July", "Augus
 class TaskSpec:
     name: str              # e.g. decide_0830
     args: str              # arguments after `-m perpbot`
-    kind: str              # daily | weekly | monthly_first | logon
+    kind: str              # daily | weekly | monthly_first | logon | repeat (v2.0.0: daily + every N minutes)
     hkt: str = ""          # HH:MM in HKT
     weekday: str = "Sunday"
     time_limit: str = "PT45M"
+    every_minutes: int = 0
+
+
+def intraday_enabled(cfg: Any) -> bool:
+    sec = cfg.get("intraday") if hasattr(cfg, "get") else None
+    return bool(sec is not None and sec.get("enabled"))
+
+
+def intraday_task(cfg: Any) -> TaskSpec:
+    """v2.0.0: ONE task, daily from 00:MM HKT, repeated every 15 minutes for a day: HH:01, HH:16, HH:31, HH:46.
+    A run that is still going when the next one is due makes Task Scheduler skip that one (IgnoreNew); the
+    13-minute limit stops a hung run before the next slot."""
+    sc = cfg.schedule
+    every = int(sc.intraday_every_minutes)
+    return TaskSpec("decide_15m", "decide", "repeat", f"00:{int(sc.intraday_offset_minutes):02d}", time_limit="PT13M",
+                    every_minutes=every)
 
 
 def plan(cfg: Any, with_dashboard: bool = True) -> list[TaskSpec]:
     sc = cfg.schedule
     out: list[TaskSpec] = []
+    if intraday_enabled(cfg):
+        out.append(intraday_task(cfg))
     for t in sc.decide_times_hkt:
         out.append(TaskSpec(f"decide_{t.replace(':', '')}", "decide", "daily", t))
     for t in sc.manage_times_hkt:
@@ -87,6 +105,16 @@ def hkt_boundary(hhmm: str, now_local: datetime, offset_hours: float) -> str:
     return first.strftime("%Y-%m-%dT%H:%M:%S") + "+08:00"
 
 
+def repeat_boundary(offset_min: int, every: int, now_local: datetime, offset_hours: float) -> str:
+    """v2.0.0: the next 15-minute slot (HKT minute % every == offset) after now, so the repeating task starts at
+    once instead of tomorrow; its daily trigger then repeats it every `every` minutes around the clock."""
+    now_hkt = now_local - timedelta(hours=offset_hours) + timedelta(hours=8)
+    t = now_hkt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    while (t.hour * 60 + t.minute) % every != offset_min % every:
+        t += timedelta(minutes=1)
+    return t.strftime("%Y-%m-%dT%H:%M:%S") + "+08:00"
+
+
 def user_id() -> str | None:
     dom, user = os.environ.get("USERDOMAIN"), os.environ.get("USERNAME")
     return f"{dom}\\{user}" if (os.name == "nt" and dom and user) else None
@@ -101,9 +129,15 @@ def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, 
     else:
         h, m, shift = hkt_to_local(spec.hkt, offset_hours)
         boundary = start_boundary(h, m, now_local)
-        if spec.kind == "daily":
+        rep = ""
+        if spec.kind in ("daily", "repeat"):
             boundary = hkt_boundary(spec.hkt, now_local, offset_hours)
+            if spec.kind == "repeat":
+                boundary = repeat_boundary(int(spec.hkt.split(":")[1]), int(spec.every_minutes), now_local, offset_hours)
             sched = "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
+            if spec.kind == "repeat":
+                rep = (f"<Repetition><Interval>PT{int(spec.every_minutes)}M</Interval><Duration>P1D</Duration>"
+                       f"<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>")
         elif spec.kind == "monthly_first" and shift == 0:
             months = "".join(f"<{mo} />" for mo in MONTHS)
             sched = ("<ScheduleByMonthDayOfWeek><Weeks><Week>1</Week></Weeks><DaysOfWeek><Sunday /></DaysOfWeek>"
@@ -114,11 +148,12 @@ def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, 
             base = spec.weekday if spec.kind == "weekly" else "Sunday"
             day = DAYS[(DAYS.index(base) + shift) % 7]
             sched = f"<ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><{day} /></DaysOfWeek></ScheduleByWeek>"
-        trig = f"<CalendarTrigger><StartBoundary>{boundary}</StartBoundary><Enabled>true</Enabled>{sched}</CalendarTrigger>"
+        trig = (f"<CalendarTrigger>{rep}<StartBoundary>{boundary}</StartBoundary><Enabled>true</Enabled>{sched}"
+                f"</CalendarTrigger>")
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>btcperp {escape(spec.args)} ({spec.hkt or 'at logon'} HKT)</Description>
+    <Description>btcperp {escape(spec.args)} ({spec.hkt or 'at logon'} HKT{f", every {spec.every_minutes} min" if spec.kind == "repeat" else ""})</Description>
   </RegistrationInfo>
   <Triggers>{trig}</Triggers>
   <Principals>
@@ -128,7 +163,7 @@ def task_xml(spec: TaskSpec, root: Path, python_exe: Path, offset_hours: float, 
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>{"IgnoreNew" if spec.kind == "repeat" else "Queue"}</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
@@ -188,8 +223,12 @@ def install(cfg: Any, root: Path, tasks_dir: Path, *, dry_run: bool = False, wit
         results.append({"task": name, "ok": rc == 0, "xml": str(path), "output": out})
         if rc == 0 and spec.kind == "logon":
             _run(["schtasks", "/Run", "/TN", name])        # start the dashboard now, not only at next logon
-    if _live() and not dry_run:
+    main_ok = all(r["ok"] for r in results if r["task"].split("\\")[-1].startswith("decide"))
+    if _live() and not dry_run and main_ok:
         results += remove_stale(cfg)
+    elif _live() and not dry_run:
+        results.append({"task": "old decide/manage tasks", "ok": False,
+                        "output": "KEPT: the new decide task did not register, so the old schedule was not removed"})
     if _live() and not dry_run and any(r["ok"] for r in results):
         write_marker(root)
     return results
@@ -304,8 +343,9 @@ def summary_lines(cfg: Any, offset_hours: float | None = None) -> list[str]:
             lines.append(f"{spec.name:<16} at logon (dashboard server)")
             continue
         h, m, shift = hkt_to_local(spec.hkt, off)
-        when = {"daily": "daily", "weekly": f"every {spec.weekday}", "monthly_first": "first Sunday"}[spec.kind]
-        pinned = "  (pinned to HKT)" if spec.kind == "daily" else ""
+        when = {"daily": "daily", "weekly": f"every {spec.weekday}", "monthly_first": "first Sunday",
+                "repeat": f"every {spec.every_minutes} min, all day"}[spec.kind]
+        pinned = "  (pinned to HKT)" if spec.kind in ("daily", "repeat") else ""
         lines.append(f"{spec.name:<16} {spec.hkt} HKT = {h:02d}:{m:02d} local{' (day shift %+d)' % shift if shift else ''}  "
                      f"{when}{pinned}")
     return lines

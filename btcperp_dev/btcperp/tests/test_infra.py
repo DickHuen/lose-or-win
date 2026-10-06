@@ -68,6 +68,13 @@ def test_strategy_code_has_no_hardcoded_strategy_numbers():
         toks = tokenize.generate_tokens(io.StringIO((root / name).read_text(encoding="utf-8")).readline)
         nums = {float(t.string.replace("_", "")) for t in toks if t.type == tokenize.NUMBER}
         assert nums <= allowed, f"{name}: unexpected numeric literals {sorted(nums - allowed)}"
+    # v2.0.0: the intraday rules and the cost model take every number from config.intraday too. Structural only:
+    # candle lengths (15 min, 1 h, 1 min), basis points (1e4) and the 1% stop cushion of the leverage plan (v1.9.0)
+    structural = allowed | {900_000.0, 60_000.0, 1e4, 1.01}
+    for name in ("intraday.py", "costs.py"):
+        toks = tokenize.generate_tokens(io.StringIO((root / name).read_text(encoding="utf-8")).readline)
+        nums = {float(t.string.replace("_", "")) for t in toks if t.type == tokenize.NUMBER}
+        assert nums <= structural, f"{name}: unexpected numeric literals {sorted(nums - structural)}"
 
 
 def test_logging_redacts_secrets(tmp_path):

@@ -40,6 +40,9 @@ TABLES: dict[str, str] = {
     "bn_klines_1d": "open_ms INTEGER UNIQUE, open REAL, high REAL, low REAL, close REAL, volume REAL",
     "bn_klines_4h": "open_ms INTEGER UNIQUE, open REAL, high REAL, low REAL, close REAL, volume REAL",
     "bn_klines_1h": "open_ms INTEGER UNIQUE, open REAL, high REAL, low REAL, close REAL, volume REAL",
+    "bn_klines_15m": "open_ms INTEGER UNIQUE, open REAL, high REAL, low REAL, close REAL, volume REAL",   # v2.0.0
+    "bn_klines_5m": "open_ms INTEGER UNIQUE, open REAL, high REAL, low REAL, close REAL, volume REAL",
+    "data_health": "kind TEXT, data TEXT",                                                               # v2.0.0
     "bn_funding": "fund_ts_ms INTEGER UNIQUE, rate REAL, mark REAL",
     "shadow_log": "kind TEXT, variant TEXT, unique_key TEXT UNIQUE, data TEXT",
     "alerts": "kind TEXT, dedupe_key TEXT, sent INTEGER, text TEXT",

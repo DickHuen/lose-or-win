@@ -96,3 +96,31 @@ def preview_decision(cfg: Any, calendar: Any, now: datetime, bn: Any,
         "plan": plan_d,
     }
     return decision, fmt_hkt(nxt)[:16]
+
+
+def preview_intraday(cfg: Any, calendar: Any, now: datetime, bn: Any, equity: float | None,
+                     open_trade: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
+    """v2.0.0: the 15-minute rules on public Binance candles right now. Costs: the config fee estimate, 5 bps per side
+    for spread / depth and the stop slippage (the live bot reads the real book and the account's fee rate instead)."""
+    from perpbot import costs, intraday as idy
+    from perpbot.strategy import tier_fraction
+
+    p = idy.Params.from_cfg(cfg)
+    now_ms = to_ms(now)
+    t = now_ms // idy.M15_MS * idy.M15_MS
+    m15 = bn.klines("15m", p.need_15m() + 2, now_ms)
+    h1 = bn.klines("1h", p.need_1h() + 2, now_ms)
+    h4 = bn.klines("4h", p.need_4h() + 2, now_ms)
+    fee = float(cfg.shadow.fee_rate_estimate)
+
+    def cost_unit(d: int, entry: float) -> float:
+        est = costs.CostEstimate(fee, "config estimate (preview)", 5.0, 5.0, float(cfg.intraday.stop_slippage_bps), 0.0)
+        return est.per_unit(entry)
+
+    dec = idy.evaluate(p, t, m15, h1, h4, cost_unit_fn=cost_unit, history=idy.History(),
+                       position_dir=int((open_trade or {}).get("direction") or 0))
+    frac = tier_fraction(dec.score, cfg.strategy) if dec.action == "enter" else 0.0
+    record = {"key": "preview", "bar_close_utc": fmt_utc(from_ms(t)), "run_hkt": fmt_hkt(now),
+              "decision": dec.to_dict(), "blocks": [], "tier_fraction": frac, "action": dec.action}
+    nxt = fmt_hkt(from_ms(t + idy.M15_MS + int(cfg.schedule.intraday_offset_minutes) * MINUTE_MS))[:16]
+    return record, nxt

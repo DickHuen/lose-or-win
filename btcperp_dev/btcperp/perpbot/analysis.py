@@ -202,3 +202,96 @@ def short_line(decision: dict[str, Any]) -> str:
     plan = decision.get("plan") or {}
     act = ACTION_ZH.get(plan.get("action", "none"), plan.get("action"))
     return f"分數 {float(sc.get('score') or 0):+.0f}（{_dir(sc.get('direction'))}）→ {act}"
+
+
+# ---------------------------------------------------------------- v2.0.0 intraday (15-minute decisions)
+SETUP_ZH = {"continuation": "順勢回調", "reversal": "轉勢（破結構後回測失敗）"}
+TREND_ZH = {1: "上升結構（高點、低點都抬高）", -1: "下跌結構（高點、低點都降低）", 0: "震盪（高低點混亂）"}
+REASON_ZH = (
+    ("range: mixed swings", "震盪市：唔做"),
+    ("structure broken since the leg", "結構已經破咗：唔順勢追"),
+    ("leg too young", "呢段走勢太短"),
+    ("no pullback yet", "未有回調"),
+    ("retracement", "回調幅度唔啱"),
+    ("pullback extreme older", "回調低／高點太舊"),
+    ("15m trigger", "15 分鐘K未轉向"),
+    ("trigger closed beyond the leg extreme", "已經升／跌過前高／前低：唔追"),
+    ("no structure break", "冇破結構"),
+    ("break older than", "破結構太耐"),
+    ("no retest yet", "未回測"),
+    ("broken level reclaimed", "價格重返破位：轉勢取消"),
+    ("no retest:", "未回測到破位"),
+    ("retest older than", "回測太舊"),
+    ("trigger closed on the wrong side", "收市喺破位錯邊"),
+    ("this leg was already traded", "呢段已經做過：唔重複追"),
+    ("cooldown", "啱啱平倉：冷靜期"),
+    ("entries today already", "今日入場次數已滿"),
+    ("costs", "成本太高（相對止損）"),
+    ("room", "到下一個阻力／支持嘅空間唔夠第一目標"),
+    ("stop ", "止損要放太遠：離結構太遠"),
+    ("position open", "已有倉位"),
+    ("not enough closed candles", "K 線唔夠"),
+    ("market data stale", "數據過期或唔完整：唔開新倉"),
+    ("run ", "遲咗執行：唔補入場"),
+    ("paused:", "暫停中"),
+    ("event blackout", "經濟數據公佈前後：唔開新倉"),
+    ("manage run", "管理程序：唔開倉"),
+    ("score ", "分數未到入場門檻"),
+)
+
+
+def zh_reason(text: str) -> str:
+    for key, zh in REASON_ZH:
+        if text.startswith(key) or f": {key}" in text:
+            return f"{zh}（{text}）"
+    return text
+
+
+def render_intraday(record: dict[str, Any], cfg: Any, *, equity: float | None = None,
+                    position: dict[str, Any] | None = None, title: str = "BTC 15 分鐘決定") -> list[str]:
+    """Lines of text for one 15-minute decision (the stored record, or the same fields from preview)."""
+    dec = record.get("decision") or {}
+    st = dec.get("structure") or {}
+    ctx = dec.get("context") or {}
+    act = record.get("action") or dec.get("action")
+    L = [f"{title}：K 線收 {record.get('bar_close_utc', '')} UTC（{record.get('run_hkt', '')}）"]
+    L.append(f"1 小時結構：{TREND_ZH.get(int(st.get('trend') or 0), '–')}；效率 {float(st.get('efficiency') or 0):+.2f}"
+             + (f"；最近破位 {_p(st.get('break_level'))}（{'向下' if st.get('break_dir') == -1 else '向上'}）"
+                if st.get("break_dir") else ""))
+    bias = int(ctx.get("bias") or 0)
+    L.append(f"4 小時背景：{ {1: '偏多', -1: '偏空', 0: '中性'}[bias]}（只影響倉位大細，唔會禁止做多或做空）")
+    if dec.get("atr1h"):
+        L.append(f"波幅：1 小時 ATR {_p(dec.get('atr1h'))}，15 分鐘 ATR {_p(dec.get('atr15'))}")
+    if act == "enter" or dec.get("action") == "enter":
+        d = int(dec.get("direction") or 0)
+        r = float(dec.get("r") or 0)
+        entry = float(dec.get("entry_ref") or 0)
+        L.append(f"訊號：{_dir(d)} — {SETUP_ZH.get(dec.get('setup'), dec.get('setup'))}")
+        L.append(f"參考價 {_p(entry)}；止損 {_p(dec.get('stop'))}（{r / entry * 100 if entry else 0:.2f}% = 1R）；"
+                 f"第一目標 {_p(dec.get('tp1'))}（{cfg.intraday.tp1_r}R，平一半）；第二目標 {_p(dec.get('tp2'))}"
+                 f"（{cfg.intraday.tp2_r}R）")
+        tf = "1 小時" if str(cfg.intraday.invalidation_timeframe) == "1h" else "15 分鐘"
+        L.append(f"失效位 {_p(dec.get('invalidation'))}：{tf}收市穿咗就即刻走；到第一目標後止損移去保本＋成本，"
+                 f"之後跟 {cfg.intraday.trail_atr1h} 個 1 小時 ATR 追蹤；最長持倉 {cfg.intraday.max_hold_hours} 小時")
+        L.append(f"成本：來回約 {_p(dec.get('cost_per_unit'))} 點 = {float(dec.get('cost_r') or 0):.2f}R"
+                 f"（上限 {cfg.intraday.max_cost_r}R）；空間 {_p(dec.get('room'))} 點到 {_p(dec.get('obstacle'))}")
+        comp = dec.get("components") or {}
+        L.append(f"信心分數 {float(dec.get('score') or 0):.0f}（形態 {comp.get('setup', 0):.0f} + 趨勢 {comp.get('trend', 0):.0f}"
+                 f" + 背景 {comp.get('context', 0):.0f} + 空間 {comp.get('room', 0):.0f} + 成本 {comp.get('cost', 0):.0f}）"
+                 f" → 倉位級別 {float(record.get('tier_fraction') or 0) * float(cfg.risk.notional_multiple_full_tier or 0):g}"
+                 f" 倍本金")
+    else:
+        for r in (dec.get("reasons") or [])[:4]:
+            L.append("唔入場：" + zh_reason(str(r)))
+    for b in record.get("blocks") or []:
+        L.append("限制：" + zh_reason(str(b)))
+    entry = record.get("entry")
+    if entry:
+        L.append("落單：" + ("成交" if entry.get("ok") else f"冇開到（{entry.get('reason')}）"))
+    L.append(f"結果：{ {'enter': '開倉', 'none': '唔做嘢', 'blocked': '有訊號但被限制', 'rejected': '有訊號但落單前被拒'}.get(act, act)}")
+    if position and position.get("intraday"):
+        L.append(f"持倉：{_dir(position.get('direction'))} {position.get('qty')} @ {_p(position.get('entry_price'))}，"
+                 f"止損 {_p(position.get('sl_price'))}，階段 {'保本／追蹤' if position.get('stage') == 'runner' else '初始'}")
+    elif position:
+        L.append("持倉：v2.0.0 之前開嘅倉，只靠交易所止損止賺，唔用日內規則")
+    return L

@@ -571,8 +571,11 @@ class Engine:
         actions: list[str] = []
         sls = [o for o in orders if o.tpsl_kind == "sl" and o.status in ACTIVE_TRIGGER_STATUSES]
         tps = [o for o in orders if o.tpsl_kind == "tp" and o.status in ACTIVE_TRIGGER_STATUSES]
-        # review C4: an order-scoped SL must cover the whole position, else add a position SL (qty "0")
+        # review C4: an order-scoped SL must cover the whole position, else add a position SL (qty "0").
+        # v2.0.0: the order-scoped stops of the legs of one intraday entry cover it together.
         full_sls = [o for o in sls if o.tpsl_scope == "position" or o.quantity >= abs(pos.size) - 1e-9]
+        if not full_sls and sls and sum(o.quantity for o in sls if o.tpsl_scope != "position") >= abs(pos.size) - 1e-9:
+            full_sls = [o for o in sls if o.tpsl_scope != "position"]
         if full_sls and tps:
             return actions
         sl_price, tp_price = trade.get("sl_price"), trade.get("tp_price")
@@ -1027,6 +1030,10 @@ class Engine:
         funding = int(self.cfg.risk.funding_payment_sign) * sum(float(p["funding"]) for p in pays)
         net = gross - entry_fees - exit_fees + funding
         reason = EXIT_REASON.get(forced_reason, forced_reason) if forced_reason else self.classify_exit(trade, exit_fills, exit_price)
+        if trade.get("intraday"):                     # v2.0.0: a runner exit after the partial target
+            tp1 = trade.get("tp1_done") or any(self._intraday_label(trade, f) == "TP1" for f in exit_fills)
+            if tp1 and reason and not str(reason).startswith("TP1"):
+                reason = f"TP1+{reason}"
         risk = float(trade.get("initial_risk_usd") or 0.0)
         mae, mfe = self.excursions(trade, exit_ts, exit_price)
         sl_dist = float(trade.get("sl_distance") or 0.0)
@@ -1041,6 +1048,10 @@ class Engine:
             "exit_fill_ids": [f.trade_id for f in exit_fills], "incomplete": not exit_fills,
             "forced_reason": forced_reason, "correction": correction,
         }
+        if trade.get("intraday"):
+            close.update(self.intraday_excursions(trade, exit_ts))
+            close["exit_legs"] = [{"order_id": f.order_id, "qty": min(f.quantity, abs(f.previous_size)), "price": f.price,
+                                   "label": self._intraday_label(trade, f)} for f in exit_fills]
         self.rec.record_trade("close", trade["trade_uid"], d, close)
         self.alert("close (corrected)" if correction else "close", f"{'LONG' if d > 0 else 'SHORT'} {trade['qty']} closed ({reason}) @ {exit_price if exit_price is None else round(exit_price, 2)}; "
                    f"net PnL {net:.2f} (gross {gross:.2f}, fees {entry_fees + exit_fees:.2f}, funding {funding:.2f})"
@@ -1052,8 +1063,10 @@ class Engine:
         """Fills after entry taken while the position was open (signed previous_size first;
         falls back to any non-flat previous_size if the API reports it unsigned)."""
         d = trade["direction"]
+        entry_ids = {trade.get("entry_order_id")}
+        entry_ids |= {leg.get("order_id") for leg in (trade.get("legs") or {}).values()}   # v2.0.0: leg A adds
         cands = [f for f in self.stored_fills(int(trade["entry_ts_ms"])) if f.is_reducing
-                 and f.order_id != trade.get("entry_order_id")]
+                 and f.order_id not in entry_ids]
         signed = [f for f in cands if (f.previous_size > 0) == (d > 0)]
         return signed or cands
 
@@ -1076,9 +1089,55 @@ class Engine:
             if self.exit_fill_candidates(trade):
                 self.book_closed_trade(trade, forced_reason=c["data"].get("forced_reason"), correction=True)
 
+    def _intraday_label(self, trade: dict[str, Any], f: Fill) -> str | None:
+        """v2.0.0: which exit an intraday fill came from (TP1 / TP2 / SL / BE_stop / trail_stop / a market close)."""
+        ids: dict[Any, str] = {}
+        for name, leg in (trade.get("legs") or {}).items():
+            if leg.get("tp_order_id"):
+                ids[int(leg["tp_order_id"])] = "TP1" if (name == "A" and trade.get("two_legs")) else "TP2"
+            if leg.get("sl_order_id"):
+                ids[int(leg["sl_order_id"])] = "SL"
+        for oid, label in (trade.get("position_sl_ids") or {}).items():
+            ids[int(oid)] = label
+        if f.order_id in ids:
+            return ids[f.order_id]
+        if f.client_order_id:
+            row = self.store.latest("orders", "client_order_id = ? AND event='request'", [f.client_order_id])
+            if row and str(row["purpose"]).startswith("close:"):
+                r = str(row["purpose"]).split(":", 1)[1]
+                return EXIT_REASON.get(r, r)
+        try:
+            for o in self.ex.get_orders(order_id=f.order_id):
+                if o.parent_order_id is not None and int(o.parent_order_id) in ids:
+                    return ids[int(o.parent_order_id)]
+        except ExchangeError:
+            pass
+        return None
+
+    def intraday_excursions(self, trade: dict[str, Any], exit_ts: int) -> dict[str, Any]:
+        """v2.0.0: best / worst move after entry in R, from the Binance 15m candles the decisions used."""
+        entry = float(trade.get("bn_entry") or 0.0)
+        r = float(trade.get("r_bn") or 0.0)
+        if entry <= 0 or r <= 0:
+            return {}
+        start = int(trade["entry_ts_ms"]) // 900_000 * 900_000
+        rows = self.store.query("SELECT high, low FROM bn_klines_15m WHERE open_ms >= ? AND open_ms <= ?", [start, exit_ts])
+        if not rows:
+            return {"mfe_r_15m": None, "mae_r_15m": None}
+        d = int(trade["direction"])
+        hi, lo = max(x["high"] for x in rows), min(x["low"] for x in rows)
+        mfe = (hi - entry) if d > 0 else (entry - lo)
+        mae = (entry - lo) if d > 0 else (hi - entry)
+        return {"mfe_r_15m": max(mfe, 0.0) / r, "mae_r_15m": max(mae, 0.0) / r, "excursion_source": "binance 15m"}
+
     def classify_exit(self, trade: dict[str, Any], exit_fills: list[Fill], exit_price: float | None) -> str:
         if any(f.liquidation for f in exit_fills):
             return "liquidation"
+        if trade.get("intraday"):
+            labels = [self._intraday_label(trade, f) for f in exit_fills]
+            known = [x for x in labels if x]
+            if known:
+                return known[-1]
         ids = {trade.get("sl_order_id"): "SL", trade.get("tp_order_id"): "TP"}
         for f in exit_fills:
             if f.order_id in ids and f.order_id is not None:
@@ -1721,7 +1780,17 @@ class Engine:
             self.alert("warning: market data", f"market data logging failed: {e}", dedupe_key=f"mdlog:{self.today()}")
 
     # ================================================================ commands
+    @property
+    def intraday(self) -> bool:
+        """v2.0.0: the 15-minute intraday rules trade (intraday_live.py); the daily-score path stays for tests."""
+        sec = self.cfg.get("intraday") if hasattr(self.cfg, "get") else None
+        return bool(sec is not None and sec.get("enabled"))
+
     def cmd_decide(self) -> dict[str, Any]:
+        if self.intraday:
+            from perpbot.intraday_live import IntradayRunner
+
+            return IntradayRunner(self).run(entries=True)
         now = self.now()
         per = self.period(now)
         day = per[1]
@@ -1781,6 +1850,10 @@ class Engine:
                    for e in self.rec.intent_events(day))
 
     def cmd_manage(self) -> dict[str, Any]:
+        if self.intraday:
+            from perpbot.intraday_live import IntradayRunner
+
+            return IntradayRunner(self).run(entries=False)
         now = self.now()
         per = self.period(now)
         day = per[1]

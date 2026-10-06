@@ -240,7 +240,7 @@ def test_shipped_config_is_rolling_and_validated(rolling_cfg_dict):
     from perpbot.config import ConfigError, config_from_dict
 
     cfg = config_from_dict(rolling_cfg_dict)
-    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "1.10.0"
+    assert cfg.strategy.cadence == "rolling_4h" and cfg.config_version == "2.0.0"
     assert len(cfg.schedule.decide_times_hkt) == 12 and len(cfg.schedule.manage_times_hkt) == 6
     bad = dict(rolling_cfg_dict, schedule=dict(rolling_cfg_dict["schedule"], decide_times_hkt=["08:30", "08:50"]))
     with pytest.raises(ConfigError, match="no decide time"):
@@ -336,8 +336,12 @@ def test_preview_is_read_only_and_explains_the_rolling_decision(tmp_root, capsys
     from conftest import ROOT, FakeBinance
     from perpbot.timeutil import FixedClock
 
-    (tmp_root / "config" / "config.yaml").write_text((ROOT / "config" / "config.yaml").read_text(encoding="utf-8"),
-                                                     encoding="utf-8")        # the shipped config (v1.9.0: hourly)
+    import yaml
+
+    from conftest import shipped_config
+
+    (tmp_root / "config" / "config.yaml").write_text(yaml.safe_dump(shipped_config()), encoding="utf-8")
+    # the shipped config on the v1.9.0 hourly score path (v2.0.0 ships intraday: test_intraday_v200.py)
     (tmp_root / "config" / "calendar_history.yaml").write_text("", encoding="utf-8")
     now = hkt(2026, 10, 5, 12, 40)
     bn = FakeBinance(now.date())

@@ -80,6 +80,8 @@ class MockExchange(Exchange):
         self.lag_position_reads = 0                  # next N get_account calls hide the position (stale read)
         self.position_tpsl_unknown = False           # position TP/SL is placed but the client sees outcome unknown
         self.hide_fills = False                      # fills endpoint lags
+        self.oco_brackets = True                     # v2.0.0: a fired bracket TP / SL cancels its sibling
+        self.ticker_funding_rate = 0.0000125         # per funding interval (1h)
         self.proxy_info = ProxyKeyInfo("0xOWNER", "0xPROXY", None)
         self.geoblock = {"blocked": False, "country": "HK", "region": "HK"}
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -175,6 +177,12 @@ class MockExchange(Exchange):
             if hit:
                 o.status = "triggered"
                 qty = abs(self.pos_size)
+                if o.tpsl_scope == "order" and o.quantity > 0:      # v2.0.0: an order bracket closes its own qty
+                    qty = min(o.quantity, qty)
+                if self.oco_brackets and o.tpsl_scope == "order" and o.parent_order_id is not None:
+                    for sib in self._active_triggers():
+                        if sib.id != o.id and sib.parent_order_id == o.parent_order_id:
+                            sib.status = "cancelled"
                 exit_order = Order(self._oid(), self.inst.id, "SELL" if long_pos else "BUY", o.trigger_price, qty, "ioc",
                                    True, "accepted", 0.0, 0.0, None, created_ms=self._now_ms())
                 exit_order.parent_order_id = o.id
@@ -200,8 +208,8 @@ class MockExchange(Exchange):
 
     def get_ticker(self, instrument_id: int) -> Ticker:
         self._check_raise("get_ticker")
-        return Ticker(self.inst.id, self.mark, self.mark, self.mark, self.mark, 0.0000125, 100.0, self._now_ms() + 3_600_000,
-                      self._now_ms())
+        return Ticker(self.inst.id, self.mark, self.mark, self.mark, self.mark, self.ticker_funding_rate, 100.0,
+                      self._now_ms() + 3_600_000, self._now_ms())
 
     def get_book(self, instrument_id: int, depth: int) -> Book:
         self._check_raise("get_book")

@@ -3,6 +3,74 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 2.0.0 - 2026-10-06 (config 2.0.0) - owner: intraday rules every 15 minutes, long and short
+
+The owner asked for a complete intraday version in one release, after Codex's verification report (2026-10-06):
+the hourly decisions still followed the daily score and stayed long through intraday drops; the 15m pullback and
+breakout candidates Codex tested lost after costs (base cost 60 days: -75% / -90%; a 0.2% stop with 0.18% costs is
+~0.9 R). New fixed rules, not copied from those candidates and not fitted to 2026-10-05. Details in Chinese:
+`INTRADAY.md`.
+
+- **Direction from closed 1h structure** (`perpbot/intraday.py`, shared by live and backtest): swing highs / lows
+  (2 candles each side), up = higher highs and higher lows, down = mirrored, anything else = range (no trade). A
+  break = a 1h CLOSE beyond the last higher low / lower high. The 4h EMA 20/50 background only scales the position
+  (never blocks a side). Setups: continuation (38.2-78.6% pullback of a leg >= 1.5 ATR1h, recent extreme, 15m turn
+  candle, not beyond the leg extreme) and reversal (structure break within 6 h, failed retest of the broken level,
+  15m turn). Long and short are exact mirrors (test: every decision on a reflected price path flips). One entry per
+  leg, 30-minute cooldown after an exit, at most 6 entries per UTC day, no adding.
+- **Stops / exits**: stop beyond the setup's extreme + 0.25 ATR15, at least max(1 ATR1h, 0.5% of the price,
+  round-trip cost / 0.20); refused above 3 ATR1h or 2%. Room to the next 1h swing level (or the last 4h extreme)
+  must fit TP1 = 1 R. Two FOK legs with their own brackets: leg A TP1 1 R (half), leg B TP2 3 R, same stop (the two
+  stops together cover the position). After TP1: leg A's leftover stop cancelled, a position stop at break-even +
+  costs, then an ATR trail (2 ATR1h behind the best price, steps >= 0.25 ATR15); leg B's bracket stop stays as the
+  backstop while stops are moved. Single leg when a leg would be under $10: break-even after a 1 R move. Before
+  TP1: a 1h close beyond the setup level exits (`invalidation`); 12 h time stop; no-progress exit after 6 h with less
+  than 0.5 R. Exit reasons TP1 / TP2 / SL / BE_stop / trail_stop / invalidation / time_stop / no_progress, "TP1+..."
+  after the partial; MFE / MAE in R from the 15m candles.
+- **Cost gate** (`perpbot/costs.py`): every fill taker; fee = the higher of the exchange's schedule and the rate
+  charged on the account's recent taker fills; entry and exit slippage by walking the real order book (100 levels)
+  for the order size; 5 bps stop slippage; Polymarket funding x 6 h when paid. Cost > 0.20 R: no entry, reason logged.
+  Checked at the decision and again at order time on the fresh book and the final size.
+- **Data** (`perpbot/candles.py`): Binance 15m / 1h / 4h candles cached in the database (`bn_klines_15m` new), one
+  incremental request per interval per run (the first run back-fills 25 days) instead of ~25 pages of 1h candles
+  every hour. Integrity check of the window each decision needs (count, gaps, alignment, OHLC, last close time =
+  the latest boundary). Binance 429 / 418: Retry-After honoured; a short 429 is waited out once, anything else stops
+  all requests until then, stored in `data_health` so the next runs send nothing; no other endpoint is tried to get
+  around it. Stale or incomplete data: no new entries, no stop moves; the exchange SL / TP and the time stop work.
+- **Schedule**: one Task Scheduler task `decide_15m` (HH:01 / :16 / :31 / :46 HKT, repetition PT15M, IgnoreNew, 13
+  min limit, starting at the next slot). The 48 decide + 6 manage tasks are removed only after it registered. An
+  entry only within 10 minutes of the candle close. The missed-run audit and the monthly report count 15-minute
+  slots, only since this config version / the first 15-minute decision (no false alarms on the upgrade day).
+- **Logging**: every 15-minute decision stores the structure, every setup considered with its pass / fail reason,
+  score parts, costs (fee source, spread, depth, funding), room, R, stop / targets, sizing, blocks, and the inputs
+  needed to recompute it; the dashboard and the daily report show it in Chinese.
+- **Backtest** (`intraday-backtest download|run`, `windows\Backtest_Intraday.bat`): the same functions as live
+  (signal, score, sizing with per-trade leverage and the volatility cut, quantity rounding to 0.00001 BTC, $10
+  minimum, legs, exits, cost gate, event blackout, data checks), decisions 1 minute after each close, fills at the
+  next 5m open, exchange stops / targets on the 5m path (stop first inside a candle), estimated liquidation; 4 cost
+  scenarios (Codex's zero / optimistic / base / stress) x 2 sizings (owner x3-x20, 3% risk / 10x), full period,
+  first 2/3 and last 1/3, long / short, setups, exit reasons. Every report lists its approximations.
+  **Not run on real data for this release** (the development environment cannot reach Binance): only synthetic
+  paths, which test the code, not the edge.
+- **Live vs replay** (`intraday-replay`, `windows\Replay_Check.bat`): recomputes stored live decisions from the cached
+  candles and the logged inputs; must print `DIFFERENT: 0`.
+- **Upgrade**: an open position from an older version keeps its exchange SL / TP and is never touched by the new
+  exits (no new entry while it is open). An entry interrupted after a fill is recovered as an intraday trade (legs by
+  client order id), never entered twice. Owner settings unchanged: x3 / x6 / x10 / x20 by score (20 / 40 / 50 / 75),
+  per-trade leverage up to 25x, margin 92%, liquidation 1.3 x / 1.15 x the stop, kills 95%, floors 5%.
+- Event blackout for intraday entries: 30 min before to 60 min after a release (was the whole day from 08:30 HKT).
+- Mock exchange: bracket triggers close their own quantity, siblings cancel (OCO). The v1.x score path stays
+  (intraday.enabled false) for the old backtest, Preview of older configs and the rule tests.
+- Fix found by the stress run: a second entry leg's fill (previous size non-zero) was counted as an exit fill.
+- Tests: `test_intraday_v200.py` (+47): config / schedule, symmetric rules, reversal, closed-candles only, no chasing,
+  cost and room gates, exits, sizing / legs, costs, integrity / cache / Retry-After / remembered ban, two-leg entry,
+  idempotent re-run, TP1 -> break-even -> trail, invalidation, time stop, stale data, cost rejection logged, event
+  blackout, late run, old position untouched, partial fills, interrupted entry, upgrade audit, backtest = live,
+  replay, determinism, CLI. Release stress: 10 random 14-day paths through the live engine (14,137 runs, 20
+  trades): never unprotected, no duplicate orders, P&L reconciles with the exchange cash; v1.x hourly path with
+  crash injection: 0 problems. Release checks: clean install, upgrade from 1.10.0 with an open 1.10.0 position (kept,
+  no order sent), older zip refused, restore test, 3 shuffled runs. **Tests:** 432.
+
 ## 1.10.0 - 2026-10-04 (config 1.10.0) - owner: SL / TP follow the hourly swings
 
 The owner sent the 2026-10-02/03 trades and decisions: a x10 long from 84,574 (2026-10-03 01:30 HKT) had its TP at

@@ -283,6 +283,7 @@ def test_leftover_orders_cancelled_by_id(world):
     w = world(hkt(2026, 10, 5, 8, 30))
     t = enter_long(w)
     w.ex.auto_cancel_leftovers = False
+    w.ex.oco_brackets = False               # v2.0.0 mock: brackets are OCO by default
     w.ex.set_mark(t["sl_price"] - 1)
     assert len(active(w, "tp")) == 1        # exchange left the TP behind
     w.at(hkt(2026, 10, 5, 12, 30)).manage()
