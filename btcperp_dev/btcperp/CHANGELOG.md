@@ -3,6 +3,26 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 2.2.0 - 2026-10-07 (config 2.2.0) - owner: loosen further
+
+The owner after v2.1.0 (about one trade every two days on recent real data): "再放多啲" (loosen more).
+
+- **15m turn** (`intraday.trigger_beyond` new, "close"): the trigger closes beyond the previous 15m CLOSE (was beyond
+  its high / low), in the trade direction, with its close above 40% of its range for a long (`trigger_clv_min`
+  -0.2, was 0.0); mirrored for shorts.
+- **TP1 0.8 R** (1.0): leg A takes profit earlier; the room check needs 0.8 R. TP2 stays 3 R.
+- Pullback / retest / range-edge window 16 candles (12), leg >= 0.75 ATR1h (1.0), pullback up to 88.6% (78.6%), ranges
+  >= 1.5 ATR1h (2.0) with edges 0.5 ATR1h (0.35), a leg up to 3 times (2), no cooldown after an exit (1 candle).
+- Unchanged: the cost gate (cost <= 0.35 R), stop minimums, exits after TP1, time / invalidation / no-progress exits,
+  position map x3-x20, leverage, kill switches, floors.
+- On the owner's 21 days of real Binance 15m candles (2026-09-15 -> 10-06; coarse 15m-path approximation, 100 USD,
+  owner sizing, fee 4 + slippage 1 bp per side): v2.1.0 11 trades (0.5 / day), v2.2.0 36 trades (1.7 / day); the
+  result swings around zero between cost scenarios (live-like -10.9%, base +10.8%, max drawdown 24%) - noise, no
+  evidence of an edge either way. More trades = more fees.
+- Tests: the v2.0.0 / v2.1.0 tests pin their own values; `test_intraday_v220.py` (+8): shipped values, the weaker
+  turn both ways, CLV -0.2, TP1 0.8 R on the exchange, mirror symmetry (range and reversal paths), more entries
+  than v2.1.0 on random-walk markets, the cost gate still refuses. **Tests:** 449.
+
 ## 2.1.0 - 2026-10-07 (config 2.1.0) - owner: looser intraday rules, more trades
 
 The owner after v2.0.0: no trade since the upgrade - "唔好太嚴，我要博多啲、食多啲波幅" (trade more often, catch more

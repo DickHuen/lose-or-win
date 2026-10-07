@@ -211,6 +211,7 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("intraday.retrace_max", _NUM, lambda v: 0 < v < 1),
     ("intraday.pullback_max_bars", int, lambda v: 1 <= v <= 48),
     ("intraday.trigger_clv_min", _NUM, lambda v: -1 <= v < 1),
+    ("intraday.trigger_beyond", str, lambda v: v in ("high_low", "close")),
     ("intraday.reversal_window_hours", int, lambda v: 1 <= v <= 48),
     ("intraday.retest_zone_atr", _NUM, lambda v: v >= 0),
     ("intraday.reclaim_atr", _NUM, lambda v: v >= 0),

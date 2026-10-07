@@ -199,3 +199,26 @@ class IWorld:
 
     def decisions(self) -> list[dict[str, Any]]:
         return self.store.query("SELECT utc_day, action, reason, data FROM decisions ORDER BY id")
+
+
+def random_15m(n: int, seed: int, px: float = 86_000.0, start_ms: int = T0) -> list[Candle]:
+    """A deterministic random walk with trending / sideways spells (only to exercise the rules, no edge implied)."""
+    import random
+
+    rng = random.Random(seed)
+    out: list[Candle] = []
+    vol, drift = 0.0018, 0.0
+    for i in range(n):
+        if i % 32 == 0:
+            drift = rng.choice([-1, -1, 0, 0, 0, 1, 1]) * rng.uniform(0.0002, 0.0007)
+        vol = min(0.005, max(0.0008, vol * math.exp(rng.gauss(0, 0.04))))
+        o = px
+        pts = [o]
+        for _ in range(3):
+            pts.append(pts[-1] * (1 + rng.gauss(drift / 3, vol / math.sqrt(3))))
+        c = pts[-1]
+        t = start_ms + i * M15
+        out.append(Candle(t, o, max(pts) * (1 + abs(rng.gauss(0, vol / 6))), min(pts) * (1 - abs(rng.gauss(0, vol / 6))), c,
+                          1.0, t + M15))
+        px = c
+    return out

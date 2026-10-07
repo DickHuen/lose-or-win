@@ -68,6 +68,7 @@ class Params:
     retrace_max: float
     pullback_max_bars: int
     trigger_clv_min: float
+    trigger_beyond: str
     reversal_window_hours: int
     retest_zone_atr: float
     reclaim_atr: float
@@ -278,14 +279,18 @@ def last_atr(bars: Sequence[Candle], period: int) -> float | None:
     return float(a[-1]) if a and a[-1] is not None else None
 
 
-def _turn(prev: Candle, cur: Candle, d: int, clv_min: float) -> tuple[bool, str]:
-    """The trigger candle turns in direction d: closes beyond the previous candle's extreme, in direction d, with its
-    close in the outer part of its range."""
-    beyond = cur.close > prev.high if d > 0 else cur.close < prev.low
+def _turn(prev: Candle, cur: Candle, d: int, clv_min: float, beyond_close: bool = False) -> tuple[bool, str]:
+    """The trigger candle turns in direction d: closes beyond the previous candle's extreme (v2.2.0 trigger_beyond
+    "close": beyond the previous candle's close), in direction d, with its close in the outer part of its range."""
+    if beyond_close:
+        beyond = cur.close > prev.close if d > 0 else cur.close < prev.close
+    else:
+        beyond = cur.close > prev.high if d > 0 else cur.close < prev.low
     body = cur.close > cur.open if d > 0 else cur.close < cur.open
     loc = clv(cur.high, cur.low, cur.close) * d >= clv_min
     if not beyond:
-        return False, "15m trigger: close not beyond the previous 15m " + ("high" if d > 0 else "low")
+        return False, "15m trigger: close not beyond the previous 15m " + ("close" if beyond_close else
+                                                                            "high" if d > 0 else "low")
     if not body:
         return False, "15m trigger: candle body against the trade"
     if not loc:
@@ -327,7 +332,7 @@ def continuation(st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) 
     if pb_i < len(after) - p.pullback_max_bars:
         s.reason = f"pullback extreme older than {p.pullback_max_bars} 15m candles"
         return s
-    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min)
+    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min, p.trigger_beyond == "close")
     if not ok:
         s.reason = why
         return s
@@ -370,7 +375,7 @@ def reversal(st: Structure, m15: Sequence[Candle], atr1h: float, t_ms: int, p: P
     if rt_i < len(bars) - p.pullback_max_bars:
         s.reason = f"retest older than {p.pullback_max_bars} 15m candles"
         return s
-    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min)
+    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min, p.trigger_beyond == "close")
     if not ok:
         s.reason = why
         return s
@@ -410,7 +415,7 @@ def range_fade(st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) ->
     s.direction = d
     edge_sw = bot_sw if d > 0 else top_sw
     s.leg_id = f"G{d:+d}:{edge_sw.open_ms}"
-    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min)
+    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min, p.trigger_beyond == "close")
     if not ok:
         s.reason = why
         return s

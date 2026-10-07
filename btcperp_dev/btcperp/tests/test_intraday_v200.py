@@ -33,7 +33,9 @@ T_LONG = T0 + (I0 + 89) * M15                   # the 15m candle closing here tu
 # The scenario tests below were written for the v2.0.0 values; v2.1.0 ships looser ones (test_intraday_v210.py).
 STRICT_V200 = dict(leg_min_atr=1.5, retrace_min=0.382, pullback_max_bars=8, reversal_window_hours=6, retest_zone_atr=0.25,
                    reclaim_atr=0.25, range_enabled=False, sl_min_atr1h=1.0, sl_min_pct=0.5, max_cost_r=0.20,
-                   room_recent_bars=16, cooldown_bars=2, max_entries_per_day=6, max_entries_per_leg=1)
+                   room_recent_bars=16, cooldown_bars=2, max_entries_per_day=6, max_entries_per_leg=1,
+                   retrace_max=0.786, tp1_r=1.0, trigger_clv_min=0.0, trigger_beyond="high_low", range_min_atr=2.0,
+                   range_edge_atr=0.35)
 
 
 def cfg_dict():
@@ -64,7 +66,7 @@ def evaluate(m15, t, cost=lambda d, e: e * 0.0014, hist=None, p=None):
 # ================================================================ config / schedule
 def test_shipped_config_is_intraday_with_the_owner_risk_settings():
     cfg = config_from_dict(cfg_dict())
-    assert cfg.config_version == "2.1.0" and cfg.intraday.enabled is True
+    assert cfg.config_version == "2.2.0" and cfg.intraday.enabled is True
     assert cfg.schedule.decide_times_hkt == [] and cfg.schedule.manage_times_hkt == []
     assert (cfg.schedule.intraday_every_minutes, cfg.schedule.intraday_offset_minutes) == (15, 1)
     r, s = cfg.risk, cfg.strategy                 # unchanged owner settings
