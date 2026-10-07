@@ -18,15 +18,19 @@ Inputs at a decision time T (a 15-minute boundary): Binance BTCUSDT 15m, 1h and 
    - reversal (轉勢): structure up (down) whose L2 (H2) broke within reversal_window_hours; price came back to within
      retest_zone_atr x ATR1h of the broken level without a 15m close beyond it by reclaim_atr x ATR1h, and the last
      15m candle turns away from the level as above.
-   - range (震盪): no entry.
+   - range (震盪, v2.1.0, owner 2026-10-07 "唔好太嚴，博多啲、食多啲波幅"): mixed swings; the range is the
+     highest of the last two swing highs to the lowest of the last two swing lows, at least range_min_atr x ATR1h
+     wide. Price came within range_edge_atr x ATR1h of one edge in the last pullback_max_bars 15m candles, the
+     last 15m candle turns back into the range and closes inside its outer half: fade the edge (long at the low,
+     short at the high). range_enabled false = no trade in a range (v2.0.0).
 3. Stop: beyond the setup's structure extreme by stop_buffer_atr15 x ATR15, at least max(sl_min_atr1h x ATR1h,
    sl_min_pct of the price, the round-trip cost / max_cost_r); refused when wider than sl_max_atr1h x ATR1h or
    sl_max_pct. R = entry - stop.
 4. Room: distance to the nearest obstacle (confirmed 1h swing level in the last structure_lookback_hours, or the
    extreme of the last room_recent_bars 15m candles) beyond the entry; open_room_atr x ATR1h when there is none.
    Entry needs room >= tp1_r x R (TP1 fits before the obstacle) and cost <= max_cost_r x R (costs.py).
-5. No chasing: one entry per leg (the swing that defines the setup), cooldown_bars 15m candles after any exit,
-   at most max_entries_per_day entries per UTC day.
+5. No chasing: at most max_entries_per_leg entries per leg (the swing that defines the setup), cooldown_bars 15m
+   candles after any exit, at most max_entries_per_day entries per UTC day.
 6. Exits (intraday_live / intraday_bt): two legs when the size allows - leg A takes TP1 = tp1_r R (tp1_fraction of
    the position), leg B TP2 = tp2_r R; both start with the stop. After TP1 the runner's stop goes to break-even plus
    costs and then trails trail_atr1h x ATR1h behind the best price since entry (moved only forward, steps of at
@@ -47,7 +51,7 @@ from perpbot.indicators import Candle, atr_wilder, clip, clv, ema
 M15_MS = 900_000
 H1_MS = 3_600_000
 H4_MS = 4 * H1_MS
-SETUPS = ("continuation", "reversal")
+SETUPS = ("continuation", "reversal", "range")
 
 
 @dataclass(frozen=True)
@@ -87,8 +91,13 @@ class Params:
     no_progress_mfe_r: float
     cooldown_bars: int
     max_entries_per_day: int
+    max_entries_per_leg: int
+    range_enabled: bool
+    range_min_atr: float
+    range_edge_atr: float
     score_base_continuation: float
     score_base_reversal: float
+    score_base_range: float
     score_trend: float
     score_ctx_aligned: float
     score_ctx_neutral: float
@@ -377,10 +386,52 @@ def reversal(st: Structure, m15: Sequence[Candle], atr1h: float, t_ms: int, p: P
     return s
 
 
+def range_fade(st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) -> Setup:
+    """v2.1.0: fade an edge of a sideways market (mixed swings)."""
+    s = Setup("range", 0, "", False, "")
+    if len(st.highs) < 2 or len(st.lows) < 2:
+        s.reason = "range: not enough swings"
+        return s
+    top_sw = max(st.highs[-2:], key=lambda x: x.price)
+    bot_sw = min(st.lows[-2:], key=lambda x: x.price)
+    top, bot = top_sw.price, bot_sw.price
+    width = top - bot
+    s.detail = {"range_high": top, "range_low": bot, "range_atr": width / atr1h if atr1h else None}
+    if width < p.range_min_atr * atr1h:
+        s.reason = f"range {width / atr1h:.2f} ATR1h < {p.range_min_atr}: too narrow"
+        return s
+    recent = m15[-p.pullback_max_bars:]
+    near_low = min(c.low for c in recent) <= bot + p.range_edge_atr * atr1h
+    near_high = max(c.high for c in recent) >= top - p.range_edge_atr * atr1h
+    if near_low == near_high:
+        s.reason = "range: price not at one edge" if not near_low else "range: both edges touched (too volatile)"
+        return s
+    d = 1 if near_low else -1
+    s.direction = d
+    edge_sw = bot_sw if d > 0 else top_sw
+    s.leg_id = f"G{d:+d}:{edge_sw.open_ms}"
+    ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min)
+    if not ok:
+        s.reason = why
+        return s
+    close = m15[-1].close
+    if not (bot < close < top):
+        s.reason = "range: trigger closed outside the range (a breakout, not a fade)"
+        return s
+    if (close - (bot + top) / 2.0) * d > 0:
+        s.reason = "range: trigger already past the middle of the range"
+        return s
+    ext = min(c.low for c in recent) if d > 0 else max(c.high for c in recent)
+    s.ok, s.reason = True, "range: edge held, 15m turned back in"
+    s.invalidation = ext
+    s.stop = ext
+    return s
+
+
 def obstacle(d: int, entry: float, st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) -> tuple[float | None, float]:
     """(nearest level beyond the entry in direction d, room); open room when nothing is in the way."""
     levels = [s.price for s in (st.highs if d > 0 else st.lows)]
-    recent = m15[-p.room_recent_bars:]
+    recent = m15[-p.room_recent_bars - 1:-1]          # v2.1.0: not the trigger candle's own wick
     if recent:
         levels.append(max(c.high for c in recent) if d > 0 else min(c.low for c in recent))
     ahead = [x for x in levels if (x - entry) * d > 0]
@@ -405,9 +456,12 @@ def stop_distance(structure_stop: float, entry: float, d: int, atr1h: float, atr
 def score(kind: str, d: int, st: Structure, setup: Setup, ctx: dict[str, Any], room_r: float, cost_r: float,
           p: Params) -> tuple[float, dict[str, float]]:
     comp: dict[str, float] = {}
-    comp["setup"] = p.score_base_continuation if kind == "continuation" else p.score_base_reversal
+    comp["setup"] = {"continuation": p.score_base_continuation, "reversal": p.score_base_reversal,
+                     "range": p.score_base_range}[kind]
     if kind == "continuation":
         comp["trend"] = p.score_trend * clip(st.efficiency * d, 0.0, 1.0)
+    elif kind == "range":
+        comp["trend"] = 0.0                       # no trend to follow in a range
     else:
         depth = float(setup.detail.get("break_depth_atr") or 0.0)
         comp["trend"] = p.score_trend * clip(depth / p.break_full_atr, 0.0, 1.0) if p.break_full_atr else 0.0
@@ -421,10 +475,21 @@ def score(kind: str, d: int, st: Structure, setup: Setup, ctx: dict[str, Any], r
 
 @dataclass
 class History:
-    """What the no-chasing rules need: legs already traded, last exit, entries today."""
-    traded_legs: set[str] = field(default_factory=set)
+    """What the no-chasing rules need: entries per leg (last 3 days), last exit, entries today."""
+    leg_counts: dict[str, int] = field(default_factory=dict)
     last_exit_ms: int | None = None
     entries_today: int = 0
+
+    @classmethod
+    def from_legs(cls, legs: Sequence[str], last_exit_ms: int | None = None, entries_today: int = 0) -> "History":
+        counts: dict[str, int] = {}
+        for leg in legs:
+            if leg:
+                counts[leg] = counts.get(leg, 0) + 1
+        return cls(counts, last_exit_ms, entries_today)
+
+    def legs_list(self) -> list[str]:
+        return sorted(leg for leg, n in self.leg_counts.items() for _ in range(n))
 
 
 def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], h4: Sequence[Candle], *,
@@ -458,6 +523,8 @@ def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], 
         cands.append(continuation(st, m15, atr1h, p))
     if st.break_dir and st.break_close_ms is not None and t_ms - st.break_close_ms <= p.reversal_window_hours * H1_MS:
         cands.append(reversal(st, m15, atr1h, t_ms, p))
+    if not st.trend and p.range_enabled:
+        cands.append(range_fade(st, m15, atr1h, p))
     if not cands:
         dec.reasons.append("range: mixed swings and no recent structure break - no trade")
     for s in cands:
@@ -467,8 +534,8 @@ def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], 
         if not s.ok:
             continue
         d = s.direction
-        if s.leg_id in history.traded_legs:
-            rec.update(ok=False, reason="this leg was already traded (no chasing)")
+        if history.leg_counts.get(s.leg_id, 0) >= p.max_entries_per_leg:
+            rec.update(ok=False, reason=f"this leg was already traded {p.max_entries_per_leg} time(s) (no chasing)")
             continue
         if history.last_exit_ms is not None and t_ms - history.last_exit_ms < p.cooldown_bars * M15_MS:
             rec.update(ok=False, reason=f"cooldown: {p.cooldown_bars} 15m candles after the last exit")

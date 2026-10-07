@@ -3,6 +3,40 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 2.1.0 - 2026-10-07 (config 2.1.0) - owner: looser intraday rules, more trades
+
+The owner after v2.0.0: no trade since the upgrade - "唔好太嚴，我要博多啲、食多啲波幅" (trade more often, catch more
+of the swings). This reverses the earlier instruction not to loosen filters for more trades; the owner decides.
+
+- **Fix (v2.0.0 bug):** the room check counted the trigger candle's OWN high (long) / low (short) as the next
+  obstacle. A trigger closes near that extreme, so the "room" was a few dollars and most valid setups were refused.
+  The recent-extreme obstacle now uses the candles before the trigger. On synthetic paths this alone doubled the
+  entries of the v2.0.0 values; on the owner's 21 real days it changed nothing (5 trades either way).
+- **Looser values** (v2.0.0 in brackets): stop floor max(0.75 (1.0) ATR1h, 0.3% (0.5%), cost / 0.35 (0.20)) - stops
+  are closer and costs may take up to 0.35 R; leg >= 1.0 (1.5) ATR1h; pullback 23.6% (38.2%) - 78.6%; pullback /
+  retest within 12 (8) 15m candles; reversal window 12 (6) h, retest zone and reclaim 0.5 (0.25) ATR1h; recent
+  obstacle = the last 8 (16) candles; cooldown 1 (2) candle; 12 (6) entries a day; a leg may be traded twice (once).
+- **New setup "range"** (`intraday.range_enabled`): in a sideways market (mixed swings) at least 2 x ATR1h wide,
+  fade an edge: price came within 0.35 x ATR1h of the range low (high) in the last 12 15m candles and the last 15m
+  candle turns back in, closing below (above) the middle of the range. Stop beyond that extreme (same minimums),
+  same targets, room and cost gates, mirror-symmetric. Score base 20 (x3 unless the 4h background agrees).
+- Unchanged: exits (TP1 1 R half, break-even + trail, TP2 3 R, 1h invalidation, 12 h time stop, no-progress), the
+  owner's position map x3-x20, leverage, kill switches, floors, cost model, data checks, schedule.
+- Frequency (synthetic random-walk paths, NOT evidence of profit): v2.0.0 as shipped 0.08 entries / day, v2.0.0
+  values + the fix 0.18, v2.1.0 0.66. Stress through the live engine: 8 x 12 days, 84 trades (v2.0.0: 10), never
+  unprotected, no duplicate orders, P&L reconciles.
+- Why v2.0.0 made no trade (owner's database backup of 2026-10-07 03:00 HKT): all 21 decisions after the upgrade
+  (21:46 - 02:46 HKT) were blocked only by the position opened by v1.10.0 at 10:30 HKT (LONG 0.00814 @ 85,593,
+  SL 84,856, TP 86,709), as designed; the schedule, candle cache and data checks worked.
+- First real-data look (the owner's cached Binance 15m candles, 2026-09-15 -> 10-06, 21 days, 15m path = coarse
+  approximation, start 100 USD, owner sizing): v2.1.0 11 trades - live-like cost (fee 4 bps + 1 bp per side)
+  +1.8%, max drawdown 15%; base cost (4 + 5 bps) 8 trades -6.3%; zero cost +17.8%; stress: no trade (cost gate).
+  v2.0.0 values (with the fix): 5 trades, live-like +2.4%. Far too few trades to judge either version.
+- Replay (`intraday-replay`) compares only decisions made under the current config version.
+- Tests: the v2.0.0 scenario tests pin the v2.0.0 values; `test_intraday_v210.py` (+9): shipped values, the wick fix,
+  range fades both ways and mirrored, a leg twice not three times, shallower pullbacks, more entries than v2.0.0 on
+  the same market, live two-leg range entry, replay version check. **Tests:** 441.
+
 ## 2.0.0 - 2026-10-06 (config 2.0.0) - owner: intraday rules every 15 minutes, long and short
 
 The owner asked for a complete intraday version in one release, after Codex's verification report (2026-10-06):

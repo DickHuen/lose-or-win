@@ -1,6 +1,6 @@
 # btcperp - BTC-PERP bot for Polymarket Perps
 
-**v2.0.0: intraday rules every 15 minutes** (`intraday.enabled`; `INTRADAY.md` in Chinese, `perpbot/intraday.py`):
+**v2.0.0 / v2.1.0: intraday rules every 15 minutes** (v2.1.0: looser values, range-edge fades, wick fix) (`intraday.enabled`; `INTRADAY.md` in Chinese, `perpbot/intraday.py`):
 direction from closed 1h swing structure (long / short mirror-symmetric; continuation pullbacks and failed-retest
 reversals; ranges skipped), structure stops at least as wide as max(1 ATR1h, 0.5%, cost / 0.20), two legs (TP1 1 R
 then break-even + ATR trail, TP2 3 R), 1h-close invalidation, 12 h time stop, a cost gate from the real order book

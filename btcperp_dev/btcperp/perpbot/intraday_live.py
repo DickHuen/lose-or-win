@@ -139,13 +139,13 @@ class IntradayRunner:
     # ================================================================ history (no chasing)
     def history(self, now_ms: int) -> idy.History:
         rows = self.e.store.query("SELECT data FROM trades WHERE event='open' AND ts_ms >= ?", [now_ms - 3 * DAY_MS])
-        legs = {r["data"].get("leg_id") for r in rows if isinstance(r["data"], dict) and r["data"].get("leg_id")}
+        legs = [r["data"].get("leg_id") for r in rows if isinstance(r["data"], dict) and r["data"].get("leg_id")]
         day0 = now_ms // DAY_MS * DAY_MS
         today = sum(1 for r in rows if isinstance(r["data"], dict) and r["data"].get("intraday")
                     and int(r["data"].get("entry_ts_ms") or 0) >= day0)
         last = self.e.store.query("SELECT data FROM trades WHERE event='close' ORDER BY id DESC LIMIT 1")
         last_exit = int(last[0]["data"].get("exit_ts_ms") or 0) if last and isinstance(last[0]["data"], dict) else None
-        return idy.History(traded_legs={x for x in legs if x}, last_exit_ms=last_exit or None, entries_today=today)
+        return idy.History.from_legs(legs, last_exit or None, today)
 
     # ================================================================ costs
     def fee_rate(self, inst: Any) -> tuple[float, str]:
@@ -240,7 +240,7 @@ class IntradayRunner:
             dec = idy.evaluate(self.p, t_ms, data["m15"], data["h1"], data["h4"], cost_unit_fn=cost_unit,
                                history=hist, position_dir=pos_dir)
             replay_inputs = {"now_ms": now_ms, "cost_per_unit_by_dir": cost_log, "position_dir": pos_dir,
-                             "history": {"traded_legs": sorted(hist.traded_legs), "last_exit_ms": hist.last_exit_ms,
+                             "history": {"traded_legs": hist.legs_list(), "last_exit_ms": hist.last_exit_ms,
                                          "entries_today": hist.entries_today}}
         else:
             dec.reasons.append("data check failed: no evaluation")

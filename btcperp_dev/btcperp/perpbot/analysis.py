@@ -205,10 +205,16 @@ def short_line(decision: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------- v2.0.0 intraday (15-minute decisions)
-SETUP_ZH = {"continuation": "順勢回調", "reversal": "轉勢（破結構後回測失敗）"}
+SETUP_ZH = {"continuation": "順勢回調", "reversal": "轉勢（破結構後回測失敗）", "range": "震盪區間邊緣反轉"}
 TREND_ZH = {1: "上升結構（高點、低點都抬高）", -1: "下跌結構（高點、低點都降低）", 0: "震盪（高低點混亂）"}
 REASON_ZH = (
     ("range: mixed swings", "震盪市：唔做"),
+    ("range: not enough swings", "震盪：高低點唔夠"),
+    ("range ", "震盪區間太窄"),
+    ("range: price not at one edge", "震盪：價格唔喺區間邊"),
+    ("range: both edges", "震盪：上落太大，兩邊都掂到"),
+    ("range: trigger closed outside", "震盪：收市已經出咗區間（係突破，唔係反轉）"),
+    ("range: trigger already past", "震盪：已經過咗區間中間，唔追"),
     ("structure broken since the leg", "結構已經破咗：唔順勢追"),
     ("leg too young", "呢段走勢太短"),
     ("no pullback yet", "未有回調"),

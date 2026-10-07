@@ -30,8 +30,16 @@ UP = background(I0) + [(I0 + 12, 83_000), (I0 + 28, 84_500), (I0 + 44, 83_600), 
 T_LONG = T0 + (I0 + 89) * M15                   # the 15m candle closing here turns up after a 50% pullback
 
 
+# The scenario tests below were written for the v2.0.0 values; v2.1.0 ships looser ones (test_intraday_v210.py).
+STRICT_V200 = dict(leg_min_atr=1.5, retrace_min=0.382, pullback_max_bars=8, reversal_window_hours=6, retest_zone_atr=0.25,
+                   reclaim_atr=0.25, range_enabled=False, sl_min_atr1h=1.0, sl_min_pct=0.5, max_cost_r=0.20,
+                   room_recent_bars=16, cooldown_bars=2, max_entries_per_day=6, max_entries_per_leg=1)
+
+
 def cfg_dict():
-    return shipped_intraday_config()
+    d = shipped_intraday_config()
+    d["intraday"].update(STRICT_V200)
+    return d
 
 
 def path(*tail):
@@ -56,7 +64,7 @@ def evaluate(m15, t, cost=lambda d, e: e * 0.0014, hist=None, p=None):
 # ================================================================ config / schedule
 def test_shipped_config_is_intraday_with_the_owner_risk_settings():
     cfg = config_from_dict(cfg_dict())
-    assert cfg.config_version == "2.0.0" and cfg.intraday.enabled is True
+    assert cfg.config_version == "2.1.0" and cfg.intraday.enabled is True
     assert cfg.schedule.decide_times_hkt == [] and cfg.schedule.manage_times_hkt == []
     assert (cfg.schedule.intraday_every_minutes, cfg.schedule.intraday_offset_minutes) == (15, 1)
     r, s = cfg.risk, cfg.strategy                 # unchanged owner settings
@@ -180,7 +188,7 @@ def test_no_chasing_same_leg_and_cooldown():
     m15 = path((I0 + 120, 87_400))
     first = evaluate(m15, T_LONG)
     assert first.action == "enter"
-    again = evaluate(m15, T_LONG, hist=idy.History(traded_legs={first.leg_id}))
+    again = evaluate(m15, T_LONG, hist=idy.History({first.leg_id: 1}))
     assert again.action == "none" and any("already traded" in s["reason"] for s in again.setups)
     cool = evaluate(m15, T_LONG, hist=idy.History(last_exit_ms=T_LONG - M15))
     assert cool.action == "none" and any("cooldown" in s["reason"] for s in cool.setups)
@@ -527,7 +535,7 @@ def test_backtest_uses_the_live_decisions(tmp_path):
         h = rp["history"]
         again = idy.evaluate(p, rec["decision"]["t_ms"], sim.m15.upto(at_ms, p.need_15m()), sim.h1.upto(at_ms, p.need_1h()),
                              sim.h4.upto(at_ms, p.need_4h()), cost_unit_fn=lambda d, e: logged.get(d, e),
-                             history=idy.History(set(h["traded_legs"]), h["last_exit_ms"], h["entries_today"]),
+                             history=idy.History.from_legs(h["traded_legs"], h["last_exit_ms"], h["entries_today"]),
                              position_dir=rp["position_dir"])
         live = rec["decision"]
         assert (live["action"], live["direction"], live["setup"], live["leg_id"]) == \

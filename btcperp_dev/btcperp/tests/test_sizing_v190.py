@@ -46,7 +46,7 @@ def test_shipped_v190_values():
     assert (cfg.exits.sl_atr_multiple, cfg.exits.tp_atr_multiple, cfg.exits.atr_source) == (2.0, 3.0, "1h")   # v1.10.0
     assert (r.kill_drawdown_pct, r.kill_losing_streak_pct) == (95, 95)
     assert (r.equity_floor_pct_of_net_funded, r.permanent_floor_pct_of_cumulative_funded) == (5, 5)
-    assert r.permanent_floor_lowered_in == "1.10.0" and cfg.config_version == "2.0.0"
+    assert r.permanent_floor_lowered_in == "1.10.0" and cfg.config_version == "2.1.0"
     assert r.live_review_expectancy_floor_r is None
 
 

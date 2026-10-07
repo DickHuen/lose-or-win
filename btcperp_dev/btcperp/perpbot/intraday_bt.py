@@ -410,7 +410,7 @@ class Sim:
             counters["data_gap"] += 1
             return None
         day0 = t // DAY * DAY
-        hist.traded_legs = {leg for ms, leg in legs_time if ms >= t - 3 * DAY}
+        hist.leg_counts = idy.History.from_legs([leg for ms, leg in legs_time if ms >= t - 3 * DAY]).leg_counts
         hist.entries_today = sum(1 for ms, _ in legs_time if ms >= day0)
         dec = idy.evaluate(p, t, self.m15.upto(at, p.need_15m()), self.h1.upto(at, p.need_1h()),
                            self.h4.upto(at, p.need_4h()), cost_unit_fn=lambda d, e: self.cost_unit(d, e, t),
@@ -564,13 +564,13 @@ def replay(store: Any, cfg: Any, since_ms: int) -> dict[str, Any]:
 
     p = idy.Params.from_cfg(cfg)
     cache = CandleCache(store, None, backfill_days=float(cfg.intraday.cache_backfill_days))
-    rows = store.query("SELECT utc_day, action, data FROM decisions WHERE ts_ms >= ? AND utc_day LIKE '%/15m' "
-                       "ORDER BY id", [since_ms])
+    rows = store.query("SELECT utc_day, action, data, config_version FROM decisions WHERE ts_ms >= ? "
+                       "AND utc_day LIKE '%/15m' ORDER BY id", [since_ms])
     out = {"checked": 0, "same": 0, "skipped": 0, "different": []}
     for r in rows:
         rec = (r["data"] or {}).get("intraday") if isinstance(r["data"], dict) else None
-        if not rec or not rec.get("data_ok") or not rec.get("replay"):
-            out["skipped"] += 1
+        if not rec or not rec.get("data_ok") or not rec.get("replay") or r["config_version"] != cfg.config_version:
+            out["skipped"] += 1                   # older config version: other rule values, not comparable
             continue
         live = rec["decision"]
         t = int(live["t_ms"])
@@ -580,7 +580,7 @@ def replay(store: Any, cfg: Any, since_ms: int) -> dict[str, Any]:
         h4 = cache.load("4h", at - (p.need_4h() + 4) * 4 * H1, at)
         logged = {int(k): float(v) for k, v in (rec["replay"].get("cost_per_unit_by_dir") or {}).items()}
         h = rec["replay"].get("history") or {}
-        hist = idy.History(set(h.get("traded_legs") or []), h.get("last_exit_ms"), int(h.get("entries_today") or 0))
+        hist = idy.History.from_legs(h.get("traded_legs") or [], h.get("last_exit_ms"), int(h.get("entries_today") or 0))
         again = idy.evaluate(p, t, m15, h1, h4, cost_unit_fn=lambda d, e: logged.get(d, e), history=hist,
                              position_dir=int(rec["replay"].get("position_dir") or 0))
         out["checked"] += 1
