@@ -300,4 +300,46 @@ def render_intraday(record: dict[str, Any], cfg: Any, *, equity: float | None = 
                  f"止損 {_p(position.get('sl_price'))}，階段 {'保本／追蹤' if position.get('stage') == 'runner' else '初始'}")
     elif position:
         L.append("持倉：v2.0.0 之前開嘅倉，只靠交易所止損止賺，唔用日內規則")
+    L += render_forecast(record.get("forecast"))
+    return L
+
+
+REGIME_ZH = {"trend_up": "上升趨勢", "trend_down": "下跌趨勢", "range": "震盪", "volatile": "大波動"}
+CONF_ZH = {"high": "高", "medium": "中", "low": "低"}
+DYN_ACTION_ZH = {"HOLD": "繼續持有", "REDUCE": "減倉（平第一腳）", "CLOSE": "平倉", "TIGHTEN_STOP": "收緊止損"}
+
+
+def _pc(x: Any) -> str:
+    return "-" if x is None else f"{float(x) * 100:.0f}%"
+
+
+def render_forecast(f: dict[str, Any] | None) -> list[str]:
+    """v2.3.0: the forecast lines (analysis only; it never places or changes an order)."""
+    if not f:
+        return []
+    if f.get("error"):
+        return [f"預測：暫時冇（{f['error']}）— 交易照原本規則"]
+    L = [f"預測（只作分析，唔會落單）：{REGIME_ZH.get(str(f.get('regime')), f.get('regime'))}；"
+         f"可信程度 {CONF_ZH.get(str(f.get('confidence')), f.get('confidence'))}（相似情況 {f.get('passage_n')} 次）"]
+    rg = f.get("ranges") or {}
+    parts = [f"{k} 分鐘 {_p(v.get('low'))}–{_p(v.get('high'))}" for k, v in rg.items() if v.get("low") is not None]
+    if parts:
+        L.append("80% 價格區間：" + "；".join(parts))
+    atr = float(f.get("atr1h") or 0)
+    L.append(f"先升定先跌 {atr:.0f} 美元（1 個 1 小時 ATR，12 小時內）：先升 {_pc(f.get('p_up_first'))}，先跌 "
+             f"{_pc(f.get('p_down_first'))}。注意：歷史驗證顯示方向概率同擲毫差唔多，只供參考")
+    up, dn = (f.get("reach") or {}).get("up") or {}, (f.get("reach") or {}).get("down") or {}
+    L.append("12 小時內 BTC 再郁 500／1,000／2,000 美元嘅機會：升 " + "／".join(_pc(up.get(k)) for k in ("500", "1000", "2000"))
+             + "；跌 " + "／".join(_pc(dn.get(k)) for k in ("500", "1000", "2000")))
+    L.append(f"一般再升 {_p(f.get('up_room_usd'))} 美元（上望 {_p(f.get('bull_target'))}），一般再跌 "
+             f"{_p(f.get('down_room_usd'))} 美元（下望 {_p(f.get('bear_target'))}）；阻力 {_p(f.get('resistance'))}，支持 "
+             f"{_p(f.get('support'))}；預測失效位 {_p(f.get('invalidation'))}")
+    for side, zh in (("top", "高位"), ("bottom", "低位")):
+        w = (f.get("warnings") or {}).get(side) or {}
+        if int(w.get("level") or 0):
+            L.append(f"{zh}預警：{w.get('level_zh')}（{'、'.join(w.get('signs') or []) or '結構破位'}；位 {_p(w.get('extreme'))}）"
+                     "— 預警唔係入場訊號")
+    sh = f.get("shadow")
+    if sh:
+        L.append(f"動態止盈（影子，唔會執行）：{DYN_ACTION_ZH.get(str(sh.get('action')), sh.get('action'))} — {sh.get('why')}")
     return L

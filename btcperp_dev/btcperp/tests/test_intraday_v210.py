@@ -22,7 +22,8 @@ RANGE = background(I0 + 200)
 V210 = dict(leg_min_atr=1.0, retrace_min=0.236, retrace_max=0.786, pullback_max_bars=12, reversal_window_hours=12,
             retest_zone_atr=0.5, reclaim_atr=0.5, range_enabled=True, range_min_atr=2.0, range_edge_atr=0.35,
             sl_min_atr1h=0.75, sl_min_pct=0.3, max_cost_r=0.35, room_recent_bars=8, cooldown_bars=1,
-            max_entries_per_day=12, max_entries_per_leg=2, tp1_r=1.0, trigger_clv_min=0.0, trigger_beyond="high_low")
+            max_entries_per_day=12, max_entries_per_leg=2, tp1_r=1.0, trigger_clv_min=0.0, trigger_beyond="high_low",
+            min_room_r=1.0, range_latest_edge=False, max_hold_hours=12, no_progress_hours=6)
 
 
 def shipped():
@@ -45,7 +46,7 @@ def ev(m15, t, p=None, hist=None):
 def test_v210_values_are_looser_and_the_owner_risk_is_unchanged():
     cfg = config_from_dict(shipped())
     ic, r, s = cfg.intraday, cfg.risk, cfg.strategy
-    assert cfg.config_version == "2.2.0"
+    assert cfg.config_version == "2.3.0"
     assert (ic.max_cost_r, ic.sl_min_pct, ic.sl_min_atr1h, ic.leg_min_atr, ic.retrace_min) == (0.35, 0.3, 0.75, 1.0, 0.236)
     assert (ic.range_enabled, ic.max_entries_per_leg, ic.max_entries_per_day, ic.cooldown_bars) == (True, 2, 12, 1)
     assert (ic.tp1_r, ic.tp2_r, ic.max_hold_hours) == (1.0, 3.0, 12)                 # exits unchanged

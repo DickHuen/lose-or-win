@@ -9,6 +9,8 @@
   preview [--equity USD]   (read-only: what the strategy would decide now; public data, no keys, no orders)
   intraday-backtest download|run [--days N]   (v2.0.0: the 15-minute rules on Binance history; never trades)
   intraday-replay [--days N]   (v2.0.0: recompute the stored live 15-minute decisions from the cached candles)
+  forecast-check [--days N]   (v2.3.0: walk-forward check of the forecast on the cached Binance 1h candles; read-only)
+  intraday-compare [--days N] [--proxy-1h]   (v2.3.0: variants A/B/C/C0/E and the older value sets; never trades)
 
 Every bot command: exclusive file lock, full logging, non-zero exit code on error.
 Alerts (including errors) are stored and shown on the dashboard; Windows notifications (and Telegram,
@@ -51,7 +53,8 @@ log = logging.getLogger("perpbot.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_LOCK, EXIT_SELFTEST, EXIT_CONFIRM = 0, 1, 3, 4, 5, 6
 NEEDS_EXCHANGE = {"decide", "manage", "status", "kill", "smoketest", "resume", "flowwatch", "snapshot"}
-NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest", "preview", "intraday-backtest", "intraday-replay"}
+NO_LOCK = {"dashboard", "schedule", "proxykey", "backtest", "preview", "intraday-backtest", "intraday-replay",
+           "forecast-check", "intraday-compare"}
 QUIET = {"snapshot"}              # dashboard convenience read: failures are logged, never alerted
 SNAPSHOT_LOCK_WAIT_SECONDS = 5.0  # a snapshot never queues behind a real run
 NEEDS_BINANCE = {"decide", "manage", "smoketest"}
@@ -59,7 +62,7 @@ TRADING = {"decide", "manage", "kill", "smoketest"}
 HEARTBEAT = {"decide", "manage"}
 # manual commands refused in a copy that is not the folder the scheduled tasks run in (review v1.2.0 item 16)
 GUARDED = {"pause", "unpause", "kill", "resume", "reasons", "status", "alerts", "smoketest", "flowwatch", "snapshot",
-           "dashboard", "proxykey", "backtest", "intraday-replay"}
+           "dashboard", "proxykey", "backtest", "intraday-replay", "forecast-check"}
 NOTIFY_WAIT_SECONDS = 15.0
 
 
@@ -126,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("--equity", type=float, default=100.0, help="start equity per run (default 100)")
     rp = sub.add_parser("intraday-replay", help="v2.0.0: recompute stored live 15-minute decisions (read-only)")
     rp.add_argument("--days", type=float, default=3.0, help="how many days back (default 3)")
+    fk = sub.add_parser("forecast-check", help="v2.3.0: walk-forward check of the forecast (read-only)")
+    fk.add_argument("--days", type=int, default=365, help="hours checked over the last N days (default 365)")
+    ic = sub.add_parser("intraday-compare", help="v2.3.0: forecast / dynamic-exit variants on history (never trades)")
+    ic.add_argument("--days", type=int, default=365, help="test period in days ending at the data's end (default 365)")
+    ic.add_argument("--equity", type=float, default=100.0, help="start equity per run (default 100)")
+    ic.add_argument("--proxy-1h", action="store_true",
+                    help="run the rules on the bot's cached 1h candles (a proxy for long periods without 15m data)")
     return p
 
 
@@ -424,6 +434,10 @@ def _run_unlocked(command: str, args: Any, paths: Paths, cfg: Any, calendar: Any
             return _run_intraday_backtest(args, paths, cfg, calendar, clock, factories)
         if command == "intraday-replay":
             return _run_intraday_replay(args, paths, cfg, clock)
+        if command == "forecast-check":
+            return _run_forecast_check(args, paths, cfg, clock)
+        if command == "intraday-compare":
+            return _run_intraday_compare(args, paths, cfg, calendar, clock)
         from perpbot import winsched
 
         if args.action == "show":
@@ -766,6 +780,91 @@ def _run_intraday_replay(args: Any, paths: Paths, cfg: Any, clock: Clock) -> int
     for d in res["different"][:50]:
         print(f"  {d['key']}: {d['diff']}")
     return EXIT_OK if not res["different"] else EXIT_ERROR
+
+
+def _cached_candles(paths: Paths, cfg: Any, clock: Clock, days_back: int) -> tuple[Any, Any, Any]:
+    """1h / 4h / 15m Binance candles from the bot's own cache (read-only)."""
+    from perpbot.candles import CandleCache
+    from perpbot.timeutil import to_ms
+
+    store = Store(paths.db_file, clock, cfg.config_version, code_version())
+    try:
+        cache = CandleCache(store, None, backfill_days=float(cfg.intraday.cache_backfill_days))
+        now = to_ms(clock.now())
+        a = now - days_back * 86_400_000
+        return cache.load("1h", a, now), cache.load("4h", a - 60 * 4 * 3_600_000, now), cache.load("15m", a, now)
+    finally:
+        store.close()
+
+
+def _run_forecast_check(args: Any, paths: Paths, cfg: Any, clock: Clock) -> int:
+    """v2.3.0: every hour of the last N days, the forecast from the samples finished by then, compared with what
+    happened next. Read-only; results in data/forecast/."""
+    from perpbot import forecast as fc
+    from perpbot import forecast_eval as fe
+    from perpbot import intraday as idy
+
+    if not paths.db_file.exists():
+        print("no database yet")
+        return EXIT_OK
+    fp = fc.FParams.from_cfg(cfg)
+    h1, h4, m15 = _cached_candles(paths, cfg, clock, int(args.days) + fp.calib_days + 30)
+    if len(h1) < 24 * 60:
+        print(f"only {len(h1)} cached 1h candles: let the bot run a few 15-minute runs first (it back-fills "
+              f"forecast.calib_days of 1h history), then try again")
+        return EXIT_OK
+    end = h1[-1].open_ms
+    start = max(h1[0].open_ms + 90 * 86_400_000, end - int(args.days) * 86_400_000)
+    res = fe.walk_forward(h1, h4, m15, idy.Params.from_cfg(cfg), fp, start, end)
+    text = fe.report_md(res, f"btcperp {code_version()} forecast check (walk-forward, cached Binance 1h)")
+    out = paths.data_dir / "forecast"
+    out.mkdir(parents=True, exist_ok=True)
+    f = out / f"forecast_check_{clock.now().strftime('%Y%m%d_%H%M%S')}.md"
+    f.write_text(text, encoding="utf-8")
+    print(text)
+    print(f"saved: {f}\nSend this file for review (never .env).")
+    return EXIT_OK
+
+
+def _run_intraday_compare(args: Any, paths: Paths, cfg: Any, calendar: Any, clock: Clock) -> int:
+    """v2.3.0: variants A / B / C / C0 / E and the older value sets on the same data (never trades). 15m data from
+    `intraday-backtest download`; --proxy-1h: the bot's cached 1h candles (rules run on 1h, flagged)."""
+    from perpbot import backtest as old_bt
+    from perpbot import intraday_bt as ibt
+    from perpbot import intraday_compare as icmp
+
+    if args.proxy_1h:
+        h1, h4, _ = _cached_candles(paths, cfg, clock, int(args.days) + 60)
+        if len(h1) < 24 * 90:
+            print(f"only {len(h1)} cached 1h candles: not enough for a proxy run")
+            return EXIT_OK
+        data = ibt.Data([], [], h1, h4, [])
+        start, end, base = h1[0].open_ms + 45 * ibt.DAY, h1[-1].open_ms + ibt.H1, "1h"
+    else:
+        try:
+            data, meta = ibt.load(paths.data_dir / "backtest_intraday")
+        except ibt.BacktestError as e:
+            print(f"{e} (windows\\Backtest_Intraday.bat downloads it)")
+            return EXIT_ERROR
+        end = int(meta["end_ms"])
+        start, base = max(int(meta["start_ms"]), end - int(args.days) * ibt.DAY), "15m"
+    try:
+        cal = old_bt.merged_calendar(cfg, paths.root, calendar)
+    except Exception as e:  # noqa: BLE001
+        log.warning("historical calendar unavailable (%s); live calendar only", e)
+        cal = calendar
+    data.releases = [int(e.release_utc.timestamp() * 1000) for e in cal.events]
+    rep = icmp.compare(cfg, data, start, end, base=base, equity=float(args.equity),
+                       segments=6 if base == "1h" else 3, progress=lambda m: print(m, flush=True))
+    out = paths.data_dir / "forecast"
+    out.mkdir(parents=True, exist_ok=True)
+    stem = out / f"compare_{base}_{clock.now().strftime('%Y%m%d_%H%M%S')}"
+    text = icmp.report_md(rep, f"btcperp {code_version()} variants ({'1h PROXY' if base == '1h' else '15m'})")
+    stem.with_suffix(".md").write_text(text, encoding="utf-8")
+    stem.with_suffix(".json").write_text(icmp.to_json(rep), encoding="utf-8")
+    print(text)
+    print(f"saved: {stem}.md\nSend the .md file for review (never .env).")
+    return EXIT_OK
 
 
 def _redacted_tail(path: Any, redactor: Any) -> str:

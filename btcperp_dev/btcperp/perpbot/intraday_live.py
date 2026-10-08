@@ -9,6 +9,9 @@ Order of a run (under the bot's file lock):
   4. decide: intraday.evaluate on the closed candles; costs from the real order book and the account's fee rate;
      entry only when flat, data complete, not late, not paused, no event blackout.
 Every decision (entry or not, with all reasons, score parts and costs) is stored in `decisions`.
+v2.3.0: each decide run also makes a forecast (forecast.py) and stores it in `forecasts`; with an open intraday
+position it logs what the dynamic exit WOULD do (shadow). Neither places, changes or cancels an order, and a failed
+forecast leaves the run exactly as v2.2.0.
 Idempotent per 15-minute candle: one decision row per candle key, deterministic client order ids per leg; a re-run
 of the same candle never places a second entry.
 """
@@ -22,6 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 from perpbot import costs
+from perpbot import forecast as fc
 from perpbot import intraday as idy
 from perpbot.candles import CandleCache, boundary, check
 from perpbot.exchange.base import (
@@ -131,10 +135,75 @@ class IntradayRunner:
                 manage = self.manage(trade, data, now_ms)
             else:
                 manage = ["position opened before v2.0.0: kept with its own exchange SL / TP (no intraday exits)"]
+        fcst = self.forecast(t_ms, now_ms, data) if entries else None
+        shadow = self.shadow_dynamic(data, fcst) if fcst else None
+        if shadow:
+            manage.append(f"dynamic exit shadow (NOT executed): {shadow['action']} - {shadow['why']}")
         out["manage"] = manage
-        out["decision"] = self.decide(t_ms, key, now_ms, data, entries=entries)
+        out["decision"] = self.decide(t_ms, key, now_ms, data, entries=entries, forecast=fcst, shadow=shadow)
+        if fcst is not None:
+            out["forecast"] = summary(fcst)
+            backfill = self.backfill_history(now_ms)          # network only after the decision / entry
+            self.e.store.insert_ignore("forecasts", bar=key, data={"forecast": fcst, "shadow": shadow,
+                                                                   "backfill": backfill})
         self.log_manage(manage, out)
         return out
+
+    # ================================================================ v2.3.0 forecast (analysis only)
+    def forecast(self, t_ms: int, now_ms: int, data: dict[str, Any]) -> dict[str, Any] | None:
+        """The forecast at this candle from the cached Binance candles (closed only). Never raises: a failure is
+        returned as {"error": ...} and changes nothing else in the run."""
+        if not bool(self.cfg.forecast.enabled):
+            return None
+        try:
+            fp = fc.FParams.from_cfg(self.cfg)
+            back = self.history_ms(fp)
+            h1 = self.cache.load("1h", now_ms - back, now_ms)
+            h4 = self.cache.load("4h", now_ms - back - (self.p.need_4h() + 8) * 4 * HOUR_MS, now_ms)
+            m15 = self.cache.load("15m", now_ms - back, now_ms)
+            out = fc.forecast_now(h1, h4, m15, t_ms + 60_000, self.p, fp)
+            if out is None:
+                return {"error": "not enough 1h history yet (back-filling)"}
+            out["data_ok"] = bool(data.get("ok"))
+            return out
+        except Exception as ex:  # noqa: BLE001 - analysis only: never stops a run
+            log.warning("forecast failed", exc_info=True)
+            return {"error": f"{type(ex).__name__}: {ex}"[:300]}
+
+    def history_ms(self, fp: fc.FParams) -> int:
+        return (fp.calib_days * 24 + fp.warmup_hours(self.p) + fp.outcome_hours() + 8) * HOUR_MS
+
+    def backfill_history(self, now_ms: int) -> dict[str, Any]:
+        """Older 1h / 4h candles for the forecast's frequencies (a few public requests a run until a year is stored),
+        after the run's decision so it never delays an entry. Never raises."""
+        try:
+            back = self.history_ms(fc.FParams.from_cfg(self.cfg))
+            extra = {"1h": 0, "4h": (self.p.need_4h() + 8) * 4 * HOUR_MS}     # as loaded by forecast()
+            return {iv: self.cache.backfill_older(iv, now_ms - back - extra[iv], now_ms) for iv in ("1h", "4h")}
+        except Exception as ex:  # noqa: BLE001
+            log.warning("history back-fill failed", exc_info=True)
+            return {"error": f"{type(ex).__name__}: {ex}"[:200]}
+
+    def shadow_dynamic(self, data: dict[str, Any], fcst: dict[str, Any]) -> dict[str, Any] | None:
+        """What the dynamic exit would do now (logged, never executed in v2.3.0)."""
+        if str(self.cfg.dynamic_exit.mode) != "shadow" or fcst.get("error") or not data.get("ok") or not data["m15"]:
+            return None
+        trade = self.e.rec.open_trade()
+        if not trade or not trade.get("intraday") or self.e.ex.get_account().position(self.e.instrument().id) is None:
+            return None
+        try:
+            state = self.manage_state(trade, data)
+            atr1h = idy.last_atr(data["h1"], self.p.atr_period) or 0.0
+            dp = idy.DynParams.from_cfg(self.cfg)
+            leg_a = bool(trade.get("two_legs")) and not trade.get("tp1_done")
+            act, why, new = idy.dynamic_action(state, fcst, data["m15"][-1].close, atr1h, leg_a, dp)
+            off = float(trade.get("bn_offset") or 0.0)
+            return {"action": act, "why": why, "new_stop_bn": new, "new_stop_pm": (new + off) if new else None,
+                    "hold_extended": idy.hold_extended(state, fcst, dp), "executed": False,
+                    "trade_uid": trade.get("trade_uid")}
+        except Exception as ex:  # noqa: BLE001
+            log.warning("dynamic exit shadow failed", exc_info=True)
+            return {"action": "HOLD", "why": f"shadow failed: {type(ex).__name__}", "executed": False}
 
     # ================================================================ history (no chasing)
     def history(self, now_ms: int) -> idy.History:
@@ -175,7 +244,8 @@ class IntradayRunner:
                                funding_rate_hourly=mk["funding_hourly"], funding_hold_hours=float(self.ic.funding_hold_hours))
 
     # ================================================================ decide
-    def decide(self, t_ms: int, key: str, now_ms: int, data: dict[str, Any], *, entries: bool) -> dict[str, Any]:
+    def decide(self, t_ms: int, key: str, now_ms: int, data: dict[str, Any], *, entries: bool,
+               forecast: dict[str, Any] | None = None, shadow: dict[str, Any] | None = None) -> dict[str, Any]:
         e = self.e
         cfg = self.cfg
         if not entries:                                     # `manage`: never opens, never takes the candle's decision
@@ -253,6 +323,10 @@ class IntradayRunner:
                                   "decision": dec.to_dict(), "blocks": blocks, "tier_fraction": frac,
                                   "data_ok": data["ok"], "data_problems": data["problems"][:10],
                                   "replay": replay_inputs}
+        if forecast is not None:
+            record["forecast"] = summary(forecast)
+            if shadow:
+                record["forecast"]["shadow"] = {k: shadow.get(k) for k in ("action", "why", "new_stop_pm", "hold_extended")}
         if mk is not None:
             record["market"] = {"mark": mk["ticker"].mark, "best_bid": mk["book"].bids[0][0], "best_ask": mk["book"].asks[0][0],
                                 "funding_hourly": mk["funding_hourly"], "fee_rate": mk["fee_rate"],
@@ -531,6 +605,20 @@ class IntradayRunner:
         start = boundary(entry_ts, M15)
         return [c for c in data["m15"] if c.open_ms >= start]
 
+    def manage_state(self, trade: dict[str, Any], data: dict[str, Any]) -> idy.ManageState:
+        """The open intraday position as the exit rules see it (Binance price terms)."""
+        d = int(trade["direction"])
+        bars = self.bars_since(data, int(trade["entry_ts_ms"]))
+        entry_bn = float(trade.get("bn_entry") or trade["entry_price"])
+        off = float(trade.get("bn_offset") or 0.0)
+        best = max([c.high for c in bars], default=entry_bn) if d > 0 else min([c.low for c in bars], default=entry_bn)
+        worst = min([c.low for c in bars], default=entry_bn) if d > 0 else max([c.high for c in bars], default=entry_bn)
+        return idy.ManageState(direction=d, entry=entry_bn, r=float(trade.get("r_bn") or trade["sl_distance"]),
+                               entry_ms=int(trade["entry_ts_ms"]), invalidation=trade.get("invalidation_bn"),
+                               stage=str(trade.get("stage") or "initial"), stop=float(trade["sl_price"]) - off,
+                               best=best, worst=worst, two_legs=bool(trade.get("two_legs")),
+                               cost_unit=float(trade.get("cost_unit") or 0.0))
+
     def manage(self, trade: dict[str, Any], data: dict[str, Any], now_ms: int) -> list[str]:
         e = self.e
         p = self.p
@@ -561,16 +649,8 @@ class IntradayRunner:
                 e.alert("partial", f"TP1 hit: {a['qty']} closed near {a['tp']}; runner {b['qty']} keeps TP2 {b['tp']}")
                 acts.append("TP1 done")
         # --- bars since entry
-        bars = self.bars_since(data, int(trade["entry_ts_ms"]))
-        entry_bn = float(trade.get("bn_entry") or trade["entry_price"])
         off = float(trade.get("bn_offset") or 0.0)
-        best = max([c.high for c in bars], default=entry_bn) if d > 0 else min([c.low for c in bars], default=entry_bn)
-        worst = min([c.low for c in bars], default=entry_bn) if d > 0 else max([c.high for c in bars], default=entry_bn)
-        state = idy.ManageState(direction=d, entry=entry_bn, r=float(trade.get("r_bn") or trade["sl_distance"]),
-                                entry_ms=int(trade["entry_ts_ms"]), invalidation=trade.get("invalidation_bn"),
-                                stage=str(trade.get("stage") or "initial"), stop=float(trade["sl_price"]) - off,
-                                best=best, worst=worst, two_legs=bool(trade.get("two_legs")),
-                                cost_unit=float(trade.get("cost_unit") or 0.0))
+        state = self.manage_state(trade, data)
         inv_bars = data["h1"] if p.invalidation_timeframe == "1h" else data["m15"]
         last = idy.invalidation_bar(inv_bars, int(trade["entry_ts_ms"]), p) if data["fresh_15m"] else None
         reason, why = idy.exit_signal(state, last, now_ms, p, fresh=bool(data["ok"] and data["fresh_15m"]))
@@ -653,6 +733,19 @@ class IntradayRunner:
                 "intraday": {"bar": out.get("bar"), "decision": out.get("decision", {}).get("action"),
                              "data_ok": out.get("data_ok")}}
         e.store.insert("manage_log", state=data["state"], data=data)
+
+
+def summary(f: dict[str, Any]) -> dict[str, Any]:
+    """The forecast fields kept with the decision and shown in the analysis text."""
+    if f.get("error"):
+        return {"error": f["error"]}
+    keys = ("t_ms", "price", "atr1h", "direction", "trend", "regime", "ranges", "p_continuation", "p_reversal",
+            "p_up_first", "p_down_first", "passage_n", "confidence", "up_room_usd", "down_room_usd", "bull_target",
+            "bear_target", "reach", "invalidation", "resistance", "support", "near_high", "near_low")
+    out = {k: f.get(k) for k in keys}
+    out["warnings"] = {s: {k: (f.get("warnings") or {}).get(s, {}).get(k) for k in ("level", "level_zh", "signs", "extreme")}
+                       for s in ("top", "bottom")}
+    return out
 
 
 def _jsonable(d: dict[str, Any]) -> dict[str, Any]:

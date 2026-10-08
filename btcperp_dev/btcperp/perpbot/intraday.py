@@ -28,7 +28,7 @@ Inputs at a decision time T (a 15-minute boundary): Binance BTCUSDT 15m, 1h and 
    sl_max_pct. R = entry - stop.
 4. Room: distance to the nearest obstacle (confirmed 1h swing level in the last structure_lookback_hours, or the
    extreme of the last room_recent_bars 15m candles) beyond the entry; open_room_atr x ATR1h when there is none.
-   Entry needs room >= tp1_r x R (TP1 fits before the obstacle) and cost <= max_cost_r x R (costs.py).
+   Entry needs room >= min_room_r x R and cost <= max_cost_r x R (costs.py).
 5. No chasing: at most max_entries_per_leg entries per leg (the swing that defines the setup), cooldown_bars 15m
    candles after any exit, at most max_entries_per_day entries per UTC day.
 6. Exits (intraday_live / intraday_bt): two legs when the size allows - leg A takes TP1 = tp1_r R (tp1_fraction of
@@ -39,6 +39,12 @@ Inputs at a decision time T (a 15-minute boundary): Binance BTCUSDT 15m, 1h and 
    market. Time stop max_hold_hours; no-progress exit after no_progress_hours if MFE < no_progress_mfe_r R.
 7. Conviction score 0-100 (sizing only, through strategy.size_tiers): base by setup + trend efficiency or break depth
    + 4h context (aligned / neutral / against, never a block) + room + cost efficiency.
+8. v2.3.0 (owner 2026-10-08), backtest variants and the live shadow log only (forecast.py):
+   - early_reversal setup (`early=True`): a top (bottom) warning at level 2 "preparation" (forecast.Frame.warning)
+     and the 15m turn down (up): short (long) with the stop beyond the 24h extreme; same stop rules, cost and room
+     gates. A warning alone is never an entry.
+   - dynamic_action(): HOLD / REDUCE / CLOSE / TIGHTEN_STOP for an open position from the forecast and its
+     warnings (DynParams). Without a forecast it is always HOLD: the baseline exits above stay in charge.
 """
 
 from __future__ import annotations
@@ -82,6 +88,7 @@ class Params:
     tp1_fraction: float
     tp2_r: float
     room_recent_bars: int
+    min_room_r: float
     open_room_atr: float
     invalidation_timeframe: str
     trail_atr1h: float
@@ -96,6 +103,7 @@ class Params:
     range_enabled: bool
     range_min_atr: float
     range_edge_atr: float
+    range_latest_edge: bool
     score_base_continuation: float
     score_base_reversal: float
     score_base_range: float
@@ -151,7 +159,7 @@ class Structure:
 
 @dataclass
 class Setup:
-    kind: str                       # continuation | reversal
+    kind: str                       # continuation | reversal | range | early_reversal
     direction: int
     leg_id: str
     ok: bool
@@ -406,8 +414,11 @@ def range_fade(st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) ->
         s.reason = f"range {width / atr1h:.2f} ATR1h < {p.range_min_atr}: too narrow"
         return s
     recent = m15[-p.pullback_max_bars:]
-    near_low = min(c.low for c in recent) <= bot + p.range_edge_atr * atr1h
-    near_high = max(c.high for c in recent) >= top - p.range_edge_atr * atr1h
+    lows_at = [i for i, c in enumerate(recent) if c.low <= bot + p.range_edge_atr * atr1h]
+    highs_at = [i for i, c in enumerate(recent) if c.high >= top - p.range_edge_atr * atr1h]
+    near_low, near_high = bool(lows_at), bool(highs_at)
+    if near_low and near_high and p.range_latest_edge:      # v2.3.0: fade the edge touched last
+        near_low, near_high = lows_at[-1] > highs_at[-1], highs_at[-1] > lows_at[-1]
     if near_low == near_high:
         s.reason = "range: price not at one edge" if not near_low else "range: both edges touched (too volatile)"
         return s
@@ -431,6 +442,28 @@ def range_fade(st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) ->
     s.invalidation = ext
     s.stop = ext
     return s
+
+
+def early_reversal(warnings: dict[str, Any], m15: Sequence[Candle], p: Params) -> list[Setup]:
+    """v2.3.0 (backtest variant E): the other way after a 'preparation' warning (forecast.py level 2) - a top that
+    turned down -> short, a bottom that turned up -> long - when the last 15m candle turns that way too."""
+    out: list[Setup] = []
+    for side, d in (("top", -1), ("bottom", 1)):
+        w = warnings.get(side) or {}
+        if int(w.get("level") or 0) != 2 or w.get("extreme") is None:
+            continue
+        s = Setup("early_reversal", d, f"E{d:+d}:{w.get('extreme_ms')}", False, "")
+        s.detail = {"extreme": w["extreme"], "signs": list(w.get("signs") or []), "warning": w.get("note")}
+        ok, why = _turn(m15[-2], m15[-1], d, p.trigger_clv_min, p.trigger_beyond == "close")
+        if not ok:
+            s.reason = why
+        elif (m15[-1].close - float(w["extreme"])) * d <= 0:
+            s.reason = "early reversal: price beyond the extreme"
+        else:
+            s.ok, s.reason = True, f"early reversal: {side} warning level 2, 15m turned"
+            s.invalidation = s.stop = float(w["extreme"])
+        out.append(s)
+    return out
 
 
 def obstacle(d: int, entry: float, st: Structure, m15: Sequence[Candle], atr1h: float, p: Params) -> tuple[float | None, float]:
@@ -462,11 +495,11 @@ def score(kind: str, d: int, st: Structure, setup: Setup, ctx: dict[str, Any], r
           p: Params) -> tuple[float, dict[str, float]]:
     comp: dict[str, float] = {}
     comp["setup"] = {"continuation": p.score_base_continuation, "reversal": p.score_base_reversal,
-                     "range": p.score_base_range}[kind]
+                     "range": p.score_base_range, "early_reversal": p.score_base_reversal}[kind]
     if kind == "continuation":
         comp["trend"] = p.score_trend * clip(st.efficiency * d, 0.0, 1.0)
-    elif kind == "range":
-        comp["trend"] = 0.0                       # no trend to follow in a range
+    elif kind in ("range", "early_reversal"):
+        comp["trend"] = 0.0                       # no trend to follow in a range / before the structure breaks
     else:
         depth = float(setup.detail.get("break_depth_atr") or 0.0)
         comp["trend"] = p.score_trend * clip(depth / p.break_full_atr, 0.0, 1.0) if p.break_full_atr else 0.0
@@ -498,9 +531,11 @@ class History:
 
 
 def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], h4: Sequence[Candle], *,
-             cost_unit_fn: Any, history: History, position_dir: int = 0) -> Decision:
+             cost_unit_fn: Any, history: History, position_dir: int = 0, warnings: dict[str, Any] | None = None,
+             early: bool = False) -> Decision:
     """The decision at T from candles closed at or before T. `cost_unit_fn(direction, entry)` returns the expected
-    round-trip cost per unit of BTC (fees, spread / depth, slippage, funding) for that trade."""
+    round-trip cost per unit of BTC (fees, spread / depth, slippage, funding) for that trade. v2.3.0: `early` with
+    the forecast's `warnings` adds the early_reversal setup (backtest variant E)."""
     m15 = closed(m15, M15_MS, t_ms)
     h1 = closed(h1, H1_MS, t_ms)
     h4 = closed(h4, H4_MS, t_ms)
@@ -530,6 +565,8 @@ def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], 
         cands.append(reversal(st, m15, atr1h, t_ms, p))
     if not st.trend and p.range_enabled:
         cands.append(range_fade(st, m15, atr1h, p))
+    if early and warnings:
+        cands += early_reversal(warnings, m15, p)
     if not cands:
         dec.reasons.append("range: mixed swings and no recent structure break - no trade")
     for s in cands:
@@ -560,8 +597,8 @@ def evaluate(p: Params, t_ms: int, m15: Sequence[Candle], h1: Sequence[Candle], 
         if cost_r > p.max_cost_r + 1e-9:
             rec.update(ok=False, reason=f"costs {cost_r:.2f} R > {p.max_cost_r} R")
             continue
-        if room < p.tp1_r * r - 1e-9:
-            rec.update(ok=False, reason=f"room {room / r:.2f} R to {lvl} < TP1 {p.tp1_r} R")
+        if room < p.min_room_r * r - 1e-9:
+            rec.update(ok=False, reason=f"room {room / r:.2f} R to {lvl} < {p.min_room_r} R")
             continue
         sc, comp = score(s.kind, d, st, s, ctx, room / r, cost_r, p)
         dec.action, dec.direction, dec.setup, dec.leg_id = "enter", d, s.kind, s.leg_id
@@ -653,6 +690,67 @@ def next_stop(s: ManageState, atr1h: float, atr15: float, p: Params, tp1_done: b
     if s.stage == "runner" and not improved(s.direction, s.stop, target, atr15, p):
         return stage, None
     return stage, target
+
+
+# ---------------------------------------------------------------- v2.3.0 dynamic exit (backtest / live shadow)
+@dataclass(frozen=True)
+class DynParams:
+    mode: str                       # off | shadow (live: logged, never executed)
+    tp1_r: float                    # leg A target when the dynamic exit trades (baseline intraday.tp1_r)
+    tp2_r: float                    # leg B target (baseline intraday.tp2_r)
+    reduce_min_r: float             # REDUCE: warning against the position and open profit >= this R
+    close_min_r: float              # CLOSE: preparation (turned from the extreme) and open profit >= this R
+    tighten_trail_atr1h: float      # TIGHTEN_STOP: trail this x ATR1h behind the best price ...
+    tighten_min_mfe_r: float        # ... once the best move reached this R, on a warning
+    hold_extend_hours: float        # runner, no warning, similar situations continued at least as often: time stop
+
+    @classmethod
+    def from_cfg(cls, cfg: Any) -> "DynParams":
+        sec = cfg.dynamic_exit
+        return cls(**{f: getattr(sec, f) for f in cls.__dataclass_fields__})
+
+
+def dynamic_action(s: ManageState, fc: dict[str, Any] | None, price: float, atr1h: float, leg_a_open: bool,
+                   dp: DynParams) -> tuple[str, str, float | None]:
+    """(HOLD | REDUCE | CLOSE | TIGHTEN_STOP, why, new stop) for an open position at this run. The exchange stop,
+    the baseline exits and the kill switches stay in force whatever this says; without a forecast: HOLD."""
+    if not fc:
+        return "HOLD", "no forecast: baseline exits only", None
+    d = s.direction
+    w = fc["warnings"]["top" if d > 0 else "bottom"]
+    lvl = int(w.get("level") or 0)
+    open_r = (price - s.entry) * d / s.r if s.r else 0.0
+    mfe_r = (s.best - s.entry) * d / s.r if s.r else 0.0
+    signs = ", ".join(w.get("signs") or [])
+    if lvl >= 3:
+        return "CLOSE", f"structure broke against the position ({w.get('note')})", None
+    if lvl == 2 and open_r >= dp.close_min_r:
+        return "CLOSE", f"turned from the extreme with {open_r:.2f} R open profit ({signs})", None
+    if lvl >= 1 and leg_a_open and open_r >= dp.reduce_min_r:
+        return "REDUCE", f"warning near the extreme with {open_r:.2f} R open profit: take leg A ({signs})", None
+    if lvl >= 1 and mfe_r >= dp.tighten_min_mfe_r and atr1h > 0:
+        new = s.best - d * dp.tighten_trail_atr1h * atr1h
+        be = break_even(d, s.entry, s.cost_unit)
+        if (be - new) * d > 0:
+            new = be
+        if (new - s.stop) * d > 0 and (price - new) * d > 0:
+            return "TIGHTEN_STOP", f"warning ({signs}): stop to {new:.1f}", new
+    room = fc.get("up_room_usd") if d > 0 else fc.get("down_room_usd")
+    return "HOLD", (f"no warning against the position; typical further move {room:.0f} USD" if room is not None
+                    and lvl == 0 else f"warning level {lvl}, open profit {open_r:.2f} R: hold"), None
+
+
+def hold_extended(s: ManageState, fc: dict[str, Any] | None, dp: DynParams) -> bool:
+    """A runner may stay up to hold_extend_hours when nothing warns against it and similar situations continued
+    at least as often as they reversed."""
+    if not fc or s.stage != "runner":
+        return False
+    w = fc["warnings"]["top" if s.direction > 0 else "bottom"]
+    if int(w.get("level") or 0):
+        return False
+    fav = fc.get("p_up_first") if s.direction > 0 else fc.get("p_down_first")
+    adv = fc.get("p_down_first") if s.direction > 0 else fc.get("p_up_first")
+    return fav is not None and adv is not None and fav >= adv
 
 
 # ---------------------------------------------------------------- sizing (shared by live and backtest)

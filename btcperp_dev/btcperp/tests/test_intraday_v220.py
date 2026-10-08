@@ -17,8 +17,14 @@ from test_intraday_v200 import I0, REV, T_LONG, at, path
 from test_intraday_v210 import RANGE, V210
 
 
+# v2.2.0 shipped values that v2.3.0 changed (test_intraday_v230.py)
+V220 = dict(min_room_r=0.8, range_latest_edge=False, max_hold_hours=12, no_progress_hours=6)
+
+
 def shipped():
-    return shipped_intraday_config()
+    d = shipped_intraday_config()
+    d["intraday"].update(V220)
+    return d
 
 
 def params(**over):
@@ -27,10 +33,10 @@ def params(**over):
     return idy.Params.from_cfg(config_from_dict(d))
 
 
-def test_shipped_values():
+def test_v220_values():
     cfg = config_from_dict(shipped())
     ic, r = cfg.intraday, cfg.risk
-    assert cfg.config_version == "2.2.0"
+    assert cfg.config_version == "2.3.0"
     assert (ic.trigger_beyond, ic.trigger_clv_min, ic.tp1_r, ic.tp2_r) == ("close", -0.2, 0.8, 3.0)
     assert (ic.pullback_max_bars, ic.leg_min_atr, ic.retrace_min, ic.retrace_max) == (16, 0.75, 0.236, 0.886)
     assert (ic.range_min_atr, ic.range_edge_atr, ic.max_entries_per_leg, ic.cooldown_bars) == (1.5, 0.5, 3, 0)

@@ -35,7 +35,8 @@ STRICT_V200 = dict(leg_min_atr=1.5, retrace_min=0.382, pullback_max_bars=8, reve
                    reclaim_atr=0.25, range_enabled=False, sl_min_atr1h=1.0, sl_min_pct=0.5, max_cost_r=0.20,
                    room_recent_bars=16, cooldown_bars=2, max_entries_per_day=6, max_entries_per_leg=1,
                    retrace_max=0.786, tp1_r=1.0, trigger_clv_min=0.0, trigger_beyond="high_low", range_min_atr=2.0,
-                   range_edge_atr=0.35)
+                   range_edge_atr=0.35, min_room_r=1.0, range_latest_edge=False, max_hold_hours=12,
+                   no_progress_hours=6)
 
 
 def cfg_dict():
@@ -66,7 +67,7 @@ def evaluate(m15, t, cost=lambda d, e: e * 0.0014, hist=None, p=None):
 # ================================================================ config / schedule
 def test_shipped_config_is_intraday_with_the_owner_risk_settings():
     cfg = config_from_dict(cfg_dict())
-    assert cfg.config_version == "2.2.0" and cfg.intraday.enabled is True
+    assert cfg.config_version == "2.3.0" and cfg.intraday.enabled is True
     assert cfg.schedule.decide_times_hkt == [] and cfg.schedule.manage_times_hkt == []
     assert (cfg.schedule.intraday_every_minutes, cfg.schedule.intraday_offset_minutes) == (15, 1)
     r, s = cfg.risk, cfg.strategy                 # unchanged owner settings
@@ -207,7 +208,7 @@ def test_costs_too_high_for_the_stop_means_no_entry_and_the_reason_is_kept():
 
 def test_no_room_to_the_next_level_means_no_entry():
     m15 = path((I0 + 120, 87_400))
-    d = evaluate(m15, T_LONG, p=p_cfg(tp1_r=2.5, tp2_r=4.0, score_room_full_r=5.0))
+    d = evaluate(m15, T_LONG, p=p_cfg(tp1_r=2.5, tp2_r=4.0, score_room_full_r=5.0, min_room_r=2.5))
     assert d.action == "none" and any(s["reason"].startswith("room") for s in d.setups)
 
 
@@ -564,7 +565,7 @@ def test_backtest_is_deterministic_and_reports_the_approximations():
     rep = ibt.run_all(cfg, data, at(60), at(170))
     text = ibt.summary_md(rep, cfg)
     assert "approximation" in text and "STOP is assumed first" in text and "zero/owner" in text
-    assert set(rep["full"]) == {f"{s}/{z}" for s in ibt.SCENARIOS for z in ibt.SIZINGS}
+    assert set(rep["full"]) == {f"{s}/{z}" for s in ibt.RUN_ALL_SCENARIOS for z in ibt.SIZINGS}
 
 
 def test_backtest_costs_change_the_outcome_not_the_rules():

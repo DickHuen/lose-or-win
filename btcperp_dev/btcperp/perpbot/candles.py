@@ -120,6 +120,44 @@ class CandleCache:
         row = self.store.query(f"SELECT MAX(open_ms) AS m FROM {TABLES[interval]}")
         return int(row[0]["m"]) if row and row[0]["m"] is not None else None
 
+    def first_open(self, interval: str) -> int | None:
+        row = self.store.query(f"SELECT MIN(open_ms) AS m FROM {TABLES[interval]}")
+        return int(row[0]["m"]) if row and row[0]["m"] is not None else None
+
+    def backfill_older(self, interval: str, want_start_ms: int, now_ms: int, max_requests: int = 2) -> dict[str, Any]:
+        """v2.3.0: history for the forecast frequencies (forecast.calib_days): candles BEFORE the oldest stored one,
+        back to want_start_ms, at most max_requests x 1000 a run (a fresh install fills a year of 1h in a few runs).
+        Respects a stored Binance pause; never raises."""
+        out: dict[str, Any] = {"fetched": 0, "error": None}
+        until, _ = self.blocked_until()
+        if until > now_ms:
+            out["error"] = "Binance pause in force"
+            return out
+        step = INTERVAL_MS[interval]
+        first = self.first_open(interval)
+        if first is None or first <= want_start_ms + step:
+            return out
+        for _ in range(max_requests):
+            start = boundary(max(want_start_ms, first - 1000 * step), step)
+            try:
+                self.requests += 1
+                bars = [c for c in self.bn.klines_since(interval, start, now_ms, 1000) if c.open_ms < first]
+            except RateLimited as e:
+                self._record_backoff(e)
+                out["error"] = str(e)
+                break
+            except Exception as e:  # noqa: BLE001 - history for the forecast only
+                out["error"] = f"{interval}: {e}"
+                break
+            if not bars:
+                break
+            self.store.insert_many_ignore(TABLES[interval], (_row(c) for c in bars))
+            out["fetched"] += len(bars)
+            first = bars[0].open_ms
+            if first <= want_start_ms + step:
+                break
+        return out
+
     # ------------------------------------------------------------ incremental update
     def update(self, intervals: Sequence[str], now_ms: int) -> dict[str, Any]:
         """Fetch only candles after the newest stored one (or back-fill when empty / too old). Never raises:

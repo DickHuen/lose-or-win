@@ -3,6 +3,60 @@
 Each version ships as `btcperp_vX.Y.Z.zip`. Code version = `VERSION`; config version = `config_version`
 in `config/config.yaml`. Every log row records both, and reports never mix versions.
 
+## 2.3.0 - 2026-10-08 (config 2.3.0) - owner: forecast engine, early reversal warnings, dynamic profit taking
+
+The owner's v2.3.0 request ("每15分鐘重新思考：仲有幾多波幅可以食？而家走會唔會太早？", "判斷個個係高位...回落就做空，
+低位...反彈就做多"), phases 1-6. Details, all numbers and the rollback: `FORECAST.md` (Chinese).
+
+**Live trading is unchanged (the v2.2.0 rules and values).** New, analysis only:
+- `perpbot/forecast.py`: every 15-minute decide run computes a forecast from closed Binance candles and stores it
+  (`forecasts` table, decision record, analysis text): trend / regime, 10-90% price ranges for 15 / 30 / 60 / 120
+  minutes, which way a 1 x ATR1h move goes first, typical further move up / down (targets), chances of a 500 /
+  1,000 / 2,000 USD BTC move within 12 h, support / resistance / invalidation, confidence, and early reversal
+  warnings (level 1 warning, 2 preparation = turned from the extreme, 3 confirmed = 1h change of character).
+  Probabilities are frequencies of what followed similar situations (5 bucket features, mirror-symmetric) in the
+  last 365 days of 1h candles, counting only outcomes finished at the time; nothing fitted. A failed forecast changes
+  nothing else (tested: same exchange calls with and without it). 1h history is back-filled once (2 x 1,000 candles
+  per run, public data, respects a Binance pause).
+- Dynamic exit (`dynamic_exit`, mode "shadow"): HOLD / REDUCE / CLOSE / TIGHTEN_STOP is computed and logged for an
+  open position, never executed. Live execution, the forecast entry filter and early-reversal entries are refused
+  by the config check in this version (the owner's phase 6: only with supporting evidence - there is none).
+- Backtest variants (intraday_bt `variant=`, `intraday_compare.py`): A live rules, B + forecast entry filter,
+  C + dynamic exit (TP1 1.5 R, TP2 6 R, reduce / close / tighten on warnings, 24 h hold for a healthy runner),
+  C0 dynamic exit only, E + early-reversal entries; D = the v2.0.0 / v2.1.0 values. New statistics: profit factor,
+  average win / loss, trades per day, BTC move captured, trades capturing 500 / 1,000 / 2,000 USD (and how many
+  reached them), give-back, long / short, market state. Sizing `risk1` (1% at the stop, <= x5) as the conservative
+  plan; cost scenario `live_like` (4 + 1 bp). `--proxy-1h` runs the rules on 1h candles for long periods.
+- New commands: `forecast-check` (walk-forward check of the forecast on the cached 1h candles) and
+  `intraday-compare` (the variants); `windows\Forecast_Check.bat` runs both, read-only.
+- Two neutral intraday knobs from the "開多啲單" tests: `min_room_r` (0.8 = TP1, as before) and `range_latest_edge`
+  (false). Room 0.5 / 0.7 R and the latest-edge fade gave more trades and no better results on the owner's 21 real
+  days, so they are not used.
+
+Evidence (owner's Binance candles; all values fixed before the first run; every period shown):
+- Forecast walk-forward, 21,334 hours (2024-04-30 -> 2026-10-06): 60 / 120-minute 80% bands hit 79.2% / 78.9%;
+  500 / 1,000 / 2,000 USD within 12 h predicted 60 / 35 / 14%, happened 61 / 35 / 12%. Which way first: Brier skill
+  -0.02% (no better than the base rate; quarters -1.7% .. +2.7%). Top warnings: down first 53.5% (level 1), 49.2%
+  (2), 51.0% (3) vs 49.9% for all hours; bottom warnings 49.9 / 50.7 / 51.4%. Ranges and sizes are calibrated;
+  direction and tops / bottoms are not predictable with these rules.
+- Real 15m, 21 days: C beat A in all three weeks (live-like owner +15.8% vs -10.9%), ~30 trades - not evidence.
+- 1h proxy, 879 days, live-like cost: A -95.4% (owner, stopped at the 5% floor) / -61.6% (risk1, PF 0.61); C
+  -95.9% / -52.2% (PF 0.74); E -95.6% / -46.4% (PF 0.79); v2.1.0 / v2.0.0 values -89% / -68% (owner). All variants
+  lose in 5 of 6 segments; only 2026-05 -> 10 gains. Zero cost: A PF 0.90, C 0.98. Stop-first vs target-first inside
+  a candle changes these by 1-3 points. The dynamic exit captures 40-80% more 500 / 1,000 / 2,000 USD moves and
+  raises the profit factor, but no variant is profitable after costs.
+- Sizing check: `risk_per_trade_pct: 5` is not used while `notional_multiple_full_tier` is set; the loss at the stop
+  was 4.3% of equity (median) and up to 12.1% on the 21 real days, up to 35% in the proxy (positions up to x20).
+- Fix during development: the 15 / 30-minute outcomes looked up the 15m candle with minutes instead of milliseconds
+  (caught by a test before release; it only affected the displayed 15 / 30-minute ranges).
+- Tests: `test_forecast_v230.py` (+29): no future candle changes a forecast, live build == backtest incremental,
+  only finished samples, mirror symmetry, counted frequencies and fallback, warning levels 1 / 2 (mirrored) and none
+  without a move, every dynamic action both ways, no loosening, hold extension, entry filter, early reversal only
+  on level 2 + 15m turn and only when asked, variant A == live rules, failed forecast = baseline, precomputed ==
+  incremental runs, compare report, walk-forward report, live forecast stored with identical exchange calls, live
+  failure harmless, back-fill respects the pause, honest analysis text. `test_intraday_v230.py` (+7) for the two
+  knobs; older tests pin their own values. **Tests:** 485.
+
 ## 2.2.0 - 2026-10-07 (config 2.2.0) - owner: loosen further
 
 The owner after v2.1.0 (about one trade every two days on recent real data): "再放多啲" (loosen more).

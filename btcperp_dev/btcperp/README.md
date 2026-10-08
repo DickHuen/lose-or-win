@@ -1,5 +1,11 @@
 # btcperp - BTC-PERP bot for Polymarket Perps
 
+**v2.3.0: forecast engine (analysis only)** (`FORECAST.md` in Chinese, `perpbot/forecast.py`): every 15-minute run
+stores a forecast (price ranges, which way first, 500 / 1,000 / 2,000 USD move chances, early reversal warnings) and,
+with a position, what a dynamic exit would do (shadow, never executed). Live trading is the v2.2.0 rules. Walk-forward:
+ranges and move sizes calibrated, direction and warnings no better than the base rate; no backtest variant was
+profitable after costs over 879 days (1h proxy). `forecast-check`, `intraday-compare`, `windows\Forecast_Check.bat`.
+
 **v2.0.0 / v2.1.0: intraday rules every 15 minutes** (v2.1.0: looser values, range-edge fades, wick fix) (`intraday.enabled`; `INTRADAY.md` in Chinese, `perpbot/intraday.py`):
 direction from closed 1h swing structure (long / short mirror-symmetric; continuation pullbacks and failed-retest
 reversals; ranges skipped), structure stops at least as wide as max(1 ATR1h, 0.5%, cost / 0.20), two legs (TP1 1 R

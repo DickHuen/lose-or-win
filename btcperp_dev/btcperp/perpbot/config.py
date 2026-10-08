@@ -226,6 +226,8 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("intraday.tp2_r", _NUM, lambda v: v > 0),
     ("intraday.room_recent_bars", int, lambda v: 1 <= v <= 96),
     ("intraday.open_room_atr", _NUM, lambda v: v > 0),
+    ("intraday.min_room_r", _NUM, lambda v: v >= 0),
+    ("intraday.range_latest_edge", bool, None),
     ("intraday.invalidation_timeframe", str, lambda v: v in ("15m", "1h")),
     ("intraday.trail_atr1h", _NUM, lambda v: v > 0),
     ("intraday.trail_min_step_atr15", _NUM, lambda v: v >= 0),
@@ -255,6 +257,36 @@ _REQUIRED: list[tuple[str, Any, Any]] = [
     ("intraday.cost_book_depth", int, lambda v: v in (10, 100, 500, 1000)),
     ("intraday.event_block_before_minutes", _NUM, lambda v: v >= 0),
     ("intraday.event_block_after_minutes", _NUM, lambda v: v >= 0),
+    # v2.3.0 forecast / dynamic exit / early reversal (owner 2026-10-08)
+    ("forecast.enabled", bool, None),
+    ("forecast.calib_days", int, lambda v: 30 <= v <= 1100),
+    ("forecast.min_samples", int, lambda v: 10 <= v <= 5000),
+    ("forecast.horizons_min", list, lambda v: bool(v) and all(isinstance(x, int) and not isinstance(x, bool) and
+                                                              x in (15, 30, 45, 60, 120, 180, 240) for x in v)),
+    ("forecast.passage_hours", int, lambda v: 1 <= v <= 72),
+    ("forecast.passage_atr", _NUM, lambda v: v > 0),
+    ("forecast.excursion_hours", int, lambda v: 1 <= v <= 72),
+    ("forecast.usd_levels", list, lambda v: bool(v) and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                                            and x > 0 for x in v)),
+    ("forecast.extreme_hours", int, lambda v: 6 <= v <= 96),
+    ("forecast.near_extreme_atr", _NUM, lambda v: v >= 0),
+    ("forecast.run_min_atr", _NUM, lambda v: v >= 0),
+    ("forecast.prep_hours", int, lambda v: 1 <= v <= 48),
+    ("forecast.prep_max_atr", _NUM, lambda v: v >= 0),
+    ("forecast.warn_min_signs", int, lambda v: 1 <= v <= 7),
+    ("forecast.rsi_period", int, lambda v: 2 <= v <= 100),
+    ("forecast.vol_hours", int, lambda v: 10 <= v <= 500),
+    ("forecast.volume_hours", int, lambda v: 6 <= v <= 500),
+    ("forecast.entry_filter", bool, lambda v: v is False),        # v2.3.0: backtest variant only
+    ("dynamic_exit.mode", str, lambda v: v in ("off", "shadow")),  # v2.3.0: no live execution
+    ("dynamic_exit.tp1_r", _NUM, lambda v: v > 0),
+    ("dynamic_exit.tp2_r", _NUM, lambda v: v > 0),
+    ("dynamic_exit.reduce_min_r", _NUM, lambda v: v >= 0),
+    ("dynamic_exit.close_min_r", _NUM, lambda v: v >= 0),
+    ("dynamic_exit.tighten_trail_atr1h", _NUM, lambda v: v > 0),
+    ("dynamic_exit.tighten_min_mfe_r", _NUM, lambda v: v >= 0),
+    ("dynamic_exit.hold_extend_hours", _NUM, lambda v: 1 <= v <= 72),
+    ("early_reversal.enabled", bool, lambda v: v is False),        # v2.3.0: backtest variant only
 ]
 
 
@@ -372,6 +404,9 @@ def validate(data: dict[str, Any]) -> None:
                 errors.append("intraday stop minimums must be below the maximums (sl_min_* < sl_max_*)")
             if idy["no_progress_hours"] > idy["max_hold_hours"]:
                 errors.append("intraday.no_progress_hours must be <= intraday.max_hold_hours")
+            dx = data.get("dynamic_exit") or {}
+            if dx and not dx["tp1_r"] < dx["tp2_r"]:
+                errors.append("dynamic_exit.tp1_r must be < dynamic_exit.tp2_r")
             need_days = (idy["ctx_ema_slow"] + idy["ctx_slope_bars"] + 2) * 4 / 24.0 + 1
             if idy["cache_backfill_days"] < need_days:
                 errors.append(f"intraday.cache_backfill_days must be >= {need_days:.1f} (the 4h background needs it)")

@@ -17,13 +17,14 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Sequence
 
 from perpbot import costs
+from perpbot import forecast as fc
 from perpbot import intraday as idy
 from perpbot.candles import check
 from perpbot.exchange.base import Instrument
@@ -38,8 +39,12 @@ DAY = 86_400_000
 RUN_DELAY_MS = 60_000          # the live task runs at HH:01 / :16 / :31 / :46, one minute after the close
 
 # Cost scenarios, basis points PER SIDE (fee, slippage) - the same four as the Codex report of 2026-10-06.
-SCENARIOS = {"zero": (0.0, 0.0), "optimistic": (2.0, 1.0), "base": (4.0, 5.0), "stress": (8.0, 15.0)}
+SCENARIOS = {"zero": (0.0, 0.0), "optimistic": (2.0, 1.0), "base": (4.0, 5.0), "stress": (8.0, 15.0),
+             "live_like": (4.0, 1.0)}   # v2.3.0: live_like = the account's taker fee and a tight book (comparisons)
+RUN_ALL_SCENARIOS = ("zero", "optimistic", "base", "stress")
 SIZINGS = ("owner", "risk3")    # owner = config position map x3..x20; risk3 = 3% risk at the stop, position <= 10x
+# v2.3.0 comparisons also: risk1 = 1% risk at the stop, position <= 5x (the conservative plan); live_like cost
+SIZINGS_ALL = ("owner", "risk3", "risk1")
 
 APPROXIMATIONS = [
     "Prices are Binance BTCUSDT spot, not Polymarket BTC-USD: the basis, Polymarket's own book depth, its stop "
@@ -197,6 +202,11 @@ class Trade:
     r_multiple: float = 0.0
     mfe_r: float = 0.0
     mae_r: float = 0.0
+    # v2.3.0
+    regime: str = ""
+    captured_usd: float = 0.0       # BTC price move captured per BTC (average exit - entry, in the trade direction)
+    mfe_usd: float = 0.0            # best BTC move available while open
+    dyn: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -213,9 +223,18 @@ class Open:
     tp1_done: bool = False
 
 
+VARIANTS = {"A": {}, "B": {"filter": True}, "C": {"filter": True, "dynamic": True}, "C0": {"dynamic": True},
+            "E": {"filter": True, "dynamic": True, "early": True}}
+
+
 class Sim:
+    """`variant` (v2.3.0): filter = forecast entry filter (B), dynamic = dynamic exit (C), early = early-reversal
+    entries (E); default all off = the live rules. `base` "1h" runs the same rules on 1h candles instead of 15m (a
+    PROXY for long periods without 15m history: pullback windows etc. count 1h candles; flagged in every report)."""
+
     def __init__(self, cfg: Any, data: Data, scenario: str, sizing: str, start_equity: float,
-                 inst: Instrument | None = None) -> None:
+                 inst: Instrument | None = None, variant: dict[str, bool] | None = None, base: str = "15m",
+                 forecasts: dict[int, Any] | None = None) -> None:
         self.cfg = cfg
         self.p = idy.Params.from_cfg(cfg)
         self.ic = cfg.intraday
@@ -223,11 +242,21 @@ class Sim:
         self.scenario, self.sizing = scenario, sizing
         self.start_equity = float(start_equity)
         self.inst = inst or instrument()
-        self.m15 = Series(data.m15, M15)
+        self.base = base
+        self.step = M15 if base == "15m" else H1
+        self.m15 = Series(data.m15 if base == "15m" else data.h1, self.step)
         self.h1 = Series(data.h1, H1)
         self.h4 = Series(data.h4, 4 * H1)
-        self.path_res = "5m" if data.m5 else "15m"
-        self.path = Series(data.m5, M5) if data.m5 else self.m15
+        self.path_res = "5m" if (data.m5 and base == "15m") else base
+        self.path = Series(data.m5, M5) if (data.m5 and base == "15m") else self.m15
+        self.variant = dict(variant or {})
+        self.dp = idy.DynParams.from_cfg(cfg)
+        self.fp = fc.FParams.from_cfg(cfg)
+        self.data = data
+        self.inc: fc.Incremental | None = None
+        self._fc_t: int | None = None
+        self._fc: dict[str, Any] | None = None
+        self.pre = forecasts                  # precomputed {run time: forecast} shared by many runs (same numbers)
         self.fund_t = [x[0] for x in data.funding]
         self.fund_r = [x[1] for x in data.funding]
         self.releases = sorted(data.releases)
@@ -250,10 +279,27 @@ class Sim:
                                   funding_hold_hours=float(self.ic.funding_hold_hours), name=self.scenario)
         return est.per_unit(entry)
 
+    def forecast(self, t: int) -> dict[str, Any] | None:
+        """The forecast the live bot would show at this run (same function, finished samples only)."""
+        if self.pre is not None:
+            return self.pre.get(t)
+        if self._fc_t == t:
+            return self._fc
+        if self.inc is None:
+            self.inc = fc.Incremental(fc.Frame(self.data.h1, self.data.h4,
+                                               self.data.m15 if self.base == "15m" else None, self.p, self.fp))
+        at = t + RUN_DELAY_MS
+        try:
+            self._fc = self.inc.forecast(at, m15=self.m15.upto(at, 8) if self.base == "15m" else None)
+        except Exception:  # noqa: BLE001 - like live: a failed forecast means the baseline rules only
+            self._fc = None
+        self._fc_t = t
+        return self._fc
+
     def data_ok(self, t_ms: int) -> bool:
         at = t_ms + RUN_DELAY_MS
         p = self.p
-        return (check(self.m15.upto(at, p.need_15m()), "15m", p.need_15m(), at).ok
+        return (check(self.m15.upto(at, p.need_15m()), self.base, p.need_15m(), at).ok
                 and check(self.h1.upto(at, p.need_1h()), "1h", p.need_1h(), at).ok
                 and check(self.h4.upto(at, p.need_4h()), "4h", p.need_4h(), at).ok)
 
@@ -309,6 +355,9 @@ class Sim:
         t.reason = last if last == "TP1" or "TP1" not in labels else f"TP1+{last}"
         t.mfe_r = max((o.best - t.entry) * d, 0.0) / t.r if t.r else 0.0
         t.mae_r = max((t.entry - o.worst) * d, 0.0) / t.r if t.r else 0.0
+        q = sum(x["qty"] for x in t.exits)
+        t.captured_usd = (sum((x["price"] - t.entry) * x["qty"] for x in t.exits) * d / q) if q else 0.0
+        t.mfe_usd = max((o.best - t.entry) * d, 0.0)
         equity[0] += t.net
         return t
 
@@ -325,8 +374,10 @@ class Sim:
                     "stopped_floor": 0}
         rejects: dict[str, int] = {}
         floor = self.start_equity * float(self.cfg.risk.equity_floor_pct_of_net_funded) / 100.0
-        t = (start_ms + M15 - 1) // M15 * M15
+        step = self.step
+        t = (start_ms + step - 1) // step * step
         prev = t
+        self.inc, self._fc_t, self._fc = None, None, None
         while t < end_ms:
             if o is not None:
                 gone = False
@@ -352,7 +403,7 @@ class Sim:
             peak = max(peak, equity[0])
             max_dd = max(max_dd, (peak - equity[0]) / peak * 100.0 if peak > 0 else 0.0)
             prev = t
-            t += M15
+            t += step
         if o is not None:
             px = self.path.open_at(end_ms) or o.t.entry
             self._close_all(o, px, end_ms, "end_of_test", equity)
@@ -363,7 +414,7 @@ class Sim:
     def manage(self, o: Open, t: int, equity: list[float], trades: list[Trade], hist: idy.History) -> Open | None:
         p = self.p
         d = o.t.direction
-        bars = [c for c in self.m15.between(o.t.entry_ms // M15 * M15, t)]
+        bars = [c for c in self.m15.between(o.t.entry_ms // self.step * self.step, t)]
         for c in bars:
             o.best = max(o.best, c.high) if d > 0 else min(o.best, c.low)
             o.worst = min(o.worst, c.low) if d > 0 else max(o.worst, c.high)
@@ -376,7 +427,12 @@ class Sim:
         if px is None:
             return o
         fresh = self.data_ok(t)                   # like live: stale candles -> only the time stop, no stop moves
-        reason, _ = idy.exit_signal(st, last, t + RUN_DELAY_MS, p, fresh=fresh)
+        dyn = bool(self.variant.get("dynamic"))
+        f = self.forecast(t) if (dyn and fresh) else None
+        pe = p
+        if dyn and idy.hold_extended(st, f, self.dp):
+            pe = replace(p, max_hold_hours=max(p.max_hold_hours, float(self.dp.hold_extend_hours)))
+        reason, _ = idy.exit_signal(st, last, t + RUN_DELAY_MS, pe, fresh=fresh)
         if reason:
             self._close_all(o, px, t, reason, equity)
             trades.append(self.finish(o, equity, t))
@@ -388,6 +444,25 @@ class Sim:
         atr15 = idy.last_atr(self.m15.upto(t + RUN_DELAY_MS, p.need_15m()), p.atr_period)
         if not atr1h or not atr15:
             return o
+        if dyn and f is not None:
+            act, why, new_dyn = idy.dynamic_action(st, f, px, atr1h, o.left_a > 0, self.dp)
+            if act == "CLOSE":
+                o.t.dyn.append(f"CLOSE: {why}")
+                self._close_all(o, px, t, "dyn_close", equity)
+                trades.append(self.finish(o, equity, t))
+                hist.last_exit_ms = t
+                return None
+            if act == "REDUCE":
+                o.t.dyn.append(f"REDUCE: {why}")
+                self._exit(o, o.left_a, px, t, "dyn_reduce", equity)
+                o.left_a = 0.0
+                o.tp1_done = True                 # like TP1: the runner's stop goes to break-even next
+                st.stage = o.stage
+            elif act == "TIGHTEN_STOP" and new_dyn is not None:
+                o.t.dyn.append(f"TIGHTEN_STOP: {why}")
+                o.stop = new_dyn
+                o.stage = "runner"
+                st.stop, st.stage = new_dyn, "runner"
         stage, new = idy.next_stop(st, atr1h, atr15, p, o.tp1_done)
         o.stage = stage
         if new is None:
@@ -412,9 +487,17 @@ class Sim:
         day0 = t // DAY * DAY
         hist.leg_counts = idy.History.from_legs([leg for ms, leg in legs_time if ms >= t - 3 * DAY]).leg_counts
         hist.entries_today = sum(1 for ms, _ in legs_time if ms >= day0)
+        f = self.forecast(t) if (self.variant.get("filter") or self.variant.get("early")) else None
         dec = idy.evaluate(p, t, self.m15.upto(at, p.need_15m()), self.h1.upto(at, p.need_1h()),
                            self.h4.upto(at, p.need_4h()), cost_unit_fn=lambda d, e: self.cost_unit(d, e, t),
-                           history=hist)
+                           history=hist, warnings=(f or {}).get("warnings"), early=bool(self.variant.get("early")))
+        if dec.action == "enter" and self.variant.get("filter"):
+            veto = fc.entry_veto(f, dec.direction)
+            if veto:
+                key = f"forecast filter: {veto[:60]}"
+                rejects[key] = rejects.get(key, 0) + 1
+                counters["forecast_vetoed"] = counters.get("forecast_vetoed", 0) + 1
+                return None
         if dec.action != "enter":
             for s in dec.setups:
                 key = f"{s['kind']}: {re.sub(r'[-+]?[0-9][0-9.,]*', '#', str(s['reason']))[:70]}"
@@ -439,7 +522,8 @@ class Sim:
             sz = idy.position_size(self.cfg, eq, tier_fraction(dec.score, self.cfg.strategy), entry, r, self.inst)
             qty, lev, mult = sz["qty"], int(sz["leverage"]), float(sz["multiple"])
         else:
-            q = min(eq * 0.03 / r, eq * 10.0 / entry) if r > 0 else 0.0
+            rp, cap = (0.01, 5.0) if self.sizing == "risk1" else (0.03, 10.0)
+            q = min(eq * rp / r, eq * cap / entry) if r > 0 else 0.0
             qty = quantize_qty(q, self.inst.quantity_decimals)
             mult = float(qty) * entry / eq if eq else 0.0
             lev = max(1, math.ceil(mult / (float(self.cfg.risk.max_margin_use_pct) / 100.0)))
@@ -454,12 +538,35 @@ class Sim:
         legs = dict(idy.split_legs(qty, entry, self.inst, float(self.ic.tp1_fraction)))
         qa, qb = float(legs.get("A", Decimal(0))), float(legs["B"])
         two = qa > 0
+        dyn = bool(self.variant.get("dynamic"))
+        tp1_r = float(self.dp.tp1_r if dyn else self.ic.tp1_r)
+        tp2_r = float(self.dp.tp2_r if dyn else self.ic.tp2_r)
         tr = Trade(d, str(dec.setup), str(dec.leg_id), dec.score, t, entry, qa, qb, r, entry - d * r,
-                   (entry + d * float(self.ic.tp1_r) * r) if two else None, entry + d * float(self.ic.tp2_r) * r,
+                   (entry + d * tp1_r * r) if two else None, entry + d * tp2_r * r,
                    mult, lev, liq, eq, float(dec.cost_r or 0.0))
+        rf = self.forecast(t) if (self.variant or self.pre is not None) else None
+        tr.regime = str((rf or {}).get("regime") or "")
         tr.fees += self.fee(entry, qa + qb)
         legs_time.append((t, str(dec.leg_id)))
         return Open(tr, tr.stop0, "initial", dec.invalidation, entry, entry, float(dec.cost_per_unit or 0.0), qa, qb)
+
+
+def precompute_forecasts(cfg: Any, data: Data, start_ms: int, end_ms: int, base: str = "15m") -> dict[int, Any]:
+    """The forecast at every run time of [start, end) - one pass, the same values each Sim would compute."""
+    p, fp = idy.Params.from_cfg(cfg), fc.FParams.from_cfg(cfg)
+    step = M15 if base == "15m" else H1
+    m15 = Series(data.m15, M15) if base == "15m" else None
+    inc = fc.Incremental(fc.Frame(data.h1, data.h4, data.m15 if base == "15m" else None, p, fp))
+    out: dict[int, Any] = {}
+    t = (start_ms + step - 1) // step * step
+    while t < end_ms:
+        at = t + RUN_DELAY_MS
+        try:
+            out[t] = inc.forecast(at, m15=m15.upto(at, 8) if m15 is not None else None)
+        except Exception:  # noqa: BLE001
+            out[t] = None
+        t += step
+    return out
 
 
 # ---------------------------------------------------------------- statistics / report
@@ -482,13 +589,33 @@ def stats(res: dict[str, Any]) -> dict[str, Any]:
         "avg_multiple": sum(t.multiple for t in tr) / n,
     })
     for key, fn in (("by_setup", lambda t: t.setup), ("by_side", lambda t: "long" if t.direction > 0 else "short"),
-                    ("by_exit", lambda t: t.reason)):
+                    ("by_exit", lambda t: t.reason), ("by_regime", lambda t: t.regime or "-")):
         groups: dict[str, list[Trade]] = {}
         for t in tr:
             groups.setdefault(fn(t), []).append(t)
         out[key] = {k: {"trades": len(v), "avg_net_r": sum(x.r_multiple for x in v) / len(v),
-                        "net": sum(x.net for x in v)} for k, v in sorted(groups.items())}
+                        "net": sum(x.net for x in v), "profit_factor": profit_factor(v),
+                        "win_rate_pct": sum(1 for x in v if x.net > 0) / len(v) * 100.0} for k, v in sorted(groups.items())}
+    # v2.3.0 (owner 2026-10-08): money and BTC-move statistics
+    losses = [t for t in tr if t.net <= 0]
+    out.update({
+        "profit_factor": profit_factor(tr),
+        "avg_win_usd": sum(t.net for t in wins) / len(wins) if wins else 0.0,
+        "avg_loss_usd": sum(t.net for t in losses) / len(losses) if losses else 0.0,
+        "avg_captured_usd": sum(t.captured_usd for t in tr) / n,
+        "avg_mfe_usd": sum(t.mfe_usd for t in tr) / n,
+        "avg_giveback_usd": sum(t.mfe_usd - t.captured_usd for t in tr) / n,
+        "captured": {str(u): sum(1 for t in tr if t.captured_usd >= u) for u in (500, 1000, 2000)},
+        "available": {str(u): sum(1 for t in tr if t.mfe_usd >= u) for u in (500, 1000, 2000)},
+        "dyn_actions": {k: sum(1 for t in tr for x in t.dyn if x.startswith(k)) for k in ("REDUCE", "CLOSE", "TIGHTEN_STOP")},
+    })
     return out
+
+
+def profit_factor(tr: Sequence[Trade]) -> float | None:
+    gain = sum(t.net for t in tr if t.net > 0)
+    loss = -sum(t.net for t in tr if t.net < 0)
+    return gain / loss if loss > 0 else (None if gain <= 0 else float("inf"))
 
 
 def config_hash(cfg: Any) -> str:
@@ -505,7 +632,7 @@ def run_all(cfg: Any, data: Data, start_ms: int, end_ms: int, start_equity: floa
                            "data": {iv: {"bars": len(b), "gaps": len(gaps(b, STEP[iv]))}
                                     for iv, b in (("5m", data.m5), ("15m", data.m15), ("1h", data.h1), ("4h", data.h4))}}
     trades: dict[str, list[dict[str, Any]]] = {}
-    for sc in SCENARIOS:
+    for sc in RUN_ALL_SCENARIOS:
         for sz in SIZINGS:
             res = Sim(cfg, data, sc, sz, start_equity).run(start_ms, end_ms)
             out["full"][f"{sc}/{sz}"] = stats(res)
